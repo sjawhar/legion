@@ -51,6 +51,7 @@ func requirementOf(t *testing.T, coverage model.IssueCoverage, blockID string) m
 // A requirement the spec marks is flagged until some check serves it, and the read names each
 // requirement in document order with its reference and its words.
 func TestCoverageFlagsARequirementWithNoCheckUntilACheckServesIt(t *testing.T) {
+	t.Parallel()
 	handler, _, _ := newTestServer(t, testServerOptions{})
 	issue := createInteractionIssue(t, handler, "COV", "Coverage", twoRequirements)
 
@@ -84,6 +85,7 @@ func TestCoverageFlagsARequirementWithNoCheckUntilACheckServesIt(t *testing.T) {
 // A check of a descendant issue, at any status, covers the root's requirement, and deleting that
 // check brings the flag back.
 func TestCoverageCountsADescendantsCheckAndFlagsAgainWhenItIsDeleted(t *testing.T) {
+	t.Parallel()
 	handler, _, _ := newTestServer(t, testServerOptions{})
 	root := createInteractionIssue(t, handler, "COV", "Root", twoRequirements)
 	child := decodeBody[model.Issue](t, dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues",
@@ -123,6 +125,7 @@ func TestCoverageCountsADescendantsCheckAndFlagsAgainWhenItIsDeleted(t *testing.
 // A spec that marks no requirement answers the one line that says so, and so does an issue
 // created without a spec.
 func TestCoverageSaysWhenTheSpecMarksNoRequirements(t *testing.T) {
+	t.Parallel()
 	handler, _, _ := newTestServer(t, testServerOptions{})
 	issue := createInteractionIssue(t, handler, "COV", "Unmarked", "A spec with prose and no requirement block.\n")
 
@@ -139,6 +142,7 @@ func TestCoverageSaysWhenTheSpecMarksNoRequirements(t *testing.T) {
 // A missing plan task is no gap until the issue has a plan document; once plan.md is there, a
 // requirement no plan task serves is flagged for it.
 func TestCoverageFlagsAMissingPlanTaskOnlyOnceTheIssueHasAPlan(t *testing.T) {
+	t.Parallel()
 	handler, _, _ := newTestServer(t, testServerOptions{})
 	issue := createInteractionIssue(t, handler, "COV", "Planned", twoRequirements)
 	spec := "dispatch://" + issue.Key + "/spec"
@@ -188,6 +192,7 @@ func requestSpecApproval(t *testing.T, handler http.Handler, artifactID string) 
 // and the request is recorded as it always was. A spec that marks no requirements says so, and a
 // spec every requirement of which has a check gets no gap line.
 func TestApprovalRequestNamesEachRequirementWithNoCheck(t *testing.T) {
+	t.Parallel()
 	handler, _, _ := newTestServer(t, testServerOptions{})
 	issue := createInteractionIssue(t, handler, "COV", "Approving", twoRequirements)
 	spec := "dispatch://" + issue.Key + "/spec"
@@ -218,6 +223,7 @@ func TestApprovalRequestNamesEachRequirementWithNoCheck(t *testing.T) {
 
 // An approval request on a spec that marks no requirements says so, and still opens the request.
 func TestApprovalRequestSaysWhenTheSpecMarksNoRequirements(t *testing.T) {
+	t.Parallel()
 	handler, _, _ := newTestServer(t, testServerOptions{})
 	issue := createInteractionIssue(t, handler, "COV", "Unmarked", "A spec with prose and no requirement block.\n")
 
@@ -276,6 +282,7 @@ func (d *unreadableSpecDocs) Text(ctx context.Context, artifactID string) (strin
 // never read the live spec before the answer carried coverage — and the answer says the
 // coverage was not read rather than naming gaps it could not count.
 func TestApprovalRequestGoesThroughWhenTheCoverageReadFails(t *testing.T) {
+	t.Parallel()
 	handler, _, _, served := newRegisteredTestServer(t, testServerOptions{})
 	// Swapped in before the first request, so every handler reads the wrapper.
 	broken := &unreadableSpecDocs{API: served.deps.Docs}

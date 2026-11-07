@@ -99,6 +99,9 @@ func answering(t *testing.T, conn *natsgo.Conn, subject string) <-chan *natsgo.M
 // agent subject) is not published: the outbox does not record the destination, does not mark the
 // event published, and backs it off for a retry, logging the route, the holder's subject and the
 // violation. The grant covers the role's topic, and nothing crosses it.
+//
+// Serial: it swaps process-wide state - the nkey seed grantedNATS puts in the environment
+// (t.Setenv), and the default logger this row reads its denial line from (docs/testing.md).
 func TestRunRetriesARoleForwardNATSDenies(t *testing.T) {
 	var logged lockedBuffer
 	logtest.SetDefault(t, slog.NewTextHandler(&logged, nil))
@@ -160,6 +163,9 @@ func TestRunRetriesARoleForwardNATSDenies(t *testing.T) {
 // A denied role forward holds back none of the event's other destinations: the granted author route
 // of the same event is delivered and recorded on the first attempt, and only the role route is left
 // for the retry. The grant covers the role's topic, which reaches no holder.
+//
+// Serial: it swaps process-wide state, the nkey seed grantedNATS puts in the environment
+// (docs/testing.md).
 func TestRunDeliversTheGrantedRoutesOfAnEventWhoseRoleForwardNATSDenies(t *testing.T) {
 	client, subscriber, _ := grantedNATS(t, "notifications.dispatch.>", "notifications.role.>", "notifications.agent.writer", "_INBOX.>", "$JS.API.>")
 	authorTopic := "notifications.agent.writer"
@@ -185,7 +191,7 @@ func TestRunDeliversTheGrantedRoutesOfAnEventWhoseRoleForwardNATSDenies(t *testi
 	}
 	select {
 	case <-authorReceived:
-	case <-time.After(5 * time.Second):
+	case <-time.After(eventWait):
 		t.Fatal("the author received nothing, though its route is granted")
 	}
 	select {
@@ -198,6 +204,9 @@ func TestRunDeliversTheGrantedRoutesOfAnEventWhoseRoleForwardNATSDenies(t *testi
 // Once the grant covers the holder's subject, the event's retry delivers the role forward it was
 // denied - and only that: the author route the first attempt delivered is not sent again, and the
 // event is published with every destination recorded, the role route as its role topic.
+//
+// Serial: it swaps process-wide state, the nkey seed grantedNATS puts in the environment
+// (docs/testing.md).
 func TestTheRetryAfterAGrantDeliversOnlyTheDeniedRoute(t *testing.T) {
 	allow := []string{"notifications.dispatch.>", "notifications.agent.writer", "_INBOX.>", "$JS.API.>"}
 	client, subscriber, grant := grantedNATS(t, allow...)
@@ -226,7 +235,7 @@ func TestTheRetryAfterAGrantDeliversOnlyTheDeniedRoute(t *testing.T) {
 	}
 	select {
 	case <-forwarded:
-	case <-time.After(5 * time.Second):
+	case <-time.After(eventWait):
 		t.Fatal("the role's holder received nothing after the grant")
 	}
 	// Everything the two attempts published was answered before the event was marked published,
@@ -245,6 +254,9 @@ func TestTheRetryAfterAGrantDeliversOnlyTheDeniedRoute(t *testing.T) {
 // With the holder's subject granted, the role route is forwarded once, as a listener's role forward
 // carries it - the role's topic, the forward's dedupe key - recorded as its role topic, and the
 // event marked published on the holder's receipt. Nothing crosses the role's topic.
+//
+// Serial: it swaps process-wide state, the nkey seed grantedNATS puts in the environment
+// (docs/testing.md).
 func TestRunForwardsAGrantedRoleRoute(t *testing.T) {
 	client, subscriber, _ := grantedNATS(t, "notifications.dispatch.>", holderSubject, "_INBOX.>", "$JS.API.>")
 	received := subscribe(t, subscriber, roleTopic)
@@ -276,7 +288,7 @@ func TestRunForwardsAGrantedRoleRoute(t *testing.T) {
 		if item.Topic != roleTopic || item.SourceEventID == "" || !strings.HasPrefix(item.DedupeKey, contracts.RoleForwardDedupePrefix) {
 			t.Fatalf("the role's holder received %+v, want the event's role forward on %s", item, roleTopic)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(eventWait):
 		t.Fatal("the role's holder received nothing through a granted forward")
 	}
 	select {
@@ -293,6 +305,9 @@ func TestRunForwardsAGrantedRoleRoute(t *testing.T) {
 // (bus.ErrPublishDenied) rather than left to the publish window to report as an unreachable NATS:
 // the outbox records no destination, does not mark the event published, counts the attempt and
 // the denied destination, and logs the subject and the violation.
+//
+// Serial: it swaps process-wide state - the nkey seed grantedNATS puts in the environment, and
+// the default logger this row reads its denial line from (docs/testing.md).
 func TestRunRetriesAnIssueTopicNATSDenies(t *testing.T) {
 	var logged lockedBuffer
 	logtest.SetDefault(t, slog.NewTextHandler(&logged, nil))
@@ -396,6 +411,9 @@ func TestRunRetriesAnIssueTopicNATSDenies(t *testing.T) {
 // violation, and the batch probed its connection for an outage that was not there. The
 // per-subject record (deniedPublish) answers each send its own denial, and this test holds that
 // for the shape a notifying event has in production.
+//
+// Serial: it swaps process-wide state - the nkey seed grantedNATS puts in the environment, and
+// the default logger this row reads its denial lines from (docs/testing.md).
 func TestRunCountsEveryDeniedJetStreamDestinationOfOneEvent(t *testing.T) {
 	var logged lockedBuffer
 	logtest.SetDefault(t, slog.NewTextHandler(&logged, nil))
@@ -488,6 +506,9 @@ func TestRunCountsEveryDeniedJetStreamDestinationOfOneEvent(t *testing.T) {
 // (planChains, sendChains). That a window answers each of two sends of one subject its own
 // denial is held where that shape is reachable, on the bus itself:
 // internal/bus's TestAWindowAnswersEachDeniedSendOfOneSubjectItsOwnDenial.
+//
+// Serial: it swaps process-wide state - the nkey seed grantedNATS puts in the environment, and
+// the default logger this row counts its denial lines in (docs/testing.md).
 func TestRunCountsADeniedSubjectOncePerRefusedMessage(t *testing.T) {
 	var logged lockedBuffer
 	logtest.SetDefault(t, slog.NewTextHandler(&logged, nil))
@@ -566,6 +587,9 @@ func TestRunCountsADeniedSubjectOncePerRefusedMessage(t *testing.T) {
 // A destination NATS is unreachable for is counted, once: it is the outage the metric exists
 // for. Its send stops the batch, so the event's other destinations are not attempted and count
 // nothing, and the event is released for the next batch rather than backed off.
+//
+// Serial: it swaps process-wide state, the nkey seed grantedNATS puts in the environment
+// (docs/testing.md).
 func TestAPublishFailureThatEndsTheAttemptIsCountedOnce(t *testing.T) {
 	database := storetest.Open(t)
 	broker := events.NewBroker()

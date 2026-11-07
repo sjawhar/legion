@@ -30,6 +30,7 @@ func twoSignals() chan os.Signal {
 // broker had served nothing. Both inputs are ready before the decision starts - serveStarted
 // closed and both signals buffered - which is exactly the moment a select would choose at random.
 func TestASecondSignalAtAServingBrokerAlwaysDrains(t *testing.T) {
+	t.Parallel()
 	serveStarted := make(chan struct{})
 	close(serveStarted)
 	exits := 0
@@ -46,6 +47,7 @@ func TestASecondSignalAtAServingBrokerAlwaysDrains(t *testing.T) {
 // The control: a second signal before serveStarted closes belongs to the watchdog's exit, since
 // there is no server to drain.
 func TestASecondSignalBeforeServingExits(t *testing.T) {
+	t.Parallel()
 	if secondSignalFindsServing(twoSignals(), make(chan struct{})) {
 		t.Fatal("a second signal before the broker was serving answered drain; want exit")
 	}

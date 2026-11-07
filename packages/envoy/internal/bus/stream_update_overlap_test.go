@@ -19,6 +19,7 @@ import (
 // a stream another stream really does overlap is, returns the refusal after overlapSends sends. An
 // unanswered update is not sent again, and any other refusal is returned at once.
 func TestAnUpdateRefusedAsOverlappingItsOwnStreamIsSettledFromTheStream(t *testing.T) {
+	t.Parallel()
 	overlap := &nats.APIError{Code: 400, ErrorCode: jsStreamSubjectOverlap, Description: "subjects overlap with an existing stream"}
 	otherRefusal := &nats.APIError{Code: 503, ErrorCode: 10023, Description: "insufficient resources"}
 	for _, test := range []struct {
@@ -106,6 +107,7 @@ func (js *scriptedUpdateJetStream) StreamInfo(string, ...nats.JSOpt) (*nats.Stre
 // every round's byte limit. The rounds are the measurement, so they are many and each is cheap: no
 // round restarts the cluster.
 func TestConcurrentUpdatesOfOneStreamEndWithTheStreamHoldingThem(t *testing.T) {
+	t.Parallel()
 	const rounds = 300
 	cluster, js := startClusterJetStream(t)
 	startOnCluster(t, cluster, WithReplicas(3))

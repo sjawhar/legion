@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/reearth/ygo/crdt"
@@ -27,26 +28,35 @@ import (
 // another fixture's and back, a margin record projected over itself, and a second client's insert
 // written against the first state, which the replacement already deleted around.
 func TestAFoldedHistoryReadsAsTheMergedHistory(t *testing.T) {
+	t.Parallel()
 	fixtures := readHistoryFixtures(t)
 	database := storetest.Open(t)
 	versioned := NewPgVersioned(database)
 	ctx := context.Background()
 	for index, fixture := range fixtures {
 		t.Run(fixture.Name, func(t *testing.T) {
-			history := documentHistory(t, fixture.update, fixtures[(index+1)%len(fixtures)].update)
+			history := fixtureHistoryAt(t, fixtures, index)
 			artifactID := createDocument(t, database, "history")
 			for _, update := range history {
 				if _, err := versioned.AppendUpdate(ctx, artifactID, update); err != nil {
 					t.Fatalf("append update: %v", err)
 				}
 			}
-			want := readMerged(t, history)
+			// Each prefix of the log is merged and read once, and the version loops below
+			// take their expected reading from here: the two the compaction loop repeats
+			// cost a merge and a render of the whole document apiece
+			// (dispatch://INFRA-1075).
+			prefixes := make([]documentReading, len(history)+1)
+			for prefix := 1; prefix <= len(history); prefix++ {
+				prefixes[prefix] = readMerged(t, history[:prefix])
+			}
+			want := prefixes[len(history)]
 			for version := 1; version <= len(history); version++ {
 				state, err := versioned.MaterializeAt(ctx, artifactID, persistence.Version(version))
 				if err != nil {
 					t.Fatalf("materialize version %d: %v", version, err)
 				}
-				requireReadsAs(t, fmt.Sprintf("version %d", version), state, readMerged(t, history[:version]))
+				requireReadsAs(t, fmt.Sprintf("version %d", version), state, prefixes[version])
 			}
 			requireLoadReadsAs(t, versioned, artifactID, "the head", want)
 
@@ -58,7 +68,7 @@ func TestAFoldedHistoryReadsAsTheMergedHistory(t *testing.T) {
 				if err != nil {
 					t.Fatalf("materialize version %d after compaction: %v", version, err)
 				}
-				requireReadsAs(t, fmt.Sprintf("version %d after compaction to two", version), state, readMerged(t, history[:version]))
+				requireReadsAs(t, fmt.Sprintf("version %d after compaction to two", version), state, prefixes[version])
 			}
 			compactAged(t, versioned, database, artifactID)
 			if rows := storedUpdateCount(t, database, artifactID); rows != 1 {
@@ -73,6 +83,7 @@ func TestAFoldedHistoryReadsAsTheMergedHistory(t *testing.T) {
 // projected forty times over itself is stored as the one record it is, and so is the load of the
 // history before compaction.
 func TestCompactionLeavesTheStateNotTheContentItDeleted(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	versioned := NewPgVersioned(database)
 	ctx := context.Background()
@@ -118,6 +129,7 @@ func TestCompactionLeavesTheStateNotTheContentItDeleted(t *testing.T) {
 // persisted before one it depends on that never was - so a load and a compaction keep them, and
 // once the missing updates arrive the parked insert shows and the parked delete holds.
 func TestALoadAndACompactionKeepWhatTheDocumentParked(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	versioned := NewPgVersioned(database)
 	ctx := context.Background()
@@ -199,6 +211,7 @@ func requireParkedArrive(t *testing.T, what string, state, lost, gone []byte) {
 // load and a compacted load read as the rows applied in order. Row 0 is what a compaction stored
 // for a log that lacked one of client 101's updates: 101:27+29 is a skip.
 func TestALogWithASkippedClockRangeFoldsIntoItsState(t *testing.T) {
+	t.Parallel()
 	rows := base64Rows(t,
 		"AwkBAAcBC3Byb3NlbWlycm9yAwdoZWFkaW5nBwABAAYGAAEBBnN0cm9uZwR0cnVlhAECAWOEAQMDb2ZngQEGA4YBCQZzdHJvbmcEbnVsbCEAAQACaWQBIQEFbWFya3MCYzABA2QAxGUmZScMIGRwYWcgYmllY21oiAELAXcDMTMyqAEMAXYDBGtpbmR3B2NvbW1lbnQHcmVwbGllc3UCdwpmcGttb2dqbW5pfEKeAAAEdGV4dHeNAWttb2tjbW1kZGhmcG5rYWFvZGNsYWNwZ2xjIGdpYmpvbWdmZGJrYmpjZm4gIGdjb3Boa25ubW9sbGdvayBlaWVpYWxkbmNocGtiY2ltYmhsbWtqZmlwZCBwY2pkZmRwY2ViZGxtbmxiZWRsaGdiYWlnbGZoaGJjaWxubmFmaGFkYmRhaG9rbWZrY29rbAdlAMQBAwEEFGZwIGRpaW1oY2NuZWJoZmNvZmRvwWUTAQQBxGUUAQQGbmcga21hCh0oAQVtYXJrcwJjMgF2AwRraW5kdwdjb21tZW50B3JlcGxpZXN1AncKamFkYWFuICBvYnxCYAAABHRleHR3TmloampuaiBvaGVwa2hlYWdkaW9lbG1wamlsZmNuaW5uIGxjbWNobm5uaGhoYXBnbWhib25pbGRuIGlmbmVobW5jamNwYWZkbG5vZWZjZMYBCAEJBGNvZGUEdHJ1ZYYBCgRjb2RlBG51bGwCAQIHAwsCZQEUAQ==",
 		"AAIBAgcDCwJlARQB",
@@ -283,6 +296,7 @@ func rawReading(t *testing.T, doc *crdt.Doc) string {
 // loses nothing the missing update brings once it is stored. Client 101's clocks 10-11 are stored
 // before its clocks 7-9, with a compaction between them.
 func TestACompactionBeforeAMissingUpdateLosesNothingOnceItArrives(t *testing.T) {
+	t.Parallel()
 	rows := base64Rows(t,
 		"AQFlAAQBAXQFIGNlY2gA",
 		"AQJlBQcBAWEBKABlBQF2AXcDaGJmAA==",
@@ -333,6 +347,7 @@ func TestACompactionBeforeAMissingUpdateLosesNothingOnceItArrives(t *testing.T) 
 // A compacted document preserves the right origins that later text updates depend on. Compaction
 // runs after nine rows; after the tenth, Yjs and the stored rows merged both read "hc  chb".
 func TestACompactedDocumentKeepsItsOrderThroughLaterUpdates(t *testing.T) {
+	t.Parallel()
 	rows := base64Rows(t,
 		"AQFlAAQBAXQBYwA=",
 		"AQFkAAgBAWECdwRlZyBnfEBAAAABZQEAAQ==",
@@ -388,6 +403,7 @@ func TestACompactedDocumentKeepsItsOrderThroughLaterUpdates(t *testing.T) {
 // A log whose updates park more items than the fold's pending queue holds is not folded: the load
 // serves the stored updates merged whole, and compaction leaves every row stored.
 func TestALogTheFoldCannotApplyIsLoadedMergedAndKept(t *testing.T) {
+	t.Parallel()
 	rows, _ := unfoldableHistory()
 	database := storetest.Open(t)
 	versioned := NewPgVersioned(database)
@@ -475,6 +491,7 @@ func shrinkPendingItems(t *testing.T, service *Service, versioned *PgVersioned) 
 // holds short of the document's clock or not at all, and one the state holds that the document did
 // not.
 func TestAStateReadsBackOtherwiseWhenItsClocksDiffer(t *testing.T) {
+	t.Parallel()
 	writer := crdt.New(crdt.WithClientID(7))
 	text := writer.GetText("t")
 	writer.Transact(func(txn *crdt.Transaction) { text.Insert(txn, 0, "abc", nil) })
@@ -596,6 +613,50 @@ func documentHistory(t *testing.T, initial, other []byte) [][]byte {
 		return pmdoc.Update(txn, fragment, initialTree)
 	})
 	return history
+}
+
+var (
+	fixtureHistoryMu    sync.Mutex
+	fixtureHistoryCache = map[int][][]byte{}
+)
+
+// fixtureHistoryAt is the stored log of fixture index rewritten into the next fixture and back
+// (documentHistory), built by the first test that asks for it and kept for every test after it.
+// Three tests walk all 143 fixtures and each of them builds the same bytes: building the logs
+// once rather than three times over saves the package about seven seconds
+// (dispatch://INFRA-1075). Nothing writes into what it returns.
+func fixtureHistoryAt(t *testing.T, fixtures []historyFixture, index int) [][]byte {
+	t.Helper()
+	fixtureHistoryMu.Lock()
+	defer fixtureHistoryMu.Unlock()
+	if history, built := fixtureHistoryCache[index]; built {
+		return history
+	}
+	history := documentHistory(t, fixtures[index].update, fixtures[(index+1)%len(fixtures)].update)
+	fixtureHistoryCache[index] = history
+	return history
+}
+
+var (
+	fixtureMergedMu    sync.Mutex
+	fixtureMergedCache = map[int]documentReading{}
+)
+
+// fixtureMergedAt is the reading the whole of fixture index's log merges to (readMerged), kept as
+// fixtureHistoryAt keeps the log: the fold-mode test reads it for all 143 fixtures once per mode,
+// and merging and rendering each of those documents again for the second mode cost the package
+// about three seconds (dispatch://INFRA-1075).
+func fixtureMergedAt(t *testing.T, fixtures []historyFixture, index int) documentReading {
+	t.Helper()
+	history := fixtureHistoryAt(t, fixtures, index)
+	fixtureMergedMu.Lock()
+	defer fixtureMergedMu.Unlock()
+	if reading, read := fixtureMergedCache[index]; read {
+		return reading
+	}
+	reading := readMerged(t, history)
+	fixtureMergedCache[index] = reading
+	return reading
 }
 
 // documentReading is everything a reader of a document state sees: its markdown (or why it has

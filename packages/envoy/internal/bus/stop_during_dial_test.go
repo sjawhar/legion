@@ -1,5 +1,8 @@
 package bus_test
 
+// Every test here sets NATS_NKEY_SEED with t.Setenv, which panics the process beside t.Parallel,
+// so none of them is parallel (dispatch://INFRA-1075).
+
 import (
 	"bytes"
 	"log/slog"
@@ -38,7 +41,7 @@ func TestARecoveryStoppedMidDialInstallsNothingAndLogsNoError(t *testing.T) {
 	client.Conn.Close()
 	select {
 	case <-proxy.held:
-	case <-time.After(10 * time.Second):
+	case <-time.After(busWait):
 		t.Fatal("the recovery never dialled")
 	}
 	_ = client.Drain(5 * time.Second)
@@ -93,7 +96,7 @@ func TestARecoveryDiallingALostServerEndsAtTheStop(t *testing.T) {
 	client.Conn.Close()
 	select {
 	case <-proxy.held:
-	case <-time.After(10 * time.Second):
+	case <-time.After(busWait):
 		t.Fatal("the recovery never dialled")
 	}
 	client.Close()

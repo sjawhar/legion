@@ -23,6 +23,7 @@ import (
 // handler maps the error this write answers with (documentErrorCode); nothing here asserts on the
 // sentinel itself.
 func TestAnEditWhoseForkWentAndWhoseRoomHasCommittedIsRefusedAsUnavailable(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n\nThird.\n")

@@ -68,6 +68,7 @@ func (p *heldPublisher) accept(from, to int) {
 // go out side by side. The issue's events are recorded once every answer of that owner is in, and
 // an event is marked published only then, with its destinations in the order it has them.
 func TestAnIssuesEventsGoToEachDestinationOneAtATime(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	broker := events.NewBroker()
 	first := seedThreeDestinationEvent(t, database, broker)
@@ -119,6 +120,7 @@ func TestAnIssuesEventsGoToEachDestinationOneAtATime(t *testing.T) {
 // releases the rest: the event whose every destination was answered is marked published, and the
 // one still waiting is neither published nor backed off, so it is sent again by the next holder.
 func TestAnOutboxStoppedMidBatchMarksTheAnsweredAndReleasesTheRest(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	broker := events.NewBroker()
 	first := seedThreeDestinationEvent(t, database, broker)
@@ -250,8 +252,9 @@ func assertKeptLaneInOrder(t *testing.T, url, role string, seeded []model.Event,
 // behind the events after it: once NATS is back, every issue's events reach each destination in id
 // order, the order the Legion daemon's sequence fence needs.
 func TestABacklogPublishedAcrossANATSOutageKeepsItsOrder(t *testing.T) {
+	t.Parallel()
 	const issues, count = 2, 20
-	_, url := testnats.Start(t)
+	url := testnats.URL(t)
 	proxy := testnats.StartProxy(t, url)
 	client, err := bus.ConnectOwningStream([]string{proxy.URL()})
 	if err != nil {
@@ -268,14 +271,22 @@ func TestABacklogPublishedAcrossANATSOutageKeepsItsOrder(t *testing.T) {
 	// the holder that claims the role next.
 	const wantOnDestinations, wantKept = count + count/2, count
 
-	proxy.Cut()
-	stop := runOutbox(t, database, client, broker)
+	// The cut happens inside the outbox's first send, so by the time anything is sent the outbox
+	// holds the publisher hold and has read its batch, and that send and every send after it meet
+	// a connection that is gone. Waiting for a send is then waiting for the outage to be in force
+	// on the outbox itself, which the twelve seconds this slept for waited for with nothing
+	// watching (dispatch://INFRA-1075).
+	counter := &sendCounter{}
+	cutting := countingClient{Client: client, counter: counter, before: sync.OnceFunc(proxy.Cut)}
+	stop := runOutboxThrough(t, database, client, cutting, broker)
 	defer stop()
-	// Long enough for the outbox to have tried, and failed, more than one send.
-	time.Sleep(12 * time.Second)
+	waitFor(t, 30*time.Second, "the outbox's sends meeting the cut connection", func() bool {
+		return counter.attempts() > 0
+	})
 	if left := unpublishedCount(t, database); left != count {
 		t.Fatalf("%d events were marked published while NATS was down", count-left)
 	}
+	t.Logf("the outbox tried %d sends while NATS was down", counter.attempts())
 	proxy.Restore()
 	restarted := time.Now()
 
@@ -302,8 +313,9 @@ func TestABacklogPublishedAcrossANATSOutageKeepsItsOrder(t *testing.T) {
 // second, and never send it: Y's subject would carry seq 2 with no seq 1, and the daemon would hold
 // an issue whose earlier fact never arrives.
 func TestOneIssuesEventsReachItsSubjectInSeqOrderWhileAnotherIssueCommitsAcrossThem(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
-	_, url := testnats.Start(t)
+	url := testnats.URL(t)
 	client, err := bus.ConnectOwningStream([]string{url})
 	if err != nil {
 		t.Fatalf("connect the outbox's client: %v", err)
@@ -437,8 +449,9 @@ func issueSubjectOrder(t *testing.T, url string) (map[string][]int, []int64) {
 // Once the backlog is published, the stream holds every destination once, each issue's events in
 // id order on each, and no event counted an attempt.
 func TestABatchCutOffInFlightKeepsItsOrder(t *testing.T) {
+	t.Parallel()
 	const issues, count = 4, 2 * batchSize
-	_, url := testnats.Start(t)
+	url := testnats.URL(t)
 	proxy := testnats.StartProxy(t, url, testnats.ProxyLatency(150*time.Millisecond))
 	client, err := bus.ConnectOwningStream([]string{proxy.URL()})
 	if err != nil {
@@ -497,9 +510,16 @@ func TestABatchCutOffInFlightKeepsItsOrder(t *testing.T) {
 // lapses, so the process that takes the hold over publishes it again: at least once, never at most
 // once. The repeat adds nothing to the stream, which drops it inside its duplicate window by each
 // destination's MsgId.
+//
+// The hold is production's: the dead holder's row lapses its TTL after it was written and the
+// next holder waits that out, which is what the floor below reads.
+//
+// Real time, at publisherHoldOptions.TTL: the lapse is a Postgres row's expiry and the republish
+// crosses a live NATS server, neither of which a synctest bubble can hold.
 func TestAnOutboxThatDiesBetweenAckAndMarkPublishesAgainWithoutDuplicates(t *testing.T) {
+	t.Parallel()
 	const issues, count = 2, 10
-	_, url := testnats.Start(t)
+	url := testnats.URL(t)
 	client, err := bus.ConnectOwningStream([]string{url})
 	if err != nil {
 		t.Fatalf("connect the outbox's client: %v", err)
@@ -555,7 +575,11 @@ func TestAnOutboxThatDiesBetweenAckAndMarkPublishesAgainWithoutDuplicates(t *tes
 	}
 	stop = runOutbox(t, database, client, broker)
 	defer stop()
-	waitFor(t, publisherHoldOptions.TTL+10*time.Second, "the backlog marked published by the next holder", func() bool {
+	// The lapse, and then the backlog's republish: that second part is the stream's work and has
+	// nothing to do with the TTL, so it keeps an allowance of its own, raised past main's ten
+	// seconds because the republish alone ran past it beside eleven other tests on this pod's two
+	// cores (dispatch://INFRA-1075). The floor below is what proves the lapse was waited out.
+	waitFor(t, publisherHoldOptions.TTL+30*time.Second, "the backlog marked published by the next holder", func() bool {
 		return unpublishedCount(t, database) == 0
 	})
 	if took := time.Since(died); took < publisherHoldOptions.TTL-time.Second {

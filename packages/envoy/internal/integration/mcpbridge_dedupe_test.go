@@ -19,6 +19,7 @@ import (
 // bridge is reporting that an event happened, not redelivering the one before it. Keying the
 // publish on the source alone drops the second.
 func TestMCPBridge_TwoEventsSharingADedupeKeyBothLand(t *testing.T) {
+	t.Parallel()
 	env := setupTestEnv(t)
 	path := filepath.Join(t.TempDir(), "mcp.json")
 	config, err := json.Marshal(map[string]any{"servers": []map[string]any{{

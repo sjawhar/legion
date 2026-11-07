@@ -23,6 +23,7 @@ import (
 // an account no entry names is not the service's to enrol at all, and the broker refuses it
 // 403 POD_NOT_LAUNCHED before any secret is asked for.
 func TestOneServicesTwoAccountsEachGetItsSecret(t *testing.T) {
+	t.Parallel()
 	databaseURL := storetest.URL(t)
 	issuer := oidctest.New(t)
 	podKey := issuer.PublishKey(t, "signing-key")

@@ -7,6 +7,7 @@ import (
 )
 
 func TestParseValidTree(t *testing.T) {
+	t.Parallel()
 	model, err := Parse(map[string][]byte{
 		"API.md":    []byte("---\ntitle: HTTP API\nparent: server\ndepends_on: [store]\npaths:\n  - internal/api\n---\nThe API surface.\n"),
 		"server.md": []byte("---\ntitle: Server\n---\nThe server.\n"),
@@ -29,6 +30,7 @@ func TestParseValidTree(t *testing.T) {
 // defaults, CRLF files close, a horizontal rule in the body is body, and a
 // `---` inside a YAML block scalar stays inside the block.
 func TestParseFrontMatterDelimiters(t *testing.T) {
+	t.Parallel()
 	model, err := Parse(map[string][]byte{
 		"empty.md": []byte("---\n---\nJust prose.\n"),
 		"crlf.md":  []byte("---\r\ntitle: Windows\r\n---\r\nbody\r\n"),
@@ -50,6 +52,7 @@ func TestParseFrontMatterDelimiters(t *testing.T) {
 }
 
 func TestParseEmptySetIsValid(t *testing.T) {
+	t.Parallel()
 	model, err := Parse(map[string][]byte{})
 	if err != nil {
 		t.Fatalf("parse empty: %v", err)
@@ -60,6 +63,7 @@ func TestParseEmptySetIsValid(t *testing.T) {
 }
 
 func TestParseRejectsTheSetWholeNamingEveryProblem(t *testing.T) {
+	t.Parallel()
 	for name, tc := range map[string]struct {
 		files map[string][]byte
 		wants []string

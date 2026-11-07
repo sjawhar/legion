@@ -135,6 +135,9 @@ var anchorReadParameters = []string{"text", "text[]"}
 // whose partial predicate the read's `anchor is not null` implies. So the test fails exactly
 // when a read's uuid comparison stops matching its index's expression, or when the clause that
 // makes the partial index eligible is dropped.
+// It runs on its own, as the copied-ask plan test does: which plan the planner settles on rests on
+// the statistics of the database the harness hands the test, and a test writing into its own
+// database beside this one changes when the server gathers them.
 func TestAnchorReadsSearchTheirTablesAnchorIndex(t *testing.T) {
 	database := storetest.Open(t)
 	ctx := context.Background()

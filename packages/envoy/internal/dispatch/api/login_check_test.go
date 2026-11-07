@@ -48,6 +48,7 @@ func pressedAs(t *testing.T, handler http.Handler, method, target string, body a
 // naming a login is refused the same way; a caller that resolves to nobody gets the route's own 401;
 // a write without the header, and every read, is not checked.
 func TestAWriteRunsOnlyAsThePersonWhoPressedIt(t *testing.T) {
+	t.Parallel()
 	handler, database, _ := newTestServer(t, testServerOptions{})
 	issue := createTestIssue(t, handler, "LOGIN", "Pressed by whom")
 	comments := "/api/v1/issues/" + issue + "/comments"
@@ -112,6 +113,7 @@ func TestAWriteRunsOnlyAsThePersonWhoPressedIt(t *testing.T) {
 // tab signed her in in place - is refused 409 LOGIN_CHANGED and writes nothing into her state, so an
 // issue never reads as read for someone who never opened it. Pressed by alice, it is written.
 func TestAReadMarkRunsOnlyAsThePersonWhoPressedIt(t *testing.T) {
+	t.Parallel()
 	handler, database, _ := newTestServer(t, testServerOptions{})
 	issue := createTestIssue(t, handler, "MARK", "Read by whom")
 	state := "/api/v1/me/issues/" + issue + "/state"
@@ -145,6 +147,7 @@ func TestAReadMarkRunsOnlyAsThePersonWhoPressedIt(t *testing.T) {
 // its handler runs: register wraps every route but a read in the check, so no write route can be
 // added that a retry on another person's session runs.
 func TestEveryWriteRouteChecksWhoPressedIt(t *testing.T) {
+	t.Parallel()
 	handler, _, _, served := newRegisteredTestServer(t, testServerOptions{})
 	bob := "bob"
 	writes := 0

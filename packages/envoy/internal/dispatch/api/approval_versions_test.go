@@ -29,6 +29,7 @@ import (
 // the requesting agent. Handing the revision back updates the same card and makes the human its
 // next actor again.
 func TestApprovalRequestFollowsDocumentVersions(t *testing.T) {
+	t.Parallel()
 	var documentService *docs.Service
 	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
@@ -141,6 +142,7 @@ func TestApprovalRequestFollowsDocumentVersions(t *testing.T) {
 // thread records neither, and the next human reply takes the turn back on every read, the Inbox's
 // order and the comment's own event included.
 func TestApprovalHandBackWaitsOnTheHuman(t *testing.T) {
+	t.Parallel()
 	for _, flow := range []struct {
 		name     string
 		move     bool
@@ -313,6 +315,7 @@ func TestApprovalHandBackWaitsOnTheHuman(t *testing.T) {
 // so it adds no entry to the card's edit history, and an answer the human started from the card
 // before the hand-back is saved rather than refused ASK_EDITED.
 func TestARewordlessHandBackKeepsTheQuestionsRevision(t *testing.T) {
+	t.Parallel()
 	for _, flow := range []struct {
 		name    string
 		move    bool
@@ -323,6 +326,7 @@ func TestARewordlessHandBackKeepsTheQuestionsRevision(t *testing.T) {
 		{name: "after a version move with the summary omitted", move: true, version: 2},
 	} {
 		t.Run(flow.name, func(t *testing.T) {
+			t.Parallel()
 			var documentService *docs.Service
 			handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
 				documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
@@ -407,6 +411,10 @@ func TestARewordlessHandBackKeepsTheQuestionsRevision(t *testing.T) {
 // The test parks the hand-back after it has taken the owner row, with a lock on the ask row that
 // OpenApprovalAsk waits for, then starts the human's comment, which queues on the owner row.
 func TestAReplyQueuedBehindAHandBackTakesTheTurn(t *testing.T) {
+	// No t.Parallel: this test holds a transaction, a row lock or an advisory lock open on
+	// purpose. The event log's safe horizon is proven from pg_snapshot_xmin, the oldest
+	// transaction id running anywhere on the instance (internal/dispatch/events,
+	// horizon.go), so a hold here stalls every parallel test reading that feed.
 	ctx := context.Background()
 	handler, database, deps := newInteractionDeps(t, nil)
 	issue := createInteractionIssue(t, handler, "TEST", "Racing hand-back", "A spec")
@@ -505,6 +513,7 @@ func TestAReplyQueuedBehindAHandBackTakesTheTurn(t *testing.T) {
 // not been handed back. The action answers that same open card and pins its review to the version
 // the human saw, rather than resolving the card and losing its thread.
 func TestHeaderReviewAnswersMovedApprovalAskBeforeTheAgentHandsItBack(t *testing.T) {
+	t.Parallel()
 	for _, review := range []struct {
 		name   string
 		state  string
@@ -515,6 +524,7 @@ func TestHeaderReviewAnswersMovedApprovalAskBeforeTheAgentHandsItBack(t *testing
 		{name: "request changes", state: "changes_requested", reason: "Name the rollback path.", event: "artifact.changes_requested"},
 	} {
 		t.Run(review.name, func(t *testing.T) {
+			t.Parallel()
 			var documentService *docs.Service
 			handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
 				documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
@@ -573,6 +583,7 @@ func TestHeaderReviewAnswersMovedApprovalAskBeforeTheAgentHandsItBack(t *testing
 // settlement names the latest known browser editor, or SettlementActor when the browser edit was
 // ambiguous.
 func TestANewVersionMovesTheOpenApprovalAsk(t *testing.T) {
+	t.Parallel()
 	asker := model.Actor{Kind: "session", ID: sessionActor()["id"].(string)}
 	alice := model.Actor{Kind: "user", ID: "alice"}
 	bob := model.Actor{Kind: "user", ID: "bob"}
@@ -678,7 +689,7 @@ func TestANewVersionMovesTheOpenApprovalAsk(t *testing.T) {
 				t.Fatalf("revise document: %v", err)
 			}
 			waitForArtifactVersion(t, doc.handler, doc.artifactID, 2)
-			deadline := time.After(5 * time.Second)
+			deadline := time.After(concurrentWait)
 			for {
 				select {
 				case event, ok := <-published:
@@ -761,6 +772,7 @@ func TestANewVersionMovesTheOpenApprovalAsk(t *testing.T) {
 		}, 1, bob, true},
 	} {
 		t.Run(write.name, func(t *testing.T) {
+			t.Parallel()
 			doc := open(t, write.settle)
 			write.write(t, doc)
 			// The last peer to leave settles the room, which versions whatever the peers wrote.
@@ -822,6 +834,7 @@ func TestANewVersionMovesTheOpenApprovalAsk(t *testing.T) {
 	}
 
 	t.Run("a write that versions nothing", func(t *testing.T) {
+		t.Parallel()
 		doc := open(t, time.Hour)
 		unchanged := sessionRequest(t, doc.handler, http.MethodPost, "/api/v1/artifacts/"+doc.artifactID+"/edits", map[string]any{
 			"ops":     []map[string]string{{"op": "replace", "find": "A spec", "with": "A spec"}},
@@ -936,7 +949,7 @@ func eventDeliveries(t *testing.T, database *store.Store, eventType, id string) 
 		<-stopped
 	}()
 	const about = `from events where type = $1 and payload->>'id' = $2`
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(concurrentWait)
 	for {
 		var unpublished, total int
 		if err := database.Pool.QueryRow(context.Background(), `select count(*) filter (where published_at is null), count(*) `+about,

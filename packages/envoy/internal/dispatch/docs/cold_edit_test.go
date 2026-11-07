@@ -19,6 +19,7 @@ import (
 // (audit finding 11): the write keeps no fork, its verdict on what it inserted is judged on the
 // store (nothing was lost), and the next read loads the room from the store, holding the write.
 func TestAColdWriteLoadsNoRoom(t *testing.T) {
+	t.Parallel()
 	for _, conditional := range []bool{false, true} {
 		name := "unconditional"
 		if conditional {
@@ -111,6 +112,7 @@ func (s *insideFirstLoadStore) Load(ctx context.Context, room string) (persisten
 // no copy of the document beside the room's own; one that loads after the read meets the write at
 // its publish (LEGION-504).
 func TestABrowserOpeningADocumentMidColdWriteKeepsBothEdits(t *testing.T) {
+	t.Parallel()
 	for _, during := range []bool{true, false} {
 		name := "after the store read"
 		if during {

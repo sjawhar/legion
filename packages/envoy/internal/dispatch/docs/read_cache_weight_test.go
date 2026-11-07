@@ -20,6 +20,8 @@ import (
 // holds it, a part several share once, and a map's slots at the load the map holds just after it
 // grows, so it overcounts by at most a quarter (maxWeightToHeap); a part counted for each sharer,
 // such as a row's cells counted for each cell, passes that.
+// It runs on its own because it measures this process: each shape's heap is read from the
+// runtime's own accounting, which every parallel test's allocations would count against.
 func TestADocumentReadWeighsAboutTheHeapItHolds(t *testing.T) {
 	const minWeightToHeap, maxWeightToHeap = 0.97, 1.25
 	for _, shape := range []struct{ name, markdown string }{

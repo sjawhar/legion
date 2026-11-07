@@ -45,6 +45,7 @@ func sourceEventID(t *testing.T, data []byte) string {
 // answered accepted, and the stream stores a run sent back to back on one window's connection in
 // send order.
 func TestPublishAsyncKeepsSendOrder(t *testing.T) {
+	t.Parallel()
 	const count = 500
 	_, url := testnats.Start(t)
 	client, err := bus.ConnectOwningStream([]string{url})
@@ -69,7 +70,7 @@ func TestPublishAsyncKeepsSendOrder(t *testing.T) {
 			if err != nil {
 				t.Fatalf("publish %d was answered %v, want accepted", index, err)
 			}
-		case <-time.After(10 * time.Second):
+		case <-time.After(busWait):
 			t.Fatalf("publish %d was never answered", index)
 		}
 	}
@@ -101,6 +102,7 @@ func TestPublishAsyncKeepsSendOrder(t *testing.T) {
 // resends with no attempt counted, so the caller backs the envelope off. Nothing reaches a core
 // subscriber of the topic.
 func TestAWindowAnswersATopicTheStreamDoesNotCaptureAsNotCaptured(t *testing.T) {
+	t.Parallel()
 	_, url := testnats.Start(t)
 	client, err := bus.ConnectOwningStream([]string{url})
 	if err != nil {
@@ -137,6 +139,7 @@ func TestAWindowAnswersATopicTheStreamDoesNotCaptureAsNotCaptured(t *testing.T) 
 // is in the channel at once, ErrUnavailable, which a caller tells apart from a failure of the
 // envelope itself.
 func TestAWindowWhoseConnectionIsLostAnswersUnavailableBeforeSending(t *testing.T) {
+	t.Parallel()
 	server, url := testnats.Start(t)
 	client, err := bus.ConnectOwningStream([]string{url})
 	if err != nil {
@@ -148,7 +151,7 @@ func TestAWindowWhoseConnectionIsLostAnswersUnavailableBeforeSending(t *testing.
 		t.Fatalf("first publish answered %v", err)
 	}
 	server.Stop(t)
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(busWait)
 	for client.Connected() && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -169,6 +172,7 @@ func TestAWindowWhoseConnectionIsLostAnswersUnavailableBeforeSending(t *testing.
 // next connection with no attempt counted: it is ErrNotAcknowledged, which the caller backs off.
 // Deleting the stream makes the server answer the stream's subject with no responders.
 func TestAWindowAnswersNoRespondersOnACurrentConnectionAsNotAcknowledged(t *testing.T) {
+	t.Parallel()
 	_, url := testnats.Start(t)
 	client, err := bus.ConnectOwningStream([]string{url})
 	if err != nil {
@@ -184,7 +188,7 @@ func TestAWindowAnswersNoRespondersOnACurrentConnectionAsNotAcknowledged(t *test
 		if !errors.Is(err, bus.ErrNotAcknowledged) || !errors.Is(err, natsgo.ErrNoResponders) || errors.Is(err, bus.ErrUnavailable) {
 			t.Fatalf("a publish answered with no responders on a current connection answered %v, want ErrNotAcknowledged wrapping nats.ErrNoResponders, not ErrUnavailable", err)
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(busWait):
 		t.Fatal("the publish was never answered")
 	}
 	if !client.Connected() {
@@ -196,6 +200,7 @@ func TestAWindowAnswersNoRespondersOnACurrentConnectionAsNotAcknowledged(t *test
 // server that has gone silent leaves it, is ErrNotAcknowledged once the acknowledgement's 5 s run
 // out, not ErrUnavailable: the connection never read as lost.
 func TestAWindowAnswersAnUnacknowledgedPublishOnACurrentConnectionAsNotAcknowledged(t *testing.T) {
+	t.Parallel()
 	server, url := testnats.Start(t)
 	client, err := bus.ConnectOwningStream([]string{url})
 	if err != nil {
@@ -214,7 +219,7 @@ func TestAWindowAnswersAnUnacknowledgedPublishOnACurrentConnectionAsNotAcknowled
 		if !errors.Is(err, bus.ErrNotAcknowledged) || !errors.Is(err, natsgo.ErrAsyncPublishTimeout) || errors.Is(err, bus.ErrUnavailable) {
 			t.Fatalf("a publish never acknowledged on a current connection answered %v, want ErrNotAcknowledged wrapping nats.ErrAsyncPublishTimeout, not ErrUnavailable", err)
 		}
-	case <-time.After(15 * time.Second):
+	case <-time.After(busWait):
 		t.Fatal("the publish was never answered")
 	}
 	if !client.Connected() {

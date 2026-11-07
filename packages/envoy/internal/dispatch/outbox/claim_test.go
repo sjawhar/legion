@@ -16,6 +16,7 @@ import (
 // Reading a batch writes no row: one process publishes at a time (the publisher hold), so nothing
 // is claimed, and a second read finds the same events, each with its retry state untouched.
 func TestReadingABatchWritesNoRow(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	database := storetest.Open(t)
 	broker := events.NewBroker()
@@ -45,6 +46,7 @@ func TestReadingABatchWritesNoRow(t *testing.T) {
 // must not publish it before then (subscriptionRemovedPayload). No read of a batch reaches it: it
 // is in none of the indexes the read goes through, and holds back none of its issue's events.
 func TestAPendingEventIsNeverRead(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	database := storetest.Open(t)
 	broker := events.NewBroker()
@@ -75,6 +77,7 @@ func TestAPendingEventIsNeverRead(t *testing.T) {
 // it is not sent, and the later event is held back from the destinations it has not reached while
 // still sent to the rest. An owner with no due event is not read at all.
 func TestAnEventThatIsNotDueIsReadOnlyAsABlockerOfItsOwner(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	database := storetest.Open(t)
 	broker := events.NewBroker()
@@ -144,6 +147,7 @@ func TestAnEventThatIsNotDueIsReadOnlyAsABlockerOfItsOwner(t *testing.T) {
 // event behind them, which the batch never reads: that event waits on the earliest of their
 // back-offs, rather than leave the owner chosen, and read again, at every wake.
 func TestADueEventPastItsOwnersWindowWaitsOnTheWindow(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	database := storetest.Open(t)
 	broker := events.NewBroker()

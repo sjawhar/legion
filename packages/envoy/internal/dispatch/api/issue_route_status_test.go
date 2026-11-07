@@ -184,6 +184,7 @@ func requireReach(t *testing.T, handler http.Handler, key, status, holder, reaso
 }
 
 func TestRoleRouteReadsNoHolderUntilASessionClaimsTheRole(t *testing.T) {
+	t.Parallel()
 	roster := &fakeRoster{}
 	roster.set("ses-other", "reviewer")
 	handler, _ := routeStatusServer(t, roster)
@@ -200,6 +201,7 @@ func TestRoleRouteReadsNoHolderUntilASessionClaimsTheRole(t *testing.T) {
 }
 
 func TestSessionRouteReadsLiveOnlyWhileTheSessionIsListed(t *testing.T) {
+	t.Parallel()
 	roster := &fakeRoster{}
 	roster.set("ses-worker")
 	handler, _ := routeStatusServer(t, roster)
@@ -212,6 +214,7 @@ func TestSessionRouteReadsLiveOnlyWhileTheSessionIsListed(t *testing.T) {
 }
 
 func TestRouteStatusIsUnknownWhenTheListenerDoesNotAnswer(t *testing.T) {
+	t.Parallel()
 	roster := &fakeRoster{}
 	roster.set("ses-sre", "sre")
 	handler, _ := routeStatusServer(t, roster)
@@ -226,6 +229,7 @@ func TestRouteStatusIsUnknownWhenTheListenerDoesNotAnswer(t *testing.T) {
 // route reads unknown with the reason, never no_holder, and reads live again once the list is
 // back.
 func TestRouteStatusIsUnknownWhileTheListenerRefills(t *testing.T) {
+	t.Parallel()
 	roster := &fakeRoster{}
 	roster.set("ses-sre", "sre")
 	handler, _ := routeStatusServer(t, roster)
@@ -240,12 +244,14 @@ func TestRouteStatusIsUnknownWhileTheListenerRefills(t *testing.T) {
 }
 
 func TestRouteStatusIsUnknownWithoutAConfiguredListener(t *testing.T) {
+	t.Parallel()
 	handler, _, _ := newTestServer(t, testServerOptions{})
 	key := routedIssueKey(t, handler, "role:sre")
 	requireReach(t, handler, key, "unknown", "", "unreachable")
 }
 
 func TestUnroutedIssueHasNoRouteStatusAndCostsNoListenerCall(t *testing.T) {
+	t.Parallel()
 	roster := &fakeRoster{}
 	handler, _ := routeStatusServer(t, roster)
 	key := routedIssueKey(t, handler, "")
@@ -274,6 +280,7 @@ func seedRoutedIssues(t *testing.T, handler http.Handler, database *store.Store,
 }
 
 func TestIssueListResolvesEveryRouteWithOneListenerCall(t *testing.T) {
+	t.Parallel()
 	roster := &fakeRoster{}
 	roster.set("ses-sre", "sre")
 	handler, database := routeStatusServer(t, roster)
@@ -310,6 +317,7 @@ func TestIssueListResolvesEveryRouteWithOneListenerCall(t *testing.T) {
 }
 
 func TestRouteStatusFilterListsOnlyOpenIssuesInThatState(t *testing.T) {
+	t.Parallel()
 	roster := &fakeRoster{}
 	roster.set("ses-sre", "sre")
 	handler, _ := routeStatusServer(t, roster)
@@ -424,6 +432,7 @@ func stateRosterServer(t *testing.T, rows []map[string]any) *server {
 // reads as "nobody is working this", and which would have a person hand the work to someone
 // else). Both kinds of route answer the same way, since both reach one session.
 func TestRouteReachNamesAnUnresponsiveHolderRatherThanDroppingIt(t *testing.T) {
+	t.Parallel()
 	served := stateRosterServer(t, []map[string]any{
 		{"session_id": "ses-live", "state": "live", "last_seen": 1700000000000, "roles": []string{"legion-merger"}},
 		{"session_id": "ses-stalled", "state": "unresponsive", "last_seen": 1699999000000, "roles": []string{"legion-planner"}},
@@ -455,6 +464,7 @@ func TestRouteReachNamesAnUnresponsiveHolderRatherThanDroppingIt(t *testing.T) {
 // whose holder has stopped answering - and no_holder, which is the filter an audit uses to find
 // unworked issues, keeps excluding them.
 func TestRouteStatusFilterTakesHolderUnresponsive(t *testing.T) {
+	t.Parallel()
 	for _, value := range []string{"live", "holder_unresponsive", "no_holder", "unknown", ""} {
 		if got, err := parseRouteStatusFilter(value); err != nil || got != value {
 			t.Errorf("route_status=%q: %q, %v; want it accepted", value, got, err)
@@ -471,6 +481,7 @@ func TestRouteStatusFilterTakesHolderUnresponsive(t *testing.T) {
 // does not list as gone; takeable_at is the instant another agent may take the claim without a
 // person, which is only ever answered for a holder that will come free.
 func TestClaimLivenessDatesWhenAnUnresponsiveHoldersClaimComesFree(t *testing.T) {
+	t.Parallel()
 	const lastSeen = 1700000000000
 	served := stateRosterServer(t, []map[string]any{
 		{"session_id": "ses-live", "state": "live", "last_seen": lastSeen},
@@ -533,6 +544,7 @@ func TestClaimLivenessDatesWhenAnUnresponsiveHoldersClaimComesFree(t *testing.T)
 // stores names a state on every session it carries - and never gone, which is a session the
 // list does not carry at all - so a state it does name is read as it stands.
 func TestAStoredRowFromBeforeSessionStatesReadsItsSessionsLive(t *testing.T) {
+	t.Parallel()
 	const lastSeen = 1700000000000
 	stored := []byte(`[
 		{"session_id":"ses-old","title":"worker ses-old","roles":["sre"],"last_seen":1700000000000},
@@ -575,6 +587,7 @@ func TestAStoredRowFromBeforeSessionStatesReadsItsSessionsLive(t *testing.T) {
 // - points an operator at the listener). A read that only shows a route still serves the issue,
 // with its route unknown.
 func TestARouteStatusFilterAnswersAFailedRosterReadAsTheDatabases(t *testing.T) {
+	t.Parallel()
 	roster := &fakeRoster{}
 	roster.set("ses-sre", "sre")
 	handler, database := routeStatusServer(t, roster)
@@ -618,6 +631,7 @@ func secondRouteStatusServer(t *testing.T, served *server) (http.Handler, *serve
 // on the second because the second asked the listener a moment later, and the second makes no
 // call of its own. Both TTLs are a minute, so a slow machine's reads stay inside them.
 func TestTwoServersJudgeARouteAgainstTheOneStoredListenerAnswer(t *testing.T) {
+	t.Parallel()
 	roster := &fakeRoster{}
 	roster.set("ses-sre", "sre")
 	handler, _, served := cachedRouteStatusServer(t, roster)
@@ -645,6 +659,7 @@ func TestTwoServersJudgeARouteAgainstTheOneStoredListenerAnswer(t *testing.T) {
 // unknown too, without a call of its own, even though the listener answers again by then. The
 // silence is a minute, so a slow machine's reads stay inside it.
 func TestAListenerFailureOneServerMetReadsUnknownOnTheOther(t *testing.T) {
+	t.Parallel()
 	roster := &fakeRoster{}
 	roster.down.Store(true)
 	handler, _, served := cachedRouteStatusServer(t, roster)
@@ -678,6 +693,7 @@ func TestAListenerFailureOneServerMetReadsUnknownOnTheOther(t *testing.T) {
 // Agents read the ENVOY_REFILLING answer with the listener's own Retry-After. Both TTLs are a
 // minute, so a slow machine's reads stay inside them.
 func TestARefillOneServerMetIsARefillOnTheOther(t *testing.T) {
+	t.Parallel()
 	roster := &fakeRoster{}
 	roster.set("ses-sre", "sre")
 	roster.refilling.Store(true)
@@ -696,6 +712,7 @@ func TestARefillOneServerMetIsARefillOnTheOther(t *testing.T) {
 // stored, and the reads waiting on it are served that newer answer. The listener holds its first
 // call and answers it with nobody; every later call lists ses-sre holding sre.
 func TestAnOlderListenerAnswerNeverReplacesANewerOne(t *testing.T) {
+	t.Parallel()
 	var calls atomic.Int32
 	gate := make(chan struct{})
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -731,7 +748,7 @@ func TestAnOlderListenerAnswerNeverReplacesANewerOne(t *testing.T) {
 		if got := sreReach(roster); got != "live ses-sre" {
 			t.Fatalf("the read waiting on the older fetch reads %s, want the newer stored live ses-sre", got)
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(concurrentWait):
 		t.Fatal("the read waiting on the older fetch never returned")
 	}
 	if got := sreReach(readRoster(t, first, context.Background())); got != "live ses-sre" {

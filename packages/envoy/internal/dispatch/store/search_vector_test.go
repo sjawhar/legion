@@ -16,11 +16,9 @@ import (
 // never version, and an issue titled with it, or an ask, comment or message holding it, was never
 // stored. An issue's key is indexed whole whatever its title holds.
 func TestTextPastTheSearchVectorLimitIsWrittenAndIndexedFromItsOpening(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
-	store := openEmptyTestStore(t)
-	if err := store.Migrate(ctx); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
+	store := openTestStore(t)
 	seedSearchDocument(t, ctx, store)
 	text := searchtest.DistinctWords(100_000, "\n")
 
@@ -73,11 +71,9 @@ func TestTextPastTheSearchVectorLimitIsWrittenAndIndexedFromItsOpening(t *testin
 // text does not hold, and a search for it found the text. `intro ` moves every word off the halves'
 // boundaries, which the fixed width of `w000001 w000002 …` alone would put between two words.
 func TestATextCutToFitIsIndexedByWholeWords(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
-	store := openEmptyTestStore(t)
-	if err := store.Migrate(ctx); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
+	store := openTestStore(t)
 	var fragments []string
 	var opening bool
 	if err := store.Pool.QueryRow(ctx, `
@@ -101,11 +97,9 @@ func TestATextCutToFitIsIndexedByWholeWords(t *testing.T) {
 // that calls it runs in parallel. debug_parallel_query has Postgres plan every query it can in
 // parallel, so this read fails if the function is ever marked parallel safe or restricted.
 func TestSearchVectorRunsInAQueryPostgresWouldRunInParallel(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
-	store := openEmptyTestStore(t)
-	if err := store.Migrate(ctx); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
+	store := openTestStore(t)
 	seedSearchDocument(t, ctx, store)
 	tx, err := store.Pool.Begin(ctx)
 	if err != nil {

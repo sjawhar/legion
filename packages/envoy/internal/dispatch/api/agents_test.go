@@ -35,6 +35,7 @@ func agentsHandlerWithStore(t *testing.T, envoyURL string, database *store.Store
 }
 
 func TestAgentsListsLiveSessionsNewestFirstForHumans(t *testing.T) {
+	t.Parallel()
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`[{"session_id":"older","title":"worker","last_seen":100,"port":1,"topics":["t"]},{"session_id":"b","title":"planner","last_seen":200},{"session_id":"a","title":"reviewer","last_seen":200}]`))
 	}))
@@ -62,6 +63,7 @@ func TestAgentsListsLiveSessionsNewestFirstForHumans(t *testing.T) {
 // GET /api/v1/agents carries each session's real machine (host) wherever the listener reported
 // it, and keeps machine_id (the listener that owns the session's delivery) untouched beside it.
 func TestAgentsReportsHostFromListener(t *testing.T) {
+	t.Parallel()
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`[{"session_id":"a","title":"planner","machine_id":"example-listener","host":"example-host-a","last_seen":100}]`))
 	}))
@@ -83,6 +85,7 @@ func TestAgentsReportsHostFromListener(t *testing.T) {
 // A listener that predates the "host" field answers with none; Dispatch must still show a
 // machine rather than an empty one during a partial rollout.
 func TestAgentsFallsBackToMachineIDWhenListenerReportsNoHost(t *testing.T) {
+	t.Parallel()
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`[{"session_id":"a","title":"planner","machine_id":"example-listener","last_seen":100}]`))
 	}))
@@ -99,6 +102,7 @@ func TestAgentsFallsBackToMachineIDWhenListenerReportsNoHost(t *testing.T) {
 }
 
 func TestAgentsIncludeGroupedOpenAskCountsAndLastActivity(t *testing.T) {
+	t.Parallel()
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`[
 			{"session_id":"planner","title":"Planner","dir":"/w/planner","machine_id":"host-a","roles":["planner"],"capabilities":["btw"],"last_seen":200},
@@ -162,6 +166,7 @@ func TestAgentsIncludeGroupedOpenAskCountsAndLastActivity(t *testing.T) {
 // message; the issue-less POST /agents/{session}/messages needs the person scope, which the
 // deployment's shared token does not hold.
 func TestAgentsListsCapabilitiesForBearerCallers(t *testing.T) {
+	t.Parallel()
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","last_seen":100,"capabilities":["aside","btw"]}]`))
 	}))
@@ -190,8 +195,10 @@ func TestAgentsListsCapabilitiesForBearerCallers(t *testing.T) {
 }
 
 func TestAgentsReportsListenerUnavailable(t *testing.T) {
+	t.Parallel()
 	for name, envoyURL := range map[string]string{"refused": "http://127.0.0.1:1", "unconfigured": ""} {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			response := dispatchRequest(t, agentsHandler(t, envoyURL), http.MethodGet, "/api/v1/agents", nil, "alice")
 			if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), `"code":"ENVOY_UNAVAILABLE"`) {
 				t.Fatalf("status %d: %s", response.Code, response.Body.String())
@@ -238,6 +245,7 @@ func sessionsListener(t *testing.T, answer string) (url string, calls *atomic.In
 // agents list, an issue read and a second agents list inside the TTL make one listener call, and
 // the second list is the first answer even though the listener's own answer has changed since.
 func TestAgentsListsAndIssueReadsWithinTheTTLShareOneListenerCall(t *testing.T) {
+	t.Parallel()
 	roster := &fakeRoster{}
 	roster.set("ses-sre", "sre")
 	handler, _, served := cachedRouteStatusServer(t, roster)
@@ -268,6 +276,7 @@ func TestAgentsListsAndIssueReadsWithinTheTTLShareOneListenerCall(t *testing.T) 
 // rule (issue_route_status_cache_test.go). The window is a minute, so a loaded machine's second
 // list still lands inside it.
 func TestAgentsAnswer503ThroughTheSilenceWindow(t *testing.T) {
+	t.Parallel()
 	roster := &fakeRoster{}
 	roster.down.Store(true)
 	handler, _, served := cachedRouteStatusServer(t, roster)
@@ -293,6 +302,7 @@ func TestAgentsAnswer503ThroughTheSilenceWindow(t *testing.T) {
 // machine_id standing in for a missing host. The listener sends the sessions oldest first, so the
 // sorted order is the reverse of the cached one.
 func TestConcurrentAgentsListsAndIssueReadsLeaveTheSharedListAsTheListenerSentIt(t *testing.T) {
+	t.Parallel()
 	listenerURL, calls := sessionsListener(t, `[
 		{"session_id":"a","title":"oldest","machine_id":"box-a","roles":["sre"],"last_seen":100},
 		{"session_id":"b","title":"middle","machine_id":"box-b","host":"host-b","last_seen":200},
@@ -364,6 +374,7 @@ func TestConcurrentAgentsListsAndIssueReadsLeaveTheSharedListAsTheListenerSentIt
 // An agents list whose request ends while it waits on the shared fetch answers 503
 // ENVOY_UNAVAILABLE at once, saying why; the fetch runs on, and the next list is its answer.
 func TestAnAgentsListWhoseRequestEndsWhileItWaitsOnTheFetchAnswers503(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	mux := http.NewServeMux()
 	_, calls, release := heldRosterMux(t, mux, Deps{Store: database, Identity: headerIdentity(database)})
@@ -382,8 +393,8 @@ func TestAnAgentsListWhoseRequestEndsWhileItWaitsOnTheFetchAnswers503(t *testing
 	cancel()
 	select {
 	case <-answered:
-	case <-time.After(5 * time.Second):
-		t.Fatal("an agents list did not answer within 5 s of its request ending")
+	case <-time.After(concurrentWait):
+		t.Fatalf("an agents list did not answer within %s of its request ending", concurrentWait)
 	}
 	body := response.Body.String()
 	if response.Code != http.StatusServiceUnavailable || !strings.Contains(body, `"code":"ENVOY_UNAVAILABLE"`) ||
@@ -405,6 +416,7 @@ func TestAnAgentsListWhoseRequestEndsWhileItWaitsOnTheFetchAnswers503(t *testing
 // own request and lists its sessions, whether the cache was cold or already holds the shutdown's
 // failure.
 func TestAnAgentsListDuringAShutdownDrainListsAHealthyListenersSessions(t *testing.T) {
+	t.Parallel()
 	listenerURL, _ := sessionsListener(t, `[{"session_id":"ses-live","title":"worker","last_seen":100}]`)
 	database := storetest.Open(t)
 	mux := http.NewServeMux()
@@ -455,6 +467,7 @@ func requireEnvoyRefilling(t *testing.T, response *httptest.ResponseRecorder, re
 // server process to read (route_roster) and the two cases run different listeners: sharing one
 // database would serve the second case the first one's stored silence, with its Retry-After.
 func TestAgentsReportsARefillingListenerAsRefilling(t *testing.T) {
+	t.Parallel()
 	for retryAfter, want := range map[string]string{"7": "7", "": "5"} {
 		database := storetest.Open(t)
 		listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

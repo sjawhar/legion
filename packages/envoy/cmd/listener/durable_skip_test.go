@@ -18,6 +18,7 @@ import (
 // of a session nobody has, are decoded as before. Every message here is undecodable, so a decode
 // shows as the handler's decode failure.
 func TestSubjectIndexAcksADurableMessageNoSessionNeedsBeforeDecodingIt(t *testing.T) {
+	t.Parallel()
 	harness := newListenerDeliveryHarness(t)
 	// Both copies refill from their buckets on a goroutine the harness's registries start
 	// (kvwatch.Watcher.Start), and a write that lands while that first read runs carries no mark

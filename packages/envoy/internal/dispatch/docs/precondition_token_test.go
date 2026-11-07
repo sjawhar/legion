@@ -15,6 +15,7 @@ import (
 // have encoded for itself.
 
 func TestStampingBlockIDsChangesNoDocumentToken(t *testing.T) {
+	t.Parallel()
 	for _, markdown := range []string{
 		"Intro.\n\nBody.\n",
 		"# Heading\n\n- one\n- two\n\n| h |\n| --- |\n| cell |\n",
@@ -54,6 +55,7 @@ func TestStampingBlockIDsChangesNoDocumentToken(t *testing.T) {
 // edit reports for an unchanged document is that same token, so a check answering another one
 // would change every outcome the route serves.
 func TestCheckEditPreconditionAnswersTheBatchToken(t *testing.T) {
+	t.Parallel()
 	tree, err := parseInput("Intro.\n\nBody.\n")
 	if err != nil {
 		t.Fatal(err)

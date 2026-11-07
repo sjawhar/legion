@@ -12,6 +12,7 @@ import (
 // break, a setext underline, and a directive opener, which either silently becomes another node
 // or refuses to parse at all.
 func TestRenderEscapesBlockMarkerLinesInsideParagraphs(t *testing.T) {
+	t.Parallel()
 	for _, text := range []string{
 		"---",
 		"***",
@@ -54,6 +55,7 @@ func TestRenderEscapesBlockMarkerLinesInsideParagraphs(t *testing.T) {
 // remaining lines and its closer to the document around it. Each context renders a document with
 // a block after the line and requires every block back, in place.
 func TestRenderKeepsTheBlocksAfterALineThatWouldOpenAFenceOrCloseATypedBlock(t *testing.T) {
+	t.Parallel()
 	text := func(value string) *Node { return &Node{Type: "text", Text: value} }
 	hardBreak := &Node{Type: "hardbreak", Attrs: Attrs{"isInline": false}}
 	paragraph := func(children ...*Node) *Node { return &Node{Type: "paragraph", Children: children} }
@@ -99,6 +101,7 @@ func TestRenderKeepsTheBlocksAfterALineThatWouldOpenAFenceOrCloseATypedBlock(t *
 // list, quote, footnote definition or typed block in the rest. Those documents write the rule
 // `***`.
 func TestRenderWritesALeadingRuleAsAsterisksOnlyWhereDashesAreMisread(t *testing.T) {
+	t.Parallel()
 	for name, test := range map[string]struct{ after, opener string }{
 		"alone":                     {"", "---"},
 		"a paragraph":               {"a\n", "---"},
@@ -144,6 +147,7 @@ func TestRenderWritesALeadingRuleAsAsterisksOnlyWhereDashesAreMisread(t *testing
 // a second-level item's `<div` or `~~~` would look like indented code, and be left to open an
 // HTML block or a fence in place.
 func TestRenderEscapesBlockFormsInAListNestedInABlockquote(t *testing.T) {
+	t.Parallel()
 	for _, marker := range []string{"<div", "~~~"} {
 		t.Run(marker, func(t *testing.T) {
 			tree, err := Parse("> - a\n>   - b\n>\n>     x\n\nAfter.\n")
@@ -174,6 +178,7 @@ func TestRenderEscapesBlockFormsInAListNestedInABlockquote(t *testing.T) {
 // lengths pair by goldmark's rules though not the browser editor's, so they are written as
 // references too, which both read back.
 func TestRenderKeepsTildesAsTheyWereWritten(t *testing.T) {
+	t.Parallel()
 	text := func(value string, marks ...Mark) *Node { return &Node{Type: "text", Text: value, Marks: marks} }
 	struck := Mark{Type: "strike_through"}
 	paragraph := func(children ...*Node) *Node {
@@ -224,6 +229,7 @@ func TestRenderKeepsTildesAsTheyWereWritten(t *testing.T) {
 // the middle and `[ ]` outside a list item keep the bytes the writer before sjawhar/legion#1429
 // writes.
 func TestRenderKeepsHeadingAndTaskTextThatReadsAsSyntax(t *testing.T) {
+	t.Parallel()
 	text := func(value string) *Node { return &Node{Type: "text", Text: value} }
 	heading := func(value string) *Node {
 		return &Node{Type: "doc", Children: []*Node{{Type: "heading", Attrs: Attrs{"level": 2}, Children: []*Node{text(value)}}}}
@@ -282,6 +288,7 @@ func flatText(node *Node) string {
 // trailing whitespace character are written as references; whitespace inside a mark or a link
 // keeps the bytes the writer before sjawhar/legion#1429 writes, since the parser keeps it there.
 func TestRenderKeepsWhitespaceAtATextblocksEdges(t *testing.T) {
+	t.Parallel()
 	text := func(value string, marks ...Mark) *Node { return &Node{Type: "text", Text: value, Marks: marks} }
 	hardBreak := &Node{Type: "hardbreak", Attrs: Attrs{"isInline": false}}
 	doc := func(block *Node) *Node { return &Node{Type: "doc", Children: []*Node{block}} }
@@ -332,6 +339,7 @@ func TestRenderKeepsWhitespaceAtATextblocksEdges(t *testing.T) {
 // that began or ended with a space read back as literal asterisks or tildes. That whitespace is
 // written as a reference, which is not whitespace to the delimiter rule.
 func TestRenderKeepsWhitespaceAtAMarksEdges(t *testing.T) {
+	t.Parallel()
 	text := func(value string, marks ...Mark) *Node { return &Node{Type: "text", Text: value, Marks: marks} }
 	strong, emphasis, strike := Mark{Type: "strong"}, Mark{Type: "emphasis"}, Mark{Type: "strike_through"}
 	link := Mark{Type: "link", Attrs: Attrs{"href": "https://x.test"}}
@@ -377,6 +385,7 @@ func TestRenderKeepsWhitespaceAtAMarksEdges(t *testing.T) {
 // text never had: across a hard break, around a reference, inside a link label, or with a mark's
 // own delimiter. A run that does not read back as written is written again with them escaped.
 func TestRenderKeepsAsterisksAndUnderscoresThatWouldPair(t *testing.T) {
+	t.Parallel()
 	text := func(value string, marks ...Mark) *Node { return &Node{Type: "text", Text: value, Marks: marks} }
 	hardBreak := &Node{Type: "hardbreak", Attrs: Attrs{"isInline": false}}
 	link := Mark{Type: "link", Attrs: Attrs{"href": "https://x.test"}}
@@ -421,6 +430,7 @@ func TestRenderKeepsAsterisksAndUnderscoresThatWouldPair(t *testing.T) {
 // does not read back as written is written with its ASCII punctuation escaped and its line endings
 // as character references.
 func TestRenderKeepsImageAltText(t *testing.T) {
+	t.Parallel()
 	image := func(alt string) *Node {
 		return &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: []*Node{
 			{Type: "image", Attrs: Attrs{"src": "https://x.test/i.png", "alt": alt, "title": nil}},
@@ -491,6 +501,7 @@ func TestRenderKeepsImageAltText(t *testing.T) {
 // A paragraph's second line of dashes or equals signs underlines its first into a heading, so
 // the escape applies to a marker line anywhere in the paragraph, not only its first.
 func TestRenderEscapesSetextUnderlinesInsideParagraphs(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		text        string
 		first, next string
@@ -532,6 +543,7 @@ func TestRenderEscapesSetextUnderlinesInsideParagraphs(t *testing.T) {
 // document that carries one - a new version on the next edit, and an approved spec waiting on a
 // human to approve the same words again.
 func TestRenderLeavesABlockFinalBackslashAlone(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name string
 		doc  *Node
@@ -587,6 +599,7 @@ func TestRenderLeavesABlockFinalBackslashAlone(t *testing.T) {
 // with the link gone, and text like `[x]: /u` makes the line a link reference definition the
 // Proof schema refuses. The image case already escapes `]` in alt text for the same reason.
 func TestRenderEscapesBracketsInLinkText(t *testing.T) {
+	t.Parallel()
 	for _, text := range []string{
 		`a]b`, `a]`, `]x`, `a](b)`, `[x]: /u`, `[^1]: n`,
 	} {
@@ -615,6 +628,7 @@ func TestRenderEscapesBracketsInLinkText(t *testing.T) {
 // and escaping them would change the markdown of every stored document carrying a citation-style
 // link, minting a version on its next anchor or edit.
 func TestRenderLeavesPairedBracketsInLinkTextAlone(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		text string
 		want string
@@ -652,6 +666,7 @@ func TestRenderLeavesPairedBracketsInLinkTextAlone(t *testing.T) {
 // the address: escaping them would put the backslash in the href. A URL ending in `]`, which GFM
 // leaves out of a bare URL, is written as a link instead, which reads back whole.
 func TestRenderKeepsBracketsInABareURL(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct{ url, want string }{
 		{"https://x.test/p?q=[1]&r", "https://x.test/p?q=[1]&r\n"},
 		{"https://x.test/[a]/b", "https://x.test/[a]/b\n"},
@@ -686,6 +701,7 @@ func TestRenderKeepsBracketsInABareURL(t *testing.T) {
 // A backslash that ends marked text eats the marker that closes it: `**a\**` reads back as an
 // escaped asterisk and the bold is gone, and a link's text does the same to its `]`.
 func TestRenderKeepsMarksAroundTextEndingInABackslash(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name  string
 		marks []Mark
@@ -724,6 +740,7 @@ func TestRenderKeepsMarksAroundTextEndingInABackslash(t *testing.T) {
 // A backslash at the end of a text node eats the backslash form of the hard break that follows
 // it, turning two lines into one, so the break is written as two trailing spaces instead.
 func TestRenderKeepsAHardBreakAfterATrailingBackslash(t *testing.T) {
+	t.Parallel()
 	doc := &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: []*Node{
 		{Type: "text", Text: "Ends in a backslash \\"},
 		{Type: "hardbreak"},
@@ -753,6 +770,7 @@ func TestRenderKeepsAHardBreakAfterATrailingBackslash(t *testing.T) {
 // the paragraph comes back as one. That whitespace takes no backslash, so it is written as the
 // numeric reference the parser decodes back to it.
 func TestRenderKeepsLeadingWhitespaceOnAParagraph(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		text string
 		want string
@@ -787,6 +805,7 @@ func TestRenderKeepsLeadingWhitespaceOnAParagraph(t *testing.T) {
 // fresh text node whose own offsets show no predecessor. The line before it can be a container's
 // first, which opens with the list marker or quote the container's later lines write as spaces.
 func TestRenderEscapesASetextUnderlineAfterAHardBreak(t *testing.T) {
+	t.Parallel()
 	paragraph := func() *Node {
 		return &Node{Type: "paragraph", Children: []*Node{
 			{Type: "text", Text: "Title"},
@@ -872,6 +891,7 @@ func blockKindsOf(doc *Node) string {
 // label split by formatting or a code span, a label beside a different link, a heading, a table
 // cell, the inside of a mark, a paragraph's later line, a typed block.
 func TestRenderKeepsStoredMarkdownThatReadsBack(t *testing.T) {
+	t.Parallel()
 	for _, markdown := range []string{
 		"See [`pmdoc.Parse` [source]](https://x.test) for details.\n",
 		"See [**RFC** [7231]](https://x.test) for details.\n",
@@ -970,6 +990,7 @@ func TestRenderKeepsStoredMarkdownThatReadsBack(t *testing.T) {
 // `:::` inside a typed block closes it, a delimiter row under a header with as many cells makes a
 // table, and `--` after a list item's `- ` finishes a thematic break.
 func TestRenderEscapesBlockFormsWhereTheyOpenABlock(t *testing.T) {
+	t.Parallel()
 	callout := &Node{Type: "callout", Attrs: Attrs{
 		BlockIDAttr: "callout-1", "kind": "note", "title": "Read this",
 	}, Children: []*Node{
@@ -1053,6 +1074,7 @@ func TestRenderEscapesBlockFormsWhereTheyOpenABlock(t *testing.T) {
 // A strikethrough opener at a line's start is `~~`, so struck text that begins with `~` would
 // write `~~~200ms~~`: a tilde fence that swallows every block after it.
 func TestRenderKeepsStruckTextBeginningWithATilde(t *testing.T) {
+	t.Parallel()
 	doc := &Node{Type: "doc", Children: []*Node{
 		{Type: "paragraph", Children: []*Node{
 			{Type: "text", Text: "~200ms", Marks: []Mark{{Type: "strike_through"}}},

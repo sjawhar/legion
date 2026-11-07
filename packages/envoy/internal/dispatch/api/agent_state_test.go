@@ -13,6 +13,7 @@ import (
 // across devices: written per session, read back as one map, invisible to other users and to
 // sessions.
 func TestPerUserAgentStateRoundTripsAndIsIsolated(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	cutoff := time.Now().UTC().Add(-time.Minute).Truncate(time.Millisecond)
 	saved := dispatchRequest(t, handler, http.MethodPut, "/api/v1/me/agents/planner-session/state", map[string]any{
@@ -86,6 +87,7 @@ func TestPerUserAgentStateRoundTripsAndIsIsolated(t *testing.T) {
 }
 
 func TestPerUserAgentStateRejectsMalformedAndFutureCutoffs(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	for name, body := range map[string]map[string]any{
 		"missing":    {},

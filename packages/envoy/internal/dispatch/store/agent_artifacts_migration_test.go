@@ -12,6 +12,7 @@ import (
 // ref_key; a session's artifact is addressed agent/<session>/<slug>; ref_key is the trigger's to
 // write, as it was the generated column's; and a row with no owner, or two, is refused.
 func TestMigrate0071AddressesAnAgentsArtifactsAndKeepsEveryOtherRefKey(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store := openEmptyTestStore(t)
 	migrateThrough(t, store, 70)

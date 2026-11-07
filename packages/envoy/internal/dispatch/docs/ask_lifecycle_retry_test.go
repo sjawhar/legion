@@ -27,6 +27,7 @@ func stopSettlementShort(service *Service, room string, stop func() bool) {
 // settle delay is an ask, credited to its writer, when it returns, for the close that called it to
 // withdraw. Settled once and given up on, the block would be no ask when the close committed.
 func TestSettlingAnIssuesDocumentsRetriesASettlementThatStoppedShort(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "# Decision\n\nContext.\n")

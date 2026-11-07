@@ -57,6 +57,7 @@ func quoteProbes(tree *Node) []string {
 // answers: the same range for a quote that matches, and the same refusal, with its candidates and
 // its nearest blocks, for one that does not.
 func TestValidDocumentQuoteFinderAnswersFindQuote(t *testing.T) {
+	t.Parallel()
 	for _, document := range corpusMarkdown(t) {
 		t.Run(document.name, func(t *testing.T) {
 			tree, err := Parse(document.markdown)
@@ -78,6 +79,7 @@ func TestValidDocumentQuoteFinderAnswersFindQuote(t *testing.T) {
 // The zero ValidDocument holds no tree, so every read of it refuses with the words a read of a
 // tree that is no document gives, and none of them reaches a nil dereference.
 func TestTheZeroValidDocumentWantsADocument(t *testing.T) {
+	t.Parallel()
 	zero := ValidDocument{}
 	for _, test := range []struct {
 		name string

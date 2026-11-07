@@ -1,5 +1,8 @@
 package store
 
+// Every test here captures the default slog handler (captureJSONLogs, below), a process-wide
+// swap, so none of them is parallel (dispatch://INFRA-1075).
+
 import (
 	"encoding/json"
 	"fmt"

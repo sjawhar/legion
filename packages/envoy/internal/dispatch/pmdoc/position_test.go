@@ -22,6 +22,7 @@ const (
 // characters drawn from the pairs above, an ASCII character and a non-ASCII character of one UTF-16
 // unit.
 func TestSimpleDiffNeverCutsAPair(t *testing.T) {
+	t.Parallel()
 	alphabet := []string{pairA, pairB, pairC, pairD, "x", "\u26A1"}
 	var texts []string
 	var build func(prefix string, depth int)
@@ -59,6 +60,7 @@ func TestSimpleDiffNeverCutsAPair(t *testing.T) {
 
 // The diff still keeps what both texts share: only the characters they disagree on are rewritten.
 func TestSimpleDiffKeepsWhatTheTextsShare(t *testing.T) {
+	t.Parallel()
 	for name, test := range map[string]struct {
 		current, want string
 		index, remove int
@@ -87,6 +89,7 @@ func TestSimpleDiffKeepsWhatTheTextsShare(t *testing.T) {
 // that is not ErrSchema (a verdict on the write, answered 400): half a character cannot be kept, and
 // a splice around it would write the other half twice or not at all.
 func TestSlice16RefusesARangeInsideAPair(t *testing.T) {
+	t.Parallel()
 	value := "a" + pairA + "b" // a, D83D, DCCA, b
 	for name, test := range map[string]struct {
 		from, to int
@@ -116,6 +119,7 @@ func TestSlice16RefusesARangeInsideAPair(t *testing.T) {
 
 // A quote's context is cut at positions in UTF-16 units; a cut inside a pair keeps the whole pair.
 func TestContext16KeepsEveryCharacterItTouchesWhole(t *testing.T) {
+	t.Parallel()
 	value := "a" + pairA + "b" // a, D83D, DCCA, b
 	for _, test := range []struct {
 		from, to int

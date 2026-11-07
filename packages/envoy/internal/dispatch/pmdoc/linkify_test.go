@@ -10,6 +10,7 @@ import (
 // engine does. Each row's expectation is the engine's reading (gen/differential.ts), an email's
 // href its mailto: URL.
 func TestLinkifyReadsWhatTheEngineReads(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct{ markdown, want string }{
 		{"mail alice@example.com now", `text "mail " | text "alice@example.com" link mailto:alice@example.com | text " now"`},
 		{"(bob@example.org)", `text "(" | text "bob@example.org" link mailto:bob@example.org | text ")"`},
@@ -39,6 +40,7 @@ func TestLinkifyReadsWhatTheEngineReads(t *testing.T) {
 // literal starting inside it reads again with its own underscores and dots, and a trail run
 // already found to continue the URL (literalTrail).
 func TestLiteralURLReadsEachOffsetAsAFreshRead(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		line string
 		want map[int]int // offset → the URL's length, 0 for none; offsets not listed are checked against a fresh read only

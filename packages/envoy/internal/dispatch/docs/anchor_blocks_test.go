@@ -10,6 +10,7 @@ import (
 )
 
 func TestBackfillAnchorBlocksPinsResolvableLegacyRowsOnce(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	seedServiceText(t, service, artifactID, "Introduction.\n\nTarget passage.\n")
 	askID := insertAnchoredAsk(t, service, artifactID, "Target passage")
@@ -60,6 +61,7 @@ func TestBackfillAnchorBlocksPinsResolvableLegacyRowsOnce(t *testing.T) {
 // asks, after it read the rows and before it updates the comments, which is the window a loaded
 // CI runner hit on its own.
 func TestAnchorRefreshKeepsABlockIDPinnedAfterItReadTheRow(t *testing.T) {
+	t.Parallel()
 	const holdKey = int64(4815162342)
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
@@ -113,7 +115,7 @@ func TestAnchorRefreshKeepsABlockIDPinnedAfterItReadTheRow(t *testing.T) {
 	// A content change is what makes the settlement write a version, and a version write is what
 	// refreshes the anchors.
 	editLiveTree(t, service, artifactID, replaceRun("Introduction.", "Intro."))
-	settleCtx, cancelSettle := context.WithTimeout(context.Background(), 10*time.Second)
+	settleCtx, cancelSettle := context.WithTimeout(context.Background(), roomWait(t))
 	defer cancelSettle()
 	if err := service.waitForPendingUpdates(settleCtx, artifactID); err != nil {
 		t.Fatalf("wait for live updates to reach persistence: %v", err)
@@ -175,7 +177,7 @@ func TestAnchorRefreshKeepsABlockIDPinnedAfterItReadTheRow(t *testing.T) {
 // position; nothing here assumes how long a step takes.
 func waitForHeldAnchorRefresh(t *testing.T, service *Service, key int64) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(roomWait(t))
 	for time.Now().Before(deadline) {
 		var waiting int
 		if err := service.store.Pool.QueryRow(context.Background(), `
@@ -194,6 +196,7 @@ func waitForHeldAnchorRefresh(t *testing.T, service *Service, key int64) {
 }
 
 func TestBlockForQuoteLeavesTopLevelCrossBlockAnchorsUnpinned(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	seedServiceText(t, service, artifactID, "One.\n\nTwo.\n")
 

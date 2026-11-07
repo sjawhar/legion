@@ -38,6 +38,7 @@ func replicaFor(t *testing.T, service *Service, live *crdt.Doc) *renderedReplica
 // with his credit, and his held append, once released, stores nothing. The update is stored once,
 // and the stored history replays.
 func TestAFlushStoresTheRoomsHeldUpdateOnceWithItsCredit(t *testing.T) {
+	t.Parallel()
 	service, artifactID, entered, release := heldAppendService(t)
 	before := storedUpdateCount(t, service.store, artifactID)
 	editAsConnectedPeer(t, service, artifactID, 1, storedOrderBob, replaceRun("Second.", "Second, bob."))
@@ -97,6 +98,7 @@ func TestAFlushStoresTheRoomsHeldUpdateOnceWithItsCredit(t *testing.T) {
 // observer has not run yet, it starts the replica from that commit's base and takes the commit in,
 // classifying it, at the next position.
 func TestAReadPointOfARecoveringReplicaIsExact(t *testing.T) {
+	t.Parallel()
 	service, artifactID := storedOrderService(t)
 	editAsPeer(t, service, artifactID, replaceRun("First.", "First, alice."))
 	waitForLandedAppends(t, service, artifactID)

@@ -33,6 +33,7 @@ type dpopClaims struct {
 // URL without the query, and has a jti of its own. A 400 use_dpop_nonce with a DPoP-Nonce header
 // is retried once, with the nonce, a fresh jti and the same body.
 func TestTheDPoPTransportSignsEachTokenRequest(t *testing.T) {
+	t.Parallel()
 	key, err := proof.NewKey()
 	if err != nil {
 		t.Fatal(err)

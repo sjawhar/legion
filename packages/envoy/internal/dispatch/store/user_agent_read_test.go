@@ -12,6 +12,7 @@ import (
 // migration, so the deploy does not turn every past reply into an unread one; replies stored
 // afterwards still count. The mark is keyed on the canonical login, as the unread count reads it.
 func TestUserAgentReadBackfillMarksEveryExistingDirectConversationRead(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store := openEmptyTestStore(t)
 	migrateThrough(t, store, 50)

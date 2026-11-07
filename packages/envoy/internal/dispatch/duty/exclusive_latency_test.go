@@ -36,11 +36,14 @@ func (c slowWrites) Write(b []byte) (int, error) {
 // later, stalls on nothing; read by such a moment it lands in the period the first has recorded
 // as served, and a lone loop loses that period, the defect
 // TestExclusiveCountsALateTickInThePeriodItWasDueIn covers for a delay before the query.
+//
+// The period is this test's own argument to Exclusive, which takes it in the call; the stall is
+// delay, which is unchanged. cmd/dispatch passes each loop's own period.
 func TestExclusiveCountsATickStalledAfterItsMeasureInThePeriodItWasDueIn(t *testing.T) {
 	database := storetest.Open(t)
 	ctx := context.Background()
 	const name = "suggestion-outcomes"
-	const period = time.Second
+	const period = 400 * time.Millisecond
 	const early, delay = 50 * time.Millisecond, 100 * time.Millisecond
 
 	var slow atomic.Bool

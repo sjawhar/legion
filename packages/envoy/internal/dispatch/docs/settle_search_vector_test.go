@@ -14,6 +14,7 @@ import (
 // document has, and pass that limit. Before 0087 the settlement's version write failed with
 // `string is too long for tsvector`, and so did every settlement of the document.
 func TestSettlementVersionsADocumentPastTheSearchVectorLimit(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "before")

@@ -10,8 +10,9 @@ import (
 // a held row names no last editor and has no due time, the two together, and deleting its document
 // takes the row with it, so an artifact delete of either release keeps working.
 func TestDocumentEditNotices(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
-	store := migratedEmptyStore(t)
+	store := openTestStore(t)
 	var artifactID string
 	if err := store.Pool.QueryRow(ctx, `
 		with p as (insert into projects (key, name) values ('CORE', 'Core') returning key),

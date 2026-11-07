@@ -77,6 +77,7 @@ func getOnConn(t *testing.T, client *http.Client, url string, header http.Header
 }
 
 func TestMaxConnAgeKeepsAYoungConnection(t *testing.T) {
+	t.Parallel()
 	clock := &fakeClock{now: time.Unix(1_700_000_000, 0)}
 	server := startConnAgeServer(t, clock)
 	client := server.Client()
@@ -100,6 +101,7 @@ func TestMaxConnAgeKeepsAYoungConnection(t *testing.T) {
 }
 
 func TestMaxConnAgeClosesAnAgedConnectionAfterItsResponse(t *testing.T) {
+	t.Parallel()
 	clock := &fakeClock{now: time.Unix(1_700_000_000, 0)}
 	server := startConnAgeServer(t, clock)
 	client := server.Client()
@@ -125,6 +127,7 @@ func TestMaxConnAgeClosesAnAgedConnectionAfterItsResponse(t *testing.T) {
 }
 
 func TestMaxConnAgeClosesAnAgedConnectionAfterARejectedUpgrade(t *testing.T) {
+	t.Parallel()
 	clock := &fakeClock{now: time.Unix(1_700_000_000, 0)}
 	server := startConnAgeServer(t, clock)
 	client := server.Client()
@@ -153,6 +156,7 @@ func TestMaxConnAgeClosesAnAgedConnectionAfterARejectedUpgrade(t *testing.T) {
 // websocket that takes the connection. ygo's document upgrade (/ws/doc) and /ws/live both upgrade
 // this way: the upgrader hijacks before it writes the 101 itself.
 func TestMaxConnAgeDoesNotDisturbAnAgedHijackedWebsocket(t *testing.T) {
+	t.Parallel()
 	clock := &fakeClock{now: time.Unix(1_700_000_000, 0)}
 	upgraded := make(chan struct{})
 	release := make(chan struct{})
@@ -224,6 +228,7 @@ func TestMaxConnAgeDoesNotDisturbAnAgedHijackedWebsocket(t *testing.T) {
 }
 
 func TestMaxConnAgeHandlerPassesARequestWithNoAcceptTime(t *testing.T) {
+	t.Parallel()
 	clock := &fakeClock{now: time.Unix(1_700_000_000, 0)}
 	handler := maxConnAgeHandler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -242,6 +247,7 @@ func TestMaxConnAgeHandlerPassesARequestWithNoAcceptTime(t *testing.T) {
 // (keep-alives are off while the server is shutting down), so a draining process sheds every
 // connection as its last response goes out, however young the connection.
 func TestServerClosesConnectionsAfterShutdownBegins(t *testing.T) {
+	t.Parallel()
 	shutdownBegun := make(chan struct{})
 	entered := make(chan struct{})
 	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

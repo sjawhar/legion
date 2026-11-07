@@ -132,6 +132,7 @@ func (b *ttlBroker) take() (posts int, lifetimes []int, verifyErr error, revoked
 // runs the command with the secret. With no --ttl the object carries no lifetime claim at all
 // (a claim of 0 would not verify), the request for a grant that lasts until the session ends.
 func TestTTLReachesTheSignedRequestObject(t *testing.T) {
+	t.Parallel()
 	binary := buildAgentSecrets(t)
 	b := newTTLBroker(t)
 	keyDir := newKeyDir(t)
@@ -174,6 +175,7 @@ func TestTTLReachesTheSignedRequestObject(t *testing.T) {
 // the broker records, is a usage error (exit 2) on `request` and on the exec form, and nothing
 // reaches the broker or runs.
 func TestABadTTLExitsTwo(t *testing.T) {
+	t.Parallel()
 	binary := buildAgentSecrets(t)
 	b := newTTLBroker(t)
 	keyDir := newKeyDir(t)
@@ -203,6 +205,7 @@ func TestABadTTLExitsTwo(t *testing.T) {
 // and a pending request the answer says this call joined (`coalesced`) are left alone, and the
 // exit names them. A denied request made nothing to end, and still exits 77.
 func TestATTLTheBrokerDidNotGiveEndsWhatTheRequestMade(t *testing.T) {
+	t.Parallel()
 	binary := buildAgentSecrets(t)
 	b := newTTLBroker(t)
 	keyDir := newKeyDir(t)

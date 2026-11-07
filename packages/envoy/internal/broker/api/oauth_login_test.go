@@ -143,6 +143,7 @@ func oauthErrorCode(t *testing.T, err error) (string, string) {
 }
 
 func TestADeviceLoginIsApprovedThroughDispatchsRoutesAndIssuesACredential(t *testing.T) {
+	t.Parallel()
 	rig := brokertest.NewRig(t)
 	m := newDeviceMachine(t, rig)
 	da := m.login(t)
@@ -195,6 +196,7 @@ func TestADeviceLoginIsApprovedThroughDispatchsRoutesAndIssuesACredential(t *tes
 // TestADeviceLoginsCodeIsTypedAsAPersonTypesIt: Dispatch's lookup and approval take the code as a
 // person types it, in lower case with a space for the dash, and find and approve the login.
 func TestADeviceLoginsCodeIsTypedAsAPersonTypesIt(t *testing.T) {
+	t.Parallel()
 	rig := brokertest.NewRig(t)
 	m := newDeviceMachine(t, rig)
 	da := m.login(t)
@@ -215,6 +217,7 @@ func TestADeviceLoginsCodeIsTypedAsAPersonTypesIt(t *testing.T) {
 }
 
 func TestOnlyTheNamedPersonApprovesADeviceLogin(t *testing.T) {
+	t.Parallel()
 	rig := brokertest.NewRig(t)
 	m := newDeviceMachine(t, rig)
 	da := m.login(t)
@@ -228,6 +231,7 @@ func TestOnlyTheNamedPersonApprovesADeviceLogin(t *testing.T) {
 }
 
 func TestADeviceLoginNamingAServiceIsRefused(t *testing.T) {
+	t.Parallel()
 	rig := brokertest.NewRig(t)
 	m := newDeviceMachine(t, rig)
 	_, err := m.authorize(m.request(t, "", "legion-daemon"), m.thumbprint(t))
@@ -237,6 +241,7 @@ func TestADeviceLoginNamingAServiceIsRefused(t *testing.T) {
 }
 
 func TestADeviceRequestObjectIsSingleUse(t *testing.T) {
+	t.Parallel()
 	rig := brokertest.NewRig(t)
 	m := newDeviceMachine(t, rig)
 	request := m.request(t, rig.Operator, "")
@@ -250,6 +255,7 @@ func TestADeviceRequestObjectIsSingleUse(t *testing.T) {
 }
 
 func TestADeviceLoginsKeyMustBeItsRequestObjects(t *testing.T) {
+	t.Parallel()
 	rig := brokertest.NewRig(t)
 	m := newDeviceMachine(t, rig)
 	other := newDeviceMachine(t, rig)
@@ -264,6 +270,7 @@ func TestADeviceLoginsKeyMustBeItsRequestObjects(t *testing.T) {
 }
 
 func TestARefreshMovesTheCredentialsExpiry(t *testing.T) {
+	t.Parallel()
 	rig := brokertest.NewRig(t)
 	m, tok, credentialID := approvedLogin(t, rig)
 	ctx := context.Background()
@@ -304,6 +311,7 @@ func TestARefreshMovesTheCredentialsExpiry(t *testing.T) {
 }
 
 func TestARevokedMachineRefusesItsNextCallAndItsRefresh(t *testing.T) {
+	t.Parallel()
 	rig := brokertest.NewRig(t)
 	m, tok, credentialID := approvedLogin(t, rig)
 	status, body := enrollSession(t, rig, m.key, credentialID)
@@ -336,6 +344,7 @@ func TestARevokedMachineRefusesItsNextCallAndItsRefresh(t *testing.T) {
 // names, as a revoke does: the key enrolls nothing more, the sessions it enrolled end, and the
 // audit row names the reuse.
 func TestReusingARotatedRefreshTokenRevokesTheMachine(t *testing.T) {
+	t.Parallel()
 	rig := brokertest.NewRig(t)
 	m, tok, credentialID := approvedLogin(t, rig)
 	if status, body := enrollSession(t, rig, m.key, credentialID); status != http.StatusCreated {
@@ -416,6 +425,7 @@ func (m *deviceMachine) refreshAt(t *testing.T, tok *oauth2.Token, target, host 
 // broker's BROKER_PUBLIC_URL, as every other broker proof does, whatever Host and
 // X-Forwarded-Proto the hop in front of the broker sends.
 func TestTheTokenEndpointChecksDPoPAgainstThePublicURL(t *testing.T) {
+	t.Parallel()
 	rig := brokertest.NewRig(t)
 	m, tok, _ := approvedLogin(t, rig)
 	// A proxy that rewrites Host, over plain http: the proof names the public URL.
@@ -432,6 +442,7 @@ func TestTheTokenEndpointChecksDPoPAgainstThePublicURL(t *testing.T) {
 }
 
 func TestAnUnrefreshedLoginLapses(t *testing.T) {
+	t.Parallel()
 	rig := brokertest.NewRig(t)
 	m, tok, credentialID := approvedLogin(t, rig)
 	ctx := context.Background()
@@ -453,6 +464,7 @@ func TestAnUnrefreshedLoginLapses(t *testing.T) {
 // TestARefreshOfALapsedCredentialIsRefused pins the refresh's liveness check on its own: a
 // credential past its expiry is not revived by a refresh token that has not itself expired.
 func TestARefreshOfALapsedCredentialIsRefused(t *testing.T) {
+	t.Parallel()
 	rig := brokertest.NewRig(t)
 	m, tok, credentialID := approvedLogin(t, rig)
 	if _, err := rig.Store.Pool.Exec(context.Background(), `update launcher_credentials set expires_at = now() - interval '1 minute' where id=$1`, credentialID); err != nil {
@@ -467,6 +479,7 @@ func TestARefreshOfALapsedCredentialIsRefused(t *testing.T) {
 // TestADeviceCodeOfARevokedLoginIsRefused pins the device code grant's liveness check: a login
 // revoked between its approval and its poll issues no tokens.
 func TestADeviceCodeOfARevokedLoginIsRefused(t *testing.T) {
+	t.Parallel()
 	rig := brokertest.NewRig(t)
 	m := newDeviceMachine(t, rig)
 	da := m.login(t)
@@ -488,6 +501,7 @@ func TestADeviceCodeOfARevokedLoginIsRefused(t *testing.T) {
 }
 
 func TestADeniedDeviceLoginIsAccessDenied(t *testing.T) {
+	t.Parallel()
 	rig := brokertest.NewRig(t)
 	m := newDeviceMachine(t, rig)
 	da := m.login(t)
@@ -675,6 +689,7 @@ func activeTokens(t *testing.T, rig *brokertest.Rig, credentialID string) int {
 // from its liveness check until its new tokens commit: a revoke that arrives in that window waits,
 // then ends the tokens the refresh just issued, so none stays active for the revoked login.
 func TestARevokeQueuedBehindARefreshEndsItsNewTokens(t *testing.T) {
+	t.Parallel()
 	rig := brokertest.NewRig(t)
 	m, tok, credentialID := approvedLogin(t, rig)
 	holder, pid := lockCredential(t, rig, credentialID)
@@ -704,6 +719,7 @@ func TestARevokeQueuedBehindARefreshEndsItsNewTokens(t *testing.T) {
 // TestARefreshQueuedBehindARevokeIsRefused pins the other order: a refresh that reaches the
 // credential's row after a revoke took it finds the login ended and issues nothing.
 func TestARefreshQueuedBehindARevokeIsRefused(t *testing.T) {
+	t.Parallel()
 	rig := brokertest.NewRig(t)
 	m, tok, credentialID := approvedLogin(t, rig)
 	holder, pid := lockCredential(t, rig, credentialID)
@@ -730,6 +746,7 @@ func TestARefreshQueuedBehindARevokeIsRefused(t *testing.T) {
 // replaced with that login's own launcher proof. The retired login enrolls nothing more and its
 // refresh is refused, while the session it enrolled stays live and renews with its own key.
 func TestARetiredMachineLoginKeepsItsSessions(t *testing.T) {
+	t.Parallel()
 	rig := brokertest.NewRig(t)
 	m, tok, credentialID := approvedLogin(t, rig)
 	sessionKey := newSigningKey(t)
@@ -799,6 +816,7 @@ func TestARetiredMachineLoginKeepsItsSessions(t *testing.T) {
 // its grace), after the retire is a plain invalid_grant: the retire deleted the family, so neither
 // presentation reaches the reuse path, the credential is not revoked, and its session stays live.
 func TestARetiredLoginsRefreshTokensRevokeNothing(t *testing.T) {
+	t.Parallel()
 	rig := brokertest.NewRig(t)
 	m, rotated, credentialID := approvedLogin(t, rig)
 	latest, err := m.refresh(rotated)

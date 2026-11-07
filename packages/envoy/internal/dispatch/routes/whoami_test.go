@@ -100,6 +100,7 @@ func createProject(t *testing.T, handler http.Handler, key string) {
 // GET /auth/whoami carries event_head, the decimal id of the newest committed event, read after the
 // sign-in check: "0" on an empty log, and the third event's id once three have committed.
 func TestWhoamiCarriesTheNewestEventID(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	handler := storeRouter(t, database)
 	if answer := askWhoami(t, handler); answer.EventHead != "0" {
@@ -137,6 +138,17 @@ func TestWhoamiCarriesTheNewestEventID(t *testing.T) {
 // answer, before the subscription -- reaches it during catch-up, and the subscription's
 // events_start names that head.
 func TestAnEventsSubscriptionFromTheWhoamiHeadReplaysWhatCommittedSince(t *testing.T) {
+	// No t.Parallel: this test waits for the relay's first start, which waits for a horizon
+	// proven after it (api.server.firstRelayCursor, events.Horizon.Await), and that horizon is
+	// proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the instance
+	// (internal/dispatch/events, horizon.go). Its own parallel neighbours hold such ids open on
+	// purpose: TestWhoamiDoesNotSendAPageToReplayTheWholeLogWhileAWriteFromBeforeBootIsOpen holds
+	// one for three seconds, TestWhoamiEventHeadStaysBelowAnEventStillOpen holds an event insert,
+	// and every storetest.Open holds one for its `create database ... strategy file_copy`.
+	// Beside the first two this test took 9.44 s of its socket's ten-second
+	// read deadline on a two-core pod, against 0.48 s with the package to itself, and on CI run
+	// 41868325451 it failed that deadline waiting for its events_start. The api package took the
+	// same family of tests out of its parallel set for this (dispatch://INFRA-1075).
 	database := storetest.Open(t)
 	handler := storeRouter(t, database)
 	server := httptest.NewServer(handler)
@@ -209,6 +221,7 @@ func TestAnEventsSubscriptionFromTheWhoamiHeadReplaysWhatCommittedSince(t *testi
 // EVENT_HEAD_UNAVAILABLE, which the page asks again for without limit: a database that does not
 // answer must end at the page's error, not keep it loading for ever.
 func TestWhoamiRefusesWhenItCannotReadTheEventHead(t *testing.T) {
+	t.Parallel()
 	for name, build := range map[string]func(t *testing.T) AppContextOptions{
 		"a router with no store": func(*testing.T) AppContextOptions { return AppContextOptions{} },
 		"a database that stopped answering": func(t *testing.T) AppContextOptions {
@@ -250,6 +263,7 @@ func TestWhoamiRefusesWhenItCannotReadTheEventHead(t *testing.T) {
 // and the head is not read for it: a 503 there would have a signed-out page retry a server that
 // only needs its sign-in. The same router signed in is answered the 503.
 func TestAnAnonymousWhoamiIsUnauthorizedWhileTheEventHeadCannotBeRead(t *testing.T) {
+	t.Parallel()
 	people := newMemoryPeople()
 	ctx, err := BuildAppContext(AppContextOptions{
 		SigningKey: testSigningKey,
@@ -302,6 +316,7 @@ func TestAnAnonymousWhoamiIsUnauthorizedWhileTheEventHeadCannotBeRead(t *testing
 // on its own once the open event insert does. The same error wrapped is answered the same, and a
 // failed read is EVENT_HEAD_READ_FAILED.
 func TestWhoamiAnswersEventHeadUnavailableOnlyWhileNoHeadIsProven(t *testing.T) {
+	t.Parallel()
 	for name, tc := range map[string]struct {
 		err  error
 		code string
@@ -462,6 +477,7 @@ func holdClusterTransactionID(t *testing.T, hold time.Duration) (release func())
 // still open, which stands below the open id. Once that write
 // commits, it answers at least the higher id.
 func TestWhoamiEventHeadStaysBelowAnEventStillOpen(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	handler := storeRouter(t, database)
 	createProject(t, handler, "ONE")
@@ -489,6 +505,9 @@ func TestWhoamiEventHeadStaysBelowAnEventStillOpen(t *testing.T) {
 // package's test, does not hold every page's load for the two seconds eventFeedHead would otherwise
 // wait -- and the head it answers is still the log's newest id.
 func TestWhoamiDoesNotWaitOnATransactionInAnotherDatabase(t *testing.T) {
+	// No t.Parallel: holdClusterTransactionID below holds a transaction id on the whole Postgres
+	// instance for thirty seconds, which keeps every horizon on it from being proven
+	// (internal/dispatch/events, horizon.go), and this test bounds how long whoami takes.
 	database := storetest.Open(t)
 	handler := storeRouter(t, database)
 	createProject(t, handler, "ONE")
@@ -511,6 +530,8 @@ func TestWhoamiDoesNotWaitOnATransactionInAnotherDatabase(t *testing.T) {
 // id after that mark, so it answers from that mark at once: below the open id, and at or above
 // what the earlier call answered.
 func TestWhoamiAnswersAtOnceWhileAWriteOfThisDatabaseIsOpen(t *testing.T) {
+	// No t.Parallel: this test bounds how long whoami takes (500 ms) while a write of its own
+	// database is open, which every test running beside it would spend the pod's two cores on.
 	database := storetest.Open(t)
 	handler := storeRouter(t, database)
 	createProject(t, handler, "ONE")
@@ -537,6 +558,7 @@ func TestWhoamiAnswersAtOnceWhileAWriteOfThisDatabaseIsOpen(t *testing.T) {
 // first 120 s and had not reached the newest. Every event that committed before that write took its
 // id is final, so event_head may stand below the open write but not below those.
 func TestWhoamiDoesNotSendAPageToReplayTheWholeLogWhileAWriteFromBeforeBootIsOpen(t *testing.T) {
+	t.Parallel()
 	const committed = 1000
 	database := storetest.Open(t)
 	ctx := t.Context()
@@ -577,6 +599,11 @@ func TestWhoamiDoesNotSendAPageToReplayTheWholeLogWhileAWriteFromBeforeBootIsOpe
 // horizon the process before it persisted is final, so whoami answers that at once, below the open
 // event, rather than waiting for the insert or answering 503.
 func TestWhoamiAnswersThePersistedHorizonWhileAnEventInsertFromBeforeBootIsOpen(t *testing.T) {
+	// No t.Parallel: this test waits for a horizon proven over the whole log (events.Horizon.Safe),
+	// which is proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the
+	// instance (internal/dispatch/events, horizon.go), so it waits out every transaction id a test
+	// beside it holds. On CI run 41868325451 a sibling package's `create database ... template ...`
+	// held it past this loop's thirty seconds.
 	database := storetest.Open(t)
 	ctx := t.Context()
 	for _, key := range []string{"ONE", "TWO"} {

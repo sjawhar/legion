@@ -16,6 +16,9 @@ import (
 // table that grows with every document, ask or event. So must the restoration of a decided ask's
 // wording, which every settlement of a document holding one runs over its decided asks, reaching
 // them through their primary key, and which the boot runs over every decided ask (a null $1).
+// It runs on its own: which index the planner picks rests on the statistics of the database the
+// harness hands the test, and a test writing into its own database beside this one changes when
+// the server gathers them.
 func TestCopiedAskQueriesAvoidSequentialScans(t *testing.T) {
 	service, _ := newTestService(t)
 	ctx := context.Background()

@@ -10,6 +10,7 @@ import (
 // A check's words are its assertion. Rewording it under an unchanged serves edge
 // must stay stale; INFRA-1253 R4 inherits this characterization of today's carry.
 func TestACheckWhoseWordsChangedCarriesNoApprovalThoughItsServesDidNot(t *testing.T) {
+	t.Parallel()
 	handler, database, _ := settlingCarryDocuments(t, 20*time.Millisecond)
 	issue := createInteractionIssue(t, handler, "WORDS", "Check words", ":::requirement{#r1}\nThe read succeeds.\n:::\n")
 	verification := uploadDocument(t, handler, "/api/v1/issues/"+issue.Key, "verification.md", fmt.Sprintf(":::check{#c1 serves=\"dispatch://%s/spec#b-r1\" surface=\"api\" run=\"go test ./x\"}\nThe read returns 200.\n:::\n", issue.Key))

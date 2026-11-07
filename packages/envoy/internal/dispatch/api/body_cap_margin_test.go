@@ -16,6 +16,7 @@ import (
 // the anchored path at a body of six 20,000-unit paragraphs: the comment is accepted, and the
 // margin record read back carries it whole (INFRA-370).
 func TestAnchoredCommentOfManyBlocksReachesTheMarginWhole(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Anchored body bounds", "The quick brown fox")
 	body := paragraphBody(6, 20_000)

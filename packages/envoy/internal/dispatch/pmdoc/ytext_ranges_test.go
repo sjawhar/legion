@@ -68,6 +68,7 @@ func frozenYTextRanges(frag *crdt.YXmlFragment) ([]yTextRange, error) {
 // walkTestTrees does not build: an element named doc below the document, which adds no positions
 // of its own, beside leaves and a text holding children and an empty text.
 func TestWalkMatchesTheReferenceWalkOnHandBuiltShapes(t *testing.T) {
+	t.Parallel()
 	text := func(value string) *Node { return &Node{Type: "text", Text: value} }
 	node := func(nodeType string, children ...*Node) *Node { return &Node{Type: nodeType, Children: children} }
 	tree := node("doc",
@@ -182,6 +183,7 @@ func writeTree(t testing.TB, tree *Node, options ...crdt.DocOption) (*crdt.Doc, 
 }
 
 func TestYTextRangesMatchesFrozenOnDocuments(t *testing.T) {
+	t.Parallel()
 	type document struct {
 		name     string
 		markdown string
@@ -239,6 +241,7 @@ func TestYTextRangesMatchesFrozenOnDocuments(t *testing.T) {
 // one-pass walk must refuse it with the frozen walk's error, met in the same order, or read it the
 // same way.
 func TestYTextRangesMatchesFrozenOnRefusals(t *testing.T) {
+	t.Parallel()
 	element := func(txn *crdt.Transaction, parent *crdt.YXmlFragment, name string) *crdt.YXmlElement {
 		child := crdt.NewYXmlElement(name)
 		parent.InsertElement(txn, len(parent.Children()), child)
@@ -386,6 +389,7 @@ func TestYTextRangesMatchesFrozenOnRefusals(t *testing.T) {
 }
 
 func TestYTextRangesMatchesFrozenOnAnchorCorpus(t *testing.T) {
+	t.Parallel()
 	for _, document := range anchorCorpusMarkdown(t) {
 		t.Run(document.name, func(t *testing.T) {
 			checked := 0

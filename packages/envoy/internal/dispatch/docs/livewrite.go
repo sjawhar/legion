@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"weak"
 
 	"github.com/reearth/ygo/crdt"
@@ -294,7 +293,7 @@ func (s *Service) openLiveWrite(ctx context.Context, ledger *Ledger, artifactID 
 		state := s.lockState(artifactID)
 		if state.reloading {
 			s.unlockState(artifactID, state)
-			slog.Warn("dispatch: refuse a write on a document room closing on a replaced stored history", "room", artifactID)
+			s.log().Warn("dispatch: refuse a write on a document room closing on a replaced stored history", "room", artifactID)
 			return nil, fmt.Errorf("%w: room %s", errRoomReloading, artifactID)
 		}
 		if state.liveWriter == nil {
@@ -842,13 +841,8 @@ func (s *Service) publishLiveWrite(write *liveWrite) {
 	defer s.finishLiveWrite(write)
 	s.hooks.parkLiveWrite(write.artifactID, PauseAfterCommit)
 	defer s.closeShadow(write)
-	// Committed, the write has no more use for its fork, so the fork goes before the publish,
-	// which loads the room when no room holds the document (coldFork). The room's shadow keeps it
-	// (newShadow).
-	if s.checkRendering != nil {
-		s.checkRendering("publish", write)
-	}
-	write.releaseFork()
+	// The write let go of its fork at its commit, where the room's shadow took it (Ledger.commit),
+	// so nothing of it is left here to hold.
 	if !s.roomHeld(write.artifactID) {
 		if len(write.updates) > 0 {
 			s.scheduleSettle(write.artifactID)
@@ -865,7 +859,7 @@ func (s *Service) publishLiveWrite(write *liveWrite) {
 		if err == nil {
 			continue
 		}
-		slog.Error("dispatch: publish committed live document write", "room", write.artifactID, "error", err)
+		s.log().Error("dispatch: publish committed live document write", "room", write.artifactID, "error", err)
 		if s.afterPublishRefused != nil {
 			s.afterPublishRefused(write.artifactID)
 		}

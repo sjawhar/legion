@@ -24,9 +24,9 @@ const (
 	signInOtherVM  = "example-pool@example-project.iam.gserviceaccount.com"
 )
 
-// record writes one sign-in through a transaction of its own, which is how the exchange writes
+// recordSignIn writes one sign-in through a transaction of its own, which is how the exchange writes
 // it: the broker's own transaction carries the token the sign-in is recorded beside.
-func record(t *testing.T, st *store.Store, person, thumbprint, machine string) error {
+func recordSignIn(t *testing.T, st *store.Store, person, thumbprint, machine string) error {
 	t.Helper()
 	ctx := context.Background()
 	tx, err := st.Pool.Begin(ctx)
@@ -48,7 +48,7 @@ func record(t *testing.T, st *store.Store, person, thumbprint, machine string) e
 // else, so a person holds one sign-in per box however often that box trades.
 func TestAPersonsFirstTradeRecordsTheSignInAndEachLaterOneUsesIt(t *testing.T) {
 	st := storetest.Open(t)
-	if err := record(t, st, signInPerson, signInBoxOne, signInMachine); err != nil {
+	if err := recordSignIn(t, st, signInPerson, signInBoxOne, signInMachine); err != nil {
 		t.Fatalf("the first trade of a box key: %v", err)
 	}
 	first := onlySignIn(t, st, signInPerson)
@@ -58,7 +58,7 @@ func TestAPersonsFirstTradeRecordsTheSignInAndEachLaterOneUsesIt(t *testing.T) {
 	if !first.LastUsedAt.Equal(first.CreatedAt) {
 		t.Errorf("a sign-in just made was last used at %v and made at %v, want the two alike", first.LastUsedAt, first.CreatedAt)
 	}
-	if err := record(t, st, signInPerson, signInBoxOne, signInMachine); err != nil {
+	if err := recordSignIn(t, st, signInPerson, signInBoxOne, signInMachine); err != nil {
 		t.Fatalf("the second trade of the same box key: %v", err)
 	}
 	again := onlySignIn(t, st, signInPerson)
@@ -80,8 +80,8 @@ func TestAPersonSigningInOnASecondBoxGetsASignInOfItsOwn(t *testing.T) {
 		{signInPerson, signInBoxTwo, signInOtherVM},
 		{signInOther, signInBoxThree, signInMachine},
 	} {
-		if err := record(t, st, c.person, c.thumbprint, c.machine); err != nil {
-			t.Fatalf("record(%s, %s): %v", c.person, c.machine, err)
+		if err := recordSignIn(t, st, c.person, c.thumbprint, c.machine); err != nil {
+			t.Fatalf("recordSignIn(%s, %s): %v", c.person, c.machine, err)
 		}
 	}
 	mine, err := st.PersonSignIns(context.Background(), signInPerson)
@@ -110,8 +110,8 @@ func TestARevokedSignInIsRefusedForeverAndLeavesTheOthersWorking(t *testing.T) {
 	st := storetest.Open(t)
 	ctx := context.Background()
 	for _, thumbprint := range []string{signInBoxOne, signInBoxTwo} {
-		if err := record(t, st, signInPerson, thumbprint, signInMachine); err != nil {
-			t.Fatalf("record(%s): %v", thumbprint, err)
+		if err := recordSignIn(t, st, signInPerson, thumbprint, signInMachine); err != nil {
+			t.Fatalf("recordSignIn(%s): %v", thumbprint, err)
 		}
 	}
 	revoked := signInFor(t, st, signInPerson, signInBoxOne)
@@ -119,11 +119,11 @@ func TestARevokedSignInIsRefusedForeverAndLeavesTheOthersWorking(t *testing.T) {
 		t.Fatalf("RevokePersonSignInTx: %v", err)
 	}
 	for i := range 2 {
-		if err := record(t, st, signInPerson, signInBoxOne, signInMachine); !errors.Is(err, store.ErrSignInRevoked) {
+		if err := recordSignIn(t, st, signInPerson, signInBoxOne, signInMachine); !errors.Is(err, store.ErrSignInRevoked) {
 			t.Fatalf("trade %d of the revoked box key = %v, want %v", i, err, store.ErrSignInRevoked)
 		}
 	}
-	if err := record(t, st, signInPerson, signInBoxTwo, signInMachine); err != nil {
+	if err := recordSignIn(t, st, signInPerson, signInBoxTwo, signInMachine); err != nil {
 		t.Fatalf("the person's other box = %v, want it still trading: revoking one sign-in ends one", err)
 	}
 	live, err := st.PersonSignIns(ctx, signInPerson)
@@ -143,18 +143,18 @@ func TestARevokedSignInIsRefusedForeverAndLeavesTheOthersWorking(t *testing.T) {
 // the machine is held, the row keeps the account it was made with, and the box signs in again.
 func TestASignInsBoxKeyPresentedFromAnotherMachineIsRefused(t *testing.T) {
 	st := storetest.Open(t)
-	if err := record(t, st, signInPerson, signInBoxOne, signInMachine); err != nil {
+	if err := recordSignIn(t, st, signInPerson, signInBoxOne, signInMachine); err != nil {
 		t.Fatalf("the first trade: %v", err)
 	}
 	made := onlySignIn(t, st, signInPerson)
-	if err := record(t, st, signInPerson, signInBoxOne, signInOtherVM); !errors.Is(err, store.ErrSignInMachineChanged) {
+	if err := recordSignIn(t, st, signInPerson, signInBoxOne, signInOtherVM); !errors.Is(err, store.ErrSignInMachineChanged) {
 		t.Fatalf("the same box key from %s = %v, want %v", signInOtherVM, err, store.ErrSignInMachineChanged)
 	}
 	kept := onlySignIn(t, st, signInPerson)
 	if kept.ID != made.ID || kept.MachineAccount != signInMachine {
 		t.Fatalf("the sign-in is now %+v, want the one row it was, still on %s", kept, signInMachine)
 	}
-	if err := record(t, st, signInPerson, signInBoxOne, signInMachine); err != nil {
+	if err := recordSignIn(t, st, signInPerson, signInBoxOne, signInMachine); err != nil {
 		t.Fatalf("the machine the sign-in was made on trades again: %v, want it still working", err)
 	}
 	// A revoke outranks the machine in the wording, since it is the refusal that is final for
@@ -163,7 +163,7 @@ func TestASignInsBoxKeyPresentedFromAnotherMachineIsRefused(t *testing.T) {
 	if _, _, err := revokeSignIn(t, st, revoked.ID, signInPerson); err != nil {
 		t.Fatalf("RevokePersonSignInTx: %v", err)
 	}
-	if err := record(t, st, signInPerson, signInBoxOne, signInOtherVM); !errors.Is(err, store.ErrSignInRevoked) {
+	if err := recordSignIn(t, st, signInPerson, signInBoxOne, signInOtherVM); !errors.Is(err, store.ErrSignInRevoked) {
 		t.Fatalf("a revoked sign-in's key from another machine = %v, want %v", err, store.ErrSignInRevoked)
 	}
 }
@@ -179,8 +179,8 @@ func TestRevokingASignInEndsTheTokensMintedUnderIt(t *testing.T) {
 		{signInPerson, signInBoxTwo},
 		{signInOther, signInBoxOne},
 	} {
-		if err := record(t, st, c.person, c.thumbprint, signInMachine); err != nil {
-			t.Fatalf("record(%s, %s): %v", c.person, c.thumbprint, err)
+		if err := recordSignIn(t, st, c.person, c.thumbprint, signInMachine); err != nil {
+			t.Fatalf("recordSignIn(%s, %s): %v", c.person, c.thumbprint, err)
 		}
 	}
 	// Two tokens on the revoked box and one on each of the others, written as the exchange
@@ -226,8 +226,8 @@ func TestRevokingASignInEndsTheTokensMintedUnderIt(t *testing.T) {
 func TestRevokingASignInThatIsNotThePersonsIsAnUnknownId(t *testing.T) {
 	st := storetest.Open(t)
 	ctx := context.Background()
-	if err := record(t, st, signInOther, signInBoxOne, signInMachine); err != nil {
-		t.Fatalf("record: %v", err)
+	if err := recordSignIn(t, st, signInOther, signInBoxOne, signInMachine); err != nil {
+		t.Fatalf("recordSignIn: %v", err)
 	}
 	theirs := signInFor(t, st, signInOther, signInBoxOne)
 	for _, id := range []string{theirs.ID, "00000000-0000-4000-8000-000000000000"} {
@@ -247,7 +247,7 @@ func TestRevokingASignInThatIsNotThePersonsIsAnUnknownId(t *testing.T) {
 // one canonical form every login the broker compares is in.
 func TestPersonSignInsRefusesAValueOutsideItsVocabulary(t *testing.T) {
 	st := storetest.Open(t)
-	if err := record(t, st, "Ada@Example.com", signInBoxOne, "Example-Fleet@example-project.iam.gserviceaccount.com"); err != nil {
+	if err := recordSignIn(t, st, "Ada@Example.com", signInBoxOne, "Example-Fleet@example-project.iam.gserviceaccount.com"); err != nil {
 		t.Fatalf("a login and an account in capitals: %v, want them written in lowercase", err)
 	}
 	in := onlySignIn(t, st, signInPerson)
@@ -261,8 +261,8 @@ func TestPersonSignInsRefusesAValueOutsideItsVocabulary(t *testing.T) {
 		{name: "a thumbprint that is a provider's own sentence", person: signInOther, thumbprint: "the key ada@example.com signed with", machine: signInMachine},
 		{name: "a blank machine account", person: signInOther, thumbprint: signInBoxTwo, machine: ""},
 	} {
-		if err := record(t, st, c.person, c.thumbprint, c.machine); err == nil {
-			t.Errorf("record(%s) was accepted, want Postgres to refuse it", c.name)
+		if err := recordSignIn(t, st, c.person, c.thumbprint, c.machine); err == nil {
+			t.Errorf("recordSignIn(%s) was accepted, want Postgres to refuse it", c.name)
 		}
 	}
 }
@@ -401,7 +401,7 @@ func TestMigrationTwentyFiveHoldsOneSignInPerPersonAndBoxKey(t *testing.T) {
 func TestATradeRacingTheRevokeThatCommitsFirstIsRefused(t *testing.T) {
 	st := storetest.Open(t, "pool_max_conns=6")
 	ctx := context.Background()
-	if err := record(t, st, signInPerson, signInBoxOne, signInMachine); err != nil {
+	if err := recordSignIn(t, st, signInPerson, signInBoxOne, signInMachine); err != nil {
 		t.Fatalf("the first trade: %v", err)
 	}
 	signIn := signInFor(t, st, signInPerson, signInBoxOne)

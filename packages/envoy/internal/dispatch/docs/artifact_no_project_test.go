@@ -19,6 +19,7 @@ import (
 // (the shape a Dispatch from before 0071 meets, sjawhar/legion#1802); a document with its project
 // nulled, the other no-project shape, is one artifacts_one_owner refuses.
 func TestDocumentOwnerReadsServeARowWithNoProject(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	ctx := context.Background()
 	issueDocument := createDocument(t, database, "# Notes\n\nThe plan stands.\n")

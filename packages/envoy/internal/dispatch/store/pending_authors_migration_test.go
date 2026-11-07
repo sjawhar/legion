@@ -10,6 +10,7 @@ import (
 // settlement reads back with no latest edit source, and the new table starts empty and takes an
 // author per writing update.
 func TestMigrate0084KeepsEveryOwedSettlementAndStartsWithNoPendingAuthors(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store := openEmptyTestStore(t)
 	migrateThrough(t, store, 83)

@@ -61,6 +61,7 @@ func serveTokenExchange(t *testing.T, f *enrolBroker, mux *http.ServeMux, thumbp
 // otherwise sleep out the hour its token lives — trades again straight away, so the next
 // register finds a credential rather than NO_CREDENTIAL.
 func TestADroppedCredentialInIdentityModeIsTradedAgainAtOnce(t *testing.T) {
+	t.Parallel()
 	f := newEnrolBroker(t)
 	key, err := proof.NewKey()
 	if err != nil {

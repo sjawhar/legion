@@ -109,6 +109,7 @@ func containsTopic(topics []string, want string) bool {
 }
 
 func TestRoleTransfer_ExactlyOneHolder(t *testing.T) {
+	t.Parallel()
 	env := setupTestEnv(t)
 	env.registerInterest("ses_role_a", nil)
 	env.registerInterest("ses_role_b", nil)
@@ -120,30 +121,19 @@ func TestRoleTransfer_ExactlyOneHolder(t *testing.T) {
 		t.Fatalf("SetRole for B failed: %v", err)
 	}
 
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
+	waitUntil(t, 5*time.Second, "the role to name exactly one holder", func() bool {
 		a, errA := env.registry.Get(context.Background(), "ses_role_a")
 		b, errB := env.registry.Get(context.Background(), "ses_role_b")
 		matches := env.registry.Match("test-machine", "notifications.role.legion-controller")
-		if errA == nil && errB == nil && !containsTopic(a.Topics, "notifications.role.legion-controller") && containsTopic(b.Topics, "notifications.role.legion-controller") && len(matches) == 1 && matches[0].SessionID == "ses_role_b" {
-			return
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-
-	a, err := env.registry.Get(context.Background(), "ses_role_a")
-	if err != nil {
-		t.Fatalf("Get A failed: %v", err)
-	}
-	b, err := env.registry.Get(context.Background(), "ses_role_b")
-	if err != nil {
-		t.Fatalf("Get B failed: %v", err)
-	}
-	matches := env.registry.Match("test-machine", "notifications.role.legion-controller")
-	t.Fatalf("timed out waiting for role transfer: A=%v B=%v matches=%v", a.Topics, b.Topics, matches)
+		return errA == nil && errB == nil &&
+			!containsTopic(a.Topics, "notifications.role.legion-controller") &&
+			containsTopic(b.Topics, "notifications.role.legion-controller") &&
+			len(matches) == 1 && matches[0].SessionID == "ses_role_b"
+	})
 }
 
 func TestDelivery_KVEntryExpiresButInterestPersists(t *testing.T) {
+	t.Parallel()
 	env := setupTestEnv(t, withSessionTTL(2*time.Second))
 
 	env.registerKVSession("ses_expiry_check")
@@ -153,39 +143,36 @@ func TestDelivery_KVEntryExpiresButInterestPersists(t *testing.T) {
 		t.Fatalf("expected KV entry to exist: %v", err)
 	}
 
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		time.Sleep(500 * time.Millisecond)
-		if _, err := env.sessions.Get("ses_expiry_check"); err != nil {
-			interest, err := env.registry.Get(context.Background(), "ses_expiry_check")
-			if err != nil {
-				t.Fatalf("interest should persist after session expiry, got: %v", err)
-			}
-			if interest.SessionID != "ses_expiry_check" {
-				t.Fatalf("wrong interest session ID: %s", interest.SessionID)
-			}
-			return
-		}
+	waitUntil(t, 5*time.Second, "the session entry to expire", func() bool {
+		_, err := env.sessions.Get("ses_expiry_check")
+		return err != nil
+	})
+	interest, err := env.registry.Get(context.Background(), "ses_expiry_check")
+	if err != nil {
+		t.Fatalf("interest should persist after session expiry, got: %v", err)
 	}
-	t.Fatal("KV entry did not expire within 5s (TTL was 2s)")
+	if interest.SessionID != "ses_expiry_check" {
+		t.Fatalf("wrong interest session ID: %s", interest.SessionID)
+	}
 }
 
 func TestDelivery_RegistryListReturnsSortedInterests(t *testing.T) {
+	t.Parallel()
 	env := setupTestEnv(t)
 
 	env.registerInterest("ses_charlie", []string{"notifications.test.>"})
 	env.registerInterest("ses_alpha", []string{"notifications.test.>"})
 	env.registerInterest("ses_bravo", []string{"notifications.test.>"})
 
-	// Allow watcher to propagate Upsert events to cache
-	time.Sleep(500 * time.Millisecond)
+	// The cache follows the bucket through its watcher: wait for the three upserts to reach it.
+	waitUntil(t, 5*time.Second, "the three interests to reach the cache", func() bool {
+		items, err := env.registry.List()
+		return err == nil && len(items) == 3
+	})
 
 	items, err := env.registry.List()
 	if err != nil {
 		t.Fatalf("list interests: %v", err)
-	}
-	if len(items) != 3 {
-		t.Fatalf("expected 3 interests, got %d", len(items))
 	}
 	if items[0].SessionID != "ses_alpha" {
 		t.Fatalf("expected first item to be ses_alpha, got %s", items[0].SessionID)

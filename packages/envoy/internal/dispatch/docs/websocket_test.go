@@ -34,6 +34,7 @@ func connectPeer(t *testing.T, serverURL, artifactID, login string) *docstest.Pe
 }
 
 func TestIssueCloseClosesOpenDocumentConnection(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	seedServiceText(t, service, artifactID, "before")
 	httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
@@ -70,6 +71,7 @@ func TestIssueCloseClosesOpenDocumentConnection(t *testing.T) {
 // load after the reopen committed makes holds the default flag, open, while a browser on it was
 // admitted read-only.
 func TestIssueReopenClosesADocumentConnectionAdmittedWhileClosed(t *testing.T) {
+	t.Parallel()
 	for _, row := range []struct {
 		name string
 		// recreated gives the room's state the flag a recreated state starts with.
@@ -112,7 +114,7 @@ func TestIssueReopenClosesADocumentConnectionAdmittedWhileClosed(t *testing.T) {
 			case <-reader.Answers:
 			case <-reader.Ended:
 				t.Fatal("the room closed the read-only reader's connection over its keystroke")
-			case <-time.After(10 * time.Second):
+			case <-time.After(roomWait(t)):
 				t.Fatal("the room did not answer the reader after its keystroke")
 			}
 			if text := documentText(t, service, artifactID); text != "before\n" {
@@ -130,8 +132,8 @@ func TestIssueReopenClosesADocumentConnectionAdmittedWhileClosed(t *testing.T) {
 			// browser's provider answers by reconnecting.
 			select {
 			case <-reader.Ended:
-			case <-time.After(5 * time.Second):
-				t.Fatal("the connection admitted while the issue was closed was still open 5s after the reopen")
+			case <-time.After(roomWait(t)):
+				t.Fatal("the connection admitted while the issue was closed was still open after the reopen, within roomWait")
 			}
 			// The room a connection now loads takes edits. It loads from the store, so its copy
 			// also shows the read-only reader's keystroke never reached the store.
@@ -146,6 +148,7 @@ func TestIssueReopenClosesADocumentConnectionAdmittedWhileClosed(t *testing.T) {
 }
 
 func TestClosedColdRoomAuthorizesReadOnly(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	if _, err := service.store.Pool.Exec(context.Background(), `update issues set closed_at = now() where key = 'DOC-1'`); err != nil {
 		t.Fatalf("close document issue: %v", err)
@@ -161,6 +164,7 @@ func TestClosedColdRoomAuthorizesReadOnly(t *testing.T) {
 }
 
 func TestSchemaVersionAdmissionAuthorizesMismatchAndVersionlessClientsReadOnly(t *testing.T) {
+	t.Parallel()
 	for _, schemaVersion := range []string{"0", ""} {
 		t.Run(schemaVersion, func(t *testing.T) {
 			service, artifactID := newTestService(t)
@@ -189,6 +193,7 @@ func TestSchemaVersionAdmissionAuthorizesMismatchAndVersionlessClientsReadOnly(t
 }
 
 func TestSchemaVersionAdmissionCommunicatesReadOnlyScope(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 
 	mismatched, err := service.authorizeSchemaVersion(artifactID, "0")
@@ -209,6 +214,7 @@ func TestSchemaVersionAdmissionCommunicatesReadOnlyScope(t *testing.T) {
 }
 
 func TestHocuspocusAuthenticationCommunicatesSchemaReadOnly(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	seedServiceText(t, service, artifactID, "before")
 	httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
@@ -264,6 +270,7 @@ func TestHocuspocusAuthenticationCommunicatesSchemaReadOnly(t *testing.T) {
 }
 
 func TestLoadFailureMakesDocumentServiceUnavailable(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before")
 	service := New(Deps{
@@ -293,6 +300,7 @@ func TestLoadFailureMakesDocumentServiceUnavailable(t *testing.T) {
 // A history that does not decode refuses the socket before any upgrade, and a read of it is the
 // state a rebuild repairs (ErrDocumentUnloadable) rather than any failed room's ErrServiceUnavailable.
 func TestCorruptLoadRefusesTheSocketAndReadsAsUnloadable(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before")
 	service := New(Deps{
@@ -343,6 +351,7 @@ func refusedForTheItemCap(t *testing.T, what string, err error, items uint64) {
 // room is left failed for the next access to reload, and the record goes because no instance will
 // ever take it (beginRoomLoad, keepInstance).
 func TestTheStoreJudgesAnUpdateByItsHeader(t *testing.T) {
+	t.Parallel()
 	overTheCap := encoding.NewEncoder()
 	overTheCap.WriteVarUint(1)
 	overTheCap.WriteVarUint(maxUpdateItems + 1)
@@ -463,6 +472,7 @@ func (s *panickingRoomLoadStore) Load(ctx context.Context, room string) (persist
 // drops its own record, and the load that begins after it is left alone: it keeps its own record
 // and finds a room it can build.
 func TestALoadThatPanicsFailsItsRoomWhereThePanicIsMet(t *testing.T) {
+	t.Parallel()
 	for _, row := range []struct {
 		name string
 		// callerGone ends the caller's context inside the read that panics.
@@ -530,6 +540,7 @@ func TestALoadThatPanicsFailsItsRoomWhereThePanicIsMet(t *testing.T) {
 // one. An update appended in between raises the head, and the load reads the store again rather
 // than open the room without that update.
 func TestASocketsPreloadIsServedOnlyWhileTheHistoryHasNotMoved(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	var mu sync.Mutex
@@ -603,6 +614,7 @@ func TestASocketsPreloadIsServedOnlyWhileTheHistoryHasNotMoved(t *testing.T) {
 // close with documentSchemaCloseCode before any sync, a code a browser can read, and neither loads
 // nor fails the room.
 func TestDocumentSocketRefusesARoomOutsideTheSchema(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name    string
 		corrupt func(*testing.T, *Service, string)
@@ -641,6 +653,7 @@ func TestDocumentSocketRefusesARoomOutsideTheSchema(t *testing.T) {
 }
 
 func TestShutdownClosesDocumentPeers(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before")
 	service := New(Deps{
@@ -683,6 +696,7 @@ func TestShutdownClosesDocumentPeers(t *testing.T) {
 // Shutdown returns at its caller's deadline while an editor is connected and a durable append waits
 // on a lock, and the append still reaches the store once the lock is released.
 func TestShutdownReturnsAtItsDeadlineWithAnEditorConnectedAndAnAppendLocked(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before")
 	service := New(Deps{
@@ -739,6 +753,7 @@ func TestShutdownReturnsAtItsDeadlineWithAnEditorConnectedAndAnAppendLocked(t *t
 }
 
 func TestAppendFailureClosesDocumentConnectionAndReloadsRoom(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before")
 	service := New(Deps{
@@ -775,6 +790,7 @@ func TestAppendFailureClosesDocumentConnectionAndReloadsRoom(t *testing.T) {
 }
 
 func TestFailedRoomEvictsAndReloadsOnNextAccess(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before")
 	service := New(Deps{
@@ -805,6 +821,7 @@ func TestFailedRoomEvictsAndReloadsOnNextAccess(t *testing.T) {
 }
 
 func TestWebsocketRejectsUnauthenticatedConnection(t *testing.T) {
+	t.Parallel()
 	service, _ := newTestService(t)
 	httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
 	t.Cleanup(httpServer.Close)
@@ -822,6 +839,7 @@ func TestWebsocketRejectsUnauthenticatedConnection(t *testing.T) {
 }
 
 func TestUnauthenticatedDocumentRequestsDoNotAllocateRooms(t *testing.T) {
+	t.Parallel()
 	service, _ := newTestService(t)
 
 	for number := range 1000 {

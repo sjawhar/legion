@@ -29,6 +29,7 @@ var proofShaped = regexp.MustCompile(`eyJ[A-Za-z0-9_-]{8,}|[A-Za-z0-9_-]{16,}\.[
 // session can enroll until a human approves a new login. The operator file changes while the login
 // is pending, and the line still names the operator the login was signed with.
 func TestTheHelperLogsEveryChangeOfTheLauncherCredential(t *testing.T) {
+	t.Parallel()
 	var out syncBuffer
 	f := newFakeBroker(t)
 	operator := operatorFile(t, "ada@example.com")

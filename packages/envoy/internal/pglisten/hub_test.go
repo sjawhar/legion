@@ -211,6 +211,7 @@ func TestTheHubDeliversEachChannelToEveryHandlerAndWakeRegisteredOnIt(t *testing
 // is also signalled once the first LISTEN succeeds, the catch-up every subscriber gets after a
 // connect.
 func TestAHubNotificationSignalsItsChannelsWakes(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	dialer := &hubDialer{database: database}
 	hub := &Hub{Owner: "test hub", Dial: dialer.dial}
@@ -259,6 +260,7 @@ func TestAHubNotificationSignalsItsChannelsWakes(t *testing.T) {
 // subscriber catches up what was committed while nothing listened; notifications signal their
 // wakes on the new connection.
 func TestAHubSignalsEveryWakeAgainAfterAReconnect(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	dialer := &hubDialer{database: database}
 	hub := &Hub{Owner: "test hub", Dial: dialer.dial}
@@ -423,6 +425,7 @@ func TestARegistrationAfterRunStartsPanics(t *testing.T) {
 // nothing and waits for its context, and a channel added after that would be missing from a LISTEN
 // statement no later Run sends.
 func TestAHubRefusesRegistrationAfterRun(t *testing.T) {
+	t.Parallel()
 	hub := &Hub{}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

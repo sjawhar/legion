@@ -180,6 +180,18 @@ func (s *Store) Migrate(ctx context.Context) error {
 	return s.migrate(ctx, migrationFiles)
 }
 
+// MigrationsFingerprint is pgmigrate.Fingerprint of the set Migrate applies, and the error
+// Migrate would refuse that set with. The test harness names the template database every test's
+// database is cloned from after it (internal/broker/store/storetest), so the test processes of
+// one run share one migrated template; nothing in production reads it.
+func MigrationsFingerprint() (string, error) {
+	migrations, err := pgmigrate.Load(migrationFiles, "migrations")
+	if err != nil {
+		return "", fmt.Errorf("migrations refused, none applied: %w", err)
+	}
+	return pgmigrate.Fingerprint(migrations), nil
+}
+
 func (s *Store) migrate(ctx context.Context, fsys fs.FS) error {
 	migrations, err := pgmigrate.Load(fsys, "migrations")
 	if err != nil {

@@ -23,7 +23,6 @@ import (
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/duty"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
-	"github.com/sjawhar/envoy/internal/testnats"
 )
 
 // TestIntakeStampsItsFlowControlOnADurableAnEarlierReleaseLeft holds what bind does to the
@@ -37,7 +36,7 @@ func TestIntakeStampsItsFlowControlOnADurableAnEarlierReleaseLeft(t *testing.T) 
 	pool, ctx := deliveryTestPool(t)
 	settings := seedDeliverySettings(t, ctx, pool)
 
-	natsURL := testnats.URL(t)
+	natsURL := deliveryTestNATS(t)
 	natsClient, err := bus.ConnectOwningStream([]string{natsURL})
 	if err != nil {
 		t.Fatalf("connect NATS: %v", err)
@@ -619,7 +618,7 @@ func TestASecondProcessStandsByForADurableAnotherHolds(t *testing.T) {
 // Two subtests, because the window is reached two ways and a fix has to close both: the second
 // process polling a moment behind the first (durableBindInterval ticks that drifted together),
 // and two processes polling at once, as a rolling update's replacement and its predecessor do.
-// Each subtest is a test of its own and so gets its own NATS account (testnats.URL), which is
+// Each subtest is a test of its own and so gets its own NATS server (deliveryTestNATS), which is
 // why every client here is opened with the subtest's own t.
 //
 // Both start from settledDurable, the state every bind poll after the first is made in, because

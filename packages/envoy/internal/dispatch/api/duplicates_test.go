@@ -40,6 +40,7 @@ func requireCreatedIssue(t *testing.T, response *httptest.ResponseRecorder) mode
 }
 
 func TestCreateIssueRejectsNearDuplicateTitleWithCandidates(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	createDuplicateTestProject(t, handler, "TEST")
 
@@ -79,6 +80,7 @@ func TestCreateIssueRejectsNearDuplicateTitleWithCandidates(t *testing.T) {
 }
 
 func TestCreateIssueForceBypassesTheGate(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	createDuplicateTestProject(t, handler, "TEST")
 
@@ -94,6 +96,7 @@ func TestCreateIssueForceBypassesTheGate(t *testing.T) {
 }
 
 func TestCreateIssueGateIgnoresParentTitleTerms(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	createDuplicateTestProject(t, handler, "TEST")
 
@@ -121,6 +124,7 @@ func TestCreateIssueGateIgnoresParentTitleTerms(t *testing.T) {
 }
 
 func TestCreateIssueGateIsScopedToProjectAndSkipsExternal(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	createDuplicateTestProject(t, handler, "TEST")
 	createDuplicateTestProject(t, handler, "OTHER")
@@ -149,6 +153,7 @@ func TestCreateIssueGateIsScopedToProjectAndSkipsExternal(t *testing.T) {
 }
 
 func TestCreateIssueGateIncludesClosedIssues(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	createDuplicateTestProject(t, handler, "TEST")
 
@@ -176,6 +181,7 @@ func TestCreateIssueGateIncludesClosedIssues(t *testing.T) {
 }
 
 func TestCreateIssueGateRule(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	createDuplicateTestProject(t, handler, "TEST")
 
@@ -206,6 +212,7 @@ func TestCreateIssueGateRule(t *testing.T) {
 }
 
 func TestCreateIssueOrdersDuplicateCandidates(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	createDuplicateTestProject(t, handler, "ORDER")
 
@@ -269,6 +276,7 @@ select key, title, status, shared,
 // stem, hold the parent's words, a hyphenated word, an underscore run search_text breaks, accented
 // letters, or only stop words, and some were retitled after they were created.
 func TestDuplicateCheckFromStoredLexemesMatchesTheCheckFromTitles(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	database := storetest.Open(t)
 	vocabulary := strings.Fields(`dispatch global search searching searches issue issues document

@@ -28,6 +28,12 @@ const testScale = 0.01
 // TestSeedAtASmallScale seeds two fresh databases and holds the pair, and then one of them, to
 // everything the seed promises. Both runs are in one test because each one takes most of a
 // minute: a test of its own for each check would seed six databases to read one data set.
+//
+// The seeds run one after another, here and across the package's tests, and no test of this
+// package calls t.Parallel: a run installs the block id generator its documents are rendered
+// under in pmdoc, for the whole process (pmdoc.SetBlockIDGenerator, run.go), so two runs at once
+// render each other's documents under the wrong counter and the seed fails on the layout it then
+// reads back (dispatch://INFRA-1075).
 func TestSeedAtASmallScale(t *testing.T) {
 	first, firstRun := seedTestDatabase(t)
 	second, _ := seedTestDatabase(t)

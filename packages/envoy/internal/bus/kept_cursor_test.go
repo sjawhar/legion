@@ -86,7 +86,7 @@ func TestAKeptRoleCursorsClaimIsOutstandingOnlyWhileItIsYoungerThanTheWindow(t *
 // zero cursor, since every copy on such a lane is past it.
 func TestReadKeptRoleCursorAnswersTheCursorTheStreamHolds(t *testing.T) {
 	client := keptClient(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), busWait)
 	defer cancel()
 	const role = "cursor-reader"
 

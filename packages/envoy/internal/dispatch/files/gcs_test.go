@@ -39,6 +39,7 @@ func writes(requests []string) []string {
 // The store needs storage.objects.create and storage.objects.get and nothing more: the whole
 // round trip runs with only those two granted.
 func TestGCSStoresAFileOnceByItsHashAndReadsItBack(t *testing.T) {
+	t.Parallel()
 	store, fake := gcsStore(t, testBucket)
 	fake.Grant("storage.objects.create", "storage.objects.get")
 	ctx := context.Background()
@@ -89,6 +90,7 @@ func TestGCSStoresAFileOnceByItsHashAndReadsItBack(t *testing.T) {
 // refuse the write's ifGenerationMatch=0 with 412: the object is held, Put succeeds, and the
 // object the other writer stored is not overwritten.
 func TestGCSReadsAnObjectStoredInBetweenAsHeldAndNeverOverwritesIt(t *testing.T) {
+	t.Parallel()
 	store, fake := gcsStore(t, testBucket)
 	body := []byte("the bytes")
 	sha := files.SHA256(body)
@@ -102,6 +104,7 @@ func TestGCSReadsAnObjectStoredInBetweenAsHeldAndNeverOverwritesIt(t *testing.T)
 }
 
 func TestGCSRefusesABodyThatIsNotItsHashBeforeAnyCall(t *testing.T) {
+	t.Parallel()
 	store, fake := gcsStore(t, testBucket)
 	body := []byte("the bytes")
 	wrong := files.SHA256([]byte("other bytes"))
@@ -114,6 +117,7 @@ func TestGCSRefusesABodyThatIsNotItsHashBeforeAnyCall(t *testing.T) {
 }
 
 func TestGCSAnswersNotFoundForAHashItDoesNotHold(t *testing.T) {
+	t.Parallel()
 	store, _ := gcsStore(t, testBucket)
 	_, err := store.Get(context.Background(), strings.Repeat("ab", 32))
 	if !errors.Is(err, files.ErrNotFound) {
@@ -125,6 +129,7 @@ func TestGCSAnswersNotFoundForAHashItDoesNotHold(t *testing.T) {
 // as a failure, never as an absent file, which the version route would answer 500 FILE_MISSING
 // and a backfill would read as a lost file.
 func TestGCSReadsAMissingBucketAsAFailureNotAnAbsence(t *testing.T) {
+	t.Parallel()
 	store, fake := gcsStore(t, "no-such-bucket")
 	ctx := context.Background()
 	_, err := store.Get(ctx, strings.Repeat("ab", 32))
@@ -145,6 +150,7 @@ func TestGCSReadsAMissingBucketAsAFailureNotAnAbsence(t *testing.T) {
 // A caller with no grant on the bucket gets 403 for every call: a store failure, never an absent
 // object, and Put writes nothing past it.
 func TestGCSReadsForbiddenAsAFailureNotAnAbsence(t *testing.T) {
+	t.Parallel()
 	store, fake := gcsStore(t, testBucket)
 	fake.Grant()
 	ctx := context.Background()
@@ -166,6 +172,7 @@ func TestGCSReadsForbiddenAsAFailureNotAnAbsence(t *testing.T) {
 // Healthy needs storage.objects.get alone: the probe's object does not exist, and GCS saying so
 // is a healthy bucket. A grant without objects.create still fails the upload itself.
 func TestGCSHealthyNeedsOnlyObjectsGet(t *testing.T) {
+	t.Parallel()
 	store, fake := gcsStore(t, testBucket)
 	fake.Grant("storage.objects.get")
 	ctx := context.Background()
@@ -178,6 +185,7 @@ func TestGCSHealthyNeedsOnlyObjectsGet(t *testing.T) {
 }
 
 func TestGCSRefusesAnObjectPastTheSizeLimit(t *testing.T) {
+	t.Parallel()
 	store, fake := gcsStore(t, testBucket)
 	sha := strings.Repeat("cd", 32)
 	fake.SetObject(files.Key(sha), "application/octet-stream", make([]byte, files.MaxObjectSize+1))
@@ -192,6 +200,7 @@ func TestGCSRefusesAnObjectPastTheSizeLimit(t *testing.T) {
 // An object whose bytes are not what its key says reads with an error before its end, and the
 // reader hands out fewer bytes than the object holds before it says so.
 func TestGCSRefusesABodyThatDoesNotHashToItsKey(t *testing.T) {
+	t.Parallel()
 	store, fake := gcsStore(t, testBucket)
 	same := bytes.Repeat([]byte("x"), 200_000)
 	sha := files.SHA256(same)

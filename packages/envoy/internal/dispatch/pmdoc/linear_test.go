@@ -603,8 +603,9 @@ const sampleCount = 3
 // (cputest.Process), not wall time: it leaves out the time the process waits for a core, which is
 // LEGION-569/571's whole flake history (the file-level comment above has the fuller account), though
 // another process's load still slows its own CPU time through shared caches and clock frequency.
-// No test in this package calls t.Parallel (there is no t.Parallel() anywhere under
-// internal/dispatch/pmdoc), so ordinarily at most one measured call runs at a time.
+// No measured test calls t.Parallel, and Go starts a package's parallel tests only once every
+// test that does not call it has finished (dispatch://INFRA-1075 gave this package's independent
+// tests t.Parallel), so ordinarily at most one measured call runs at a time.
 // leakedCallGuard (below) is what keeps that true even once a call has missed its own deadline
 // and gone on running in the background. Every measured call reads it through timedWindow.
 func processCPUTime() time.Duration { return cputest.Process() }
@@ -936,7 +937,7 @@ func TestALateCallFinishingAfterItsTestDoesNotPanicHelper(t *testing.T) {
 	select {
 	case <-finished:
 		t.Log(lateCallFinished)
-	case <-time.After(10 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("the late call never returned")
 	}
 }
@@ -951,7 +952,7 @@ func waitForLeakToClear(t *testing.T, cleared <-chan struct{}) {
 	t.Helper()
 	select {
 	case <-cleared:
-	case <-time.After(10 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("a synthetic leaked call never deregistered")
 	}
 }

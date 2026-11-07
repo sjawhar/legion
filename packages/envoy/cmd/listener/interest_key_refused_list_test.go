@@ -38,6 +38,7 @@ import (
 // that key, still answers the refused key as the caller's own input: 413 for the too-long id and
 // 400 for the invalid one, with no Retry-After, since a retry sends the same key.
 func TestTheSessionListKeepsASessionWhoseIDTheInterestBucketRefuses(t *testing.T) {
+	t.Parallel()
 	const (
 		ordinary   = "ses_refused_list_ordinary"
 		invalidKey = "ses:bad"
@@ -95,7 +96,7 @@ func TestTheSessionListKeepsASessionWhoseIDTheInterestBucketRefuses(t *testing.T
 		t.Fatalf("store session %s by a direct bucket write: %v", invalidKey, err)
 	}
 	listed := []string{ordinary, readableLegacy, unreadableLegacy, invalidKey}
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(listenerWait)
 	for _, id := range listed {
 		for {
 			if _, err := sessions.Get(id); err == nil {

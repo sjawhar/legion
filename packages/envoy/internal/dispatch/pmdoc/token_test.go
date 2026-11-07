@@ -149,6 +149,7 @@ func largeTokenTestTree(t *testing.T, documents []tokenTestDocument) *Node {
 // the representation built whole, for every document the corpus and the fixtures hold and for one
 // far larger than Parse reads.
 func TestEncodeTokenJSONIsWhatEncodingJSONMakesOfEveryDocument(t *testing.T) {
+	t.Parallel()
 	documents := tokenTestDocuments(t)
 	type tree struct {
 		name string
@@ -299,6 +300,7 @@ func tokenErrorClass(err error) string {
 // error for error, on a node and on a mark alike: strings escaped as it escapes them, numbers in its
 // shortest forms, the canonical form's conversions, and every other type left to it.
 func TestEncodeTokenJSONEncodesEveryValueAsEncodingJSON(t *testing.T) {
+	t.Parallel()
 	for _, test := range tokenValueCases() {
 		onNode, onMark := tokenValueTrees(test.key, test.value)
 		assertTokenJSONAsEncodingJSON(t, test.name+" on a node", onNode)
@@ -308,6 +310,7 @@ func TestEncodeTokenJSONEncodesEveryValueAsEncodingJSON(t *testing.T) {
 
 // A node's marks are one token in whatever order they arrive.
 func TestEncodeTokenJSONWritesMarksInTheOrderOfTheirEncodings(t *testing.T) {
+	t.Parallel()
 	marks := []Mark{
 		{Type: "proofComment", Attrs: Attrs{"id": "c2", "by": "user:bob", "at": int64(7)}},
 		{Type: "strong"},
@@ -334,6 +337,7 @@ func TestEncodeTokenJSONWritesMarksInTheOrderOfTheirEncodings(t *testing.T) {
 // A typed block's server-owned attributes are the server's to change, so they are no part of its
 // token.
 func TestEncodeTokenJSONLeavesOutServerOwnedAttributes(t *testing.T) {
+	t.Parallel()
 	open, err := Parse(":::ask{#decision urgency=\"high\" multiple=\"false\" state=\"open\"}\nShip it?\n:::\n")
 	if err != nil {
 		t.Fatal(err)
@@ -357,6 +361,7 @@ func TestEncodeTokenJSONLeavesOutServerOwnedAttributes(t *testing.T) {
 // A node's attributes are encoded before its marks, so a node whose attributes and marks both
 // fail reports its attributes' error, as encoding/json does.
 func TestEncodeTokenJSONReportsTheAttributesErrorBeforeTheMarks(t *testing.T) {
+	t.Parallel()
 	tree := &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: []*Node{{
 		Type:  "text",
 		Text:  "x",

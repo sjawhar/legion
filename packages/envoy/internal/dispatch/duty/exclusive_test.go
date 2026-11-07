@@ -266,7 +266,7 @@ func TestExclusiveFreesTheLeaseWhenShutdownInterruptsThePeriodRead(t *testing.T)
 		if ran {
 			t.Error("a gate stopped while it read its period reported a pass that ran")
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(eventWait):
 		t.Fatal("the gate stopped while it read its period did not return")
 	}
 	if passRan {
@@ -373,21 +373,25 @@ func (s slowLeases) Acquire(ctx context.Context) (*pgxpool.Conn, error) {
 }
 
 // A lone loop's ticks come at least one period apart (RunLeased, RunJittered), and each must run:
-// no other process has served either period. Here the first tick is due 200 ms before a period
+// no other process has served either period. Here the first tick is due 100 ms before a period
 // boundary on this process's clock, the clock Exclusive buckets a due time on, and its lease takes
-// 400 ms, so the query that reads its period runs 200 ms into the next one; the second tick is due
+// 150 ms, so the query that reads its period runs 50 ms into the next one; the second tick is due
 // exactly one period after the first, the least that spacing allows, and takes its lease at once.
 // Read by the moment its query ran, the late first tick serves the second tick's period and the
 // second is refused - an interval of the loop's work that no process did, which is how
 // TestALoneRunnerMakesAPassOnEveryTick lost one tick in ten. Read by when it was due, each tick
 // serves its own period.
+//
+// The period is this test's own argument to Exclusive, which takes it in the call: early and
+// delay are the fractions of it that make the tick late, so a shorter period reads the same late
+// tick in less time. cmd/dispatch passes each loop's own period.
 func TestExclusiveCountsALateTickInThePeriodItWasDueIn(t *testing.T) {
 	database := storetest.Open(t)
 	leases := leasesOf(t, database)
 	ctx := context.Background()
 	const name = "suggestion-outcomes"
-	const period = time.Second
-	const early, delay = 200 * time.Millisecond, 400 * time.Millisecond
+	const period = 400 * time.Millisecond
+	const early, delay = 100 * time.Millisecond, 150 * time.Millisecond
 
 	due := beforeNextBoundary(t, period, early)
 	time.Sleep(time.Until(due))

@@ -122,6 +122,7 @@ func attemptStates(t *testing.T, database *store.Store, table, column, id string
 // and it must take it - the row names the message's own target - and pin it to the session the
 // target resolved to, rather than refusing an attempt whose row names no session.
 func TestABoundSendTakesAnUnpinnedAttemptAndPinsTheSessionItsTargetResolvedTo(t *testing.T) {
+	t.Parallel()
 	listener := startResumeListener(t)
 	handler, database, deps := newTestServer(t, testServerOptions{envoyURL: listener.server.URL})
 	direct := directServer(deps)
@@ -164,6 +165,7 @@ func TestABoundSendTakesAnUnpinnedAttemptAndPinsTheSessionItsTargetResolvedTo(t 
 // no attempt beside it, where a Retry would open one; once that claim lapses, the bound send takes
 // the attempt under its original number and key.
 func TestACommentResumeSendsNothingBesideALiveSenderAndTakesTheAttemptOnceItLapses(t *testing.T) {
+	t.Parallel()
 	listener := startResumeListener(t)
 	handler, database, deps := newTestServer(t, testServerOptions{envoyURL: listener.server.URL})
 	direct := directServer(deps)
@@ -222,6 +224,7 @@ func TestACommentResumeSendsNothingBesideALiveSenderAndTakesTheAttemptOnceItLaps
 // resumeOwedDelivery hands deliverMessageResuming the attempt's number and nothing else - and a
 // stranded urgent message it resumes still reaches the listener as urgent, not as a plain steer.
 func TestTheDeliverySweepResumesAnAttemptWithTheUrgencyItRecorded(t *testing.T) {
+	t.Parallel()
 	listener := startResumeListener(t)
 	handler, database, deps := newTestServer(t, testServerOptions{envoyURL: listener.server.URL})
 	direct := directServer(deps)
@@ -251,6 +254,7 @@ func TestTheDeliverySweepResumesAnAttemptWithTheUrgencyItRecorded(t *testing.T) 
 // its own instead - in another mode, or beside a sender still holding the stranded one - is a new
 // send of the person's, which asked for no urgency.
 func TestARetryCarriesTheUrgencyOfTheAttemptItResumesAndNoneOnANewAttempt(t *testing.T) {
+	t.Parallel()
 	listener := startResumeListener(t)
 	handler, database, _ := newTestServer(t, testServerOptions{envoyURL: listener.server.URL})
 	issue := createInteractionIssue(t, handler, "TEST", "Urgent retries", "before")

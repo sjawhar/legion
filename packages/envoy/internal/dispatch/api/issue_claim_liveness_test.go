@@ -27,6 +27,7 @@ import (
 // record instead, so a holder the list has dropped keeps its issue - judged by the list, this
 // takeover was granted, and two sessions then worked the same issue.
 func TestClaimRefusesAHolderTheLiveListDroppedButTheStoreStillHolds(t *testing.T) {
+	t.Parallel()
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/registry/session-one":
@@ -78,6 +79,7 @@ func TestClaimRefusesAHolderTheLiveListDroppedButTheStoreStillHolds(t *testing.T
 // session is working, so the claim is refused as unavailable. "Unknown, therefore free" would
 // hand a working session's issue to another on a transport error, which no later read undoes.
 func TestClaimRefusesWhenTheHoldersSessionReadDoesNotAnswer(t *testing.T) {
+	t.Parallel()
 	var refusing atomic.Bool
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasPrefix(r.URL.Path, "/v1/registry/") {
@@ -139,6 +141,7 @@ func unresponsiveHolder(holder *model.IssueClaim, state string, lastSeen time.Ti
 // since when, because the caller's real question is whether to wait. Once the holder has not
 // been seen for longer than the grace, the claim is free to take and to clear.
 func TestAClaimSurvivesItsHoldersSilenceForTheGrace(t *testing.T) {
+	t.Parallel()
 	lastSeen := time.Date(2026, 10, 31, 9, 0, 0, 0, time.UTC)
 	holder := &model.IssueClaim{
 		Actor: model.Actor{Kind: "session", ID: "ses-stalled"},
@@ -211,6 +214,7 @@ func TestAClaimSurvivesItsHoldersSilenceForTheGrace(t *testing.T) {
 // claim stays with it: the direction that errs toward one session per issue is to wait, and the
 // refusal then says only what the live-holder refusal says.
 func TestAnUndatedSilenceKeepsTheClaim(t *testing.T) {
+	t.Parallel()
 	holder := &model.IssueClaim{Actor: model.Actor{Kind: "session", ID: "ses-stalled"}, At: time.Now().UTC()}
 	judged := judgement{holder: holder, live: holderLiveness{fetched: true, holder: &envoy.Session{
 		SessionID: "ses-stalled", State: envoy.StateUnresponsive,
@@ -236,6 +240,7 @@ func TestAnUndatedSilenceKeepsTheClaim(t *testing.T) {
 // agreement this pins; the grace running out is no state change either, and the read goes on
 // saying unresponsive.
 func TestTheRefusalAndTheIssueReadShareTheGracesBoundary(t *testing.T) {
+	t.Parallel()
 	lastSeen := time.Date(2026, 10, 31, 9, 0, 0, 0, time.UTC)
 	holder := &model.IssueClaim{
 		Actor: model.Actor{Kind: "session", ID: "ses-stalled"},
@@ -365,6 +370,7 @@ func readIssueClaimLiveness(t *testing.T, handler http.Handler, key string) issu
 // issue nor release it until the silence outlasts the grace, and the refusal names the state
 // and the heartbeat it was last seen at, so the refused caller knows to wait.
 func TestAnotherAgentCannotTakeOrReleaseAnUnresponsiveHoldersIssue(t *testing.T) {
+	t.Parallel()
 	handler, stalled := serveStalledSession(t, time.Now())
 	key := claimIssueKey(t, handler, "todo")
 	if response := bearerRequest(t, handler, http.MethodPost, "/api/v1/issues/"+key+"/claim", map[string]any{
@@ -427,6 +433,7 @@ func TestAnotherAgentCannotTakeOrReleaseAnUnresponsiveHoldersIssue(t *testing.T)
 // for it. They sit beside the claim, never inside it, because model.IssueClaim is the payload
 // of issue.claimed and issue.released and a read-time state must not persist into one.
 func TestIssueReadCarriesTheClaimHoldersStateBesideTheClaim(t *testing.T) {
+	t.Parallel()
 	seen := time.Now().Add(-time.Minute).UTC().Truncate(time.Millisecond)
 	handler, stalled := serveStalledSession(t, seen)
 	key := claimIssueKey(t, handler, "todo")
@@ -468,6 +475,7 @@ func TestIssueReadCarriesTheClaimHoldersStateBesideTheClaim(t *testing.T) {
 // free claim. A write is the opposite: it refuses, because handing one session's work to
 // another on a transport error is not a mistake the next read undoes.
 func TestIssueReadSaysUnknownWhileAClaimWriteRefusesWithNoListener(t *testing.T) {
+	t.Parallel()
 	var refilling atomic.Bool
 	var reachable atomic.Bool
 	reachable.Store(true)

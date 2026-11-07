@@ -10,6 +10,7 @@ import (
 // holds a reservation waits for it to settle, takes what the settle gave back, and a read that does
 // not fit once nothing is in flight gives up at once rather than waiting forever.
 func TestACallBudgetWaitsForAReservationThenGivesUpOnceSpent(t *testing.T) {
+	t.Parallel()
 	budget := newCallBudget(10)
 	if !budget.reserve(6) {
 		t.Fatal("the first reservation of 6 from 10 was refused")
@@ -29,7 +30,7 @@ func TestACallBudgetWaitsForAReservationThenGivesUpOnceSpent(t *testing.T) {
 		if !got {
 			t.Fatal("the second reservation was refused once the first gave 4 back (8 left)")
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(eventWait):
 		t.Fatal("the second reservation still waited after the first settled")
 	}
 
@@ -42,7 +43,7 @@ func TestACallBudgetWaitsForAReservationThenGivesUpOnceSpent(t *testing.T) {
 		if got {
 			t.Fatal("a third reservation of 6 was granted with 2 of 10 left")
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(eventWait):
 		t.Fatal("a third reservation waited with nothing in flight to give calls back")
 	}
 	if budget.spent != 8 {
@@ -55,6 +56,7 @@ func TestACallBudgetWaitsForAReservationThenGivesUpOnceSpent(t *testing.T) {
 // until the test releases them, so the rest must wait. Each makes 2 calls: exactly 8 are granted
 // (the ninth would need 6 with 4 left), the other two give up, and no more than 20 calls are made.
 func TestConcurrentReadsNeverOverspendACallBudget(t *testing.T) {
+	t.Parallel()
 	const reads, cost, used, allowance = 10, 6, 2, 20
 	budget := newCallBudget(allowance)
 	gate := make(chan struct{})
@@ -84,7 +86,7 @@ func TestConcurrentReadsNeverOverspendACallBudget(t *testing.T) {
 			if !granted {
 				t.Fatalf("reservation %d of %d was refused with %d of %d calls free", i+1, held, allowance-i*cost, allowance)
 			}
-		case <-time.After(5 * time.Second):
+		case <-time.After(eventWait):
 			t.Fatalf("only %d of %d reservations answered before any settled", i, held)
 		}
 	}

@@ -7,6 +7,7 @@ import (
 )
 
 func TestReadMatchesProseMirrorJSON(t *testing.T) {
+	t.Parallel()
 	for _, fx := range loadFixtures(t) {
 		t.Run(fx.Name, func(t *testing.T) {
 			doc := crdt.New()

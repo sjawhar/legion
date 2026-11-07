@@ -66,6 +66,7 @@ const (
 // refused the grant log: the broker's audit trail is not another of the powers the name that
 // decides already holds.
 func TestAListedAccountReachesOnlyItsOwnRoutes(t *testing.T) {
+	t.Parallel()
 	databaseURL := storetest.URL(t)
 	cluster := oidctest.New(t)
 	clusterKey := cluster.PublishKey(t, "signing-key")

@@ -68,7 +68,7 @@ func withBearer(token string) http.Header {
 // sockets waits for exactly n sockets open on the server and answers them.
 func (rig *liveSocketRig) sockets(t *testing.T, n int) []*liveSocket {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(eventFeedWait)
 	for {
 		open := rig.served.liveSockets.all()
 		if len(open) == n {
@@ -512,7 +512,7 @@ func (held *heldWrites) release() {
 // the writer writes nothing and takes nothing from either queue until release.
 func (held *heldWrites) waitHeld(t *testing.T, socket *liveSocket) {
 	t.Helper()
-	pollUntil(t, 10*time.Second, "the writer held with the stream queue full", func() bool {
+	pollUntil(t, concurrentWait, "the writer held with the stream queue full", func() bool {
 		return held.waiting.Load() > 0 && streamFull(socket)
 	})
 }
@@ -585,7 +585,8 @@ func (c *heldConn) Write(p []byte) (int, error) {
 }
 
 // pollUntil polls condition every 10 ms for up to within, failing the test with what when it
-// never holds.
+// never holds. A caller waiting for a condition to come true names concurrentWait; one whose
+// subject is the span itself - a view that must end inside a replay timeout - names that span.
 func pollUntil(t *testing.T, within time.Duration, what string, condition func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(within)
@@ -597,12 +598,52 @@ func pollUntil(t *testing.T, within time.Duration, what string, condition func()
 	}
 }
 
+// liveRecheck is how often a socket re-resolves its caller in a test whose subject that
+// re-resolution is (Deps.CallerRecheck). It is short, and such a test sets a heartbeat long
+// enough that its page is never pinged, so no run of it turns on a pong arriving inside the pong
+// deadline, which is two heartbeats (dispatch://INFRA-1075).
+const liveRecheck = 25 * time.Millisecond
+
+// callerRechecks counts the re-resolutions of a server's sockets' callers (server.callerResolved),
+// so a test that proves a socket outlives them waits for them rather than for a span of time.
+// Arm it before the socket opens.
+type callerRechecks struct{ resolved chan struct{} }
+
+func countCallerRechecks(served *server) *callerRechecks {
+	rechecks := &callerRechecks{resolved: make(chan struct{}, 1024)}
+	served.callerResolved = func() {
+		select {
+		case rechecks.resolved <- struct{}{}:
+		default:
+		}
+	}
+	return rechecks
+}
+
+// await waits for n re-resolutions that found the caller still resolving, and fails the test
+// naming what when they do not come.
+func (r *callerRechecks) await(t *testing.T, n int, what string) {
+	t.Helper()
+	for i := range n {
+		select {
+		case <-r.resolved:
+		case <-time.After(concurrentWait):
+			t.Fatalf("the caller of %s was resolved again %d times within %s, want %d", what, i, concurrentWait, n)
+		}
+	}
+}
+
 // streamFull reports whether socket's stream queue holds all it can.
 func streamFull(socket *liveSocket) bool {
 	return cap(socket.stream) > 0 && len(socket.stream) == cap(socket.stream)
 }
 
 func TestTheDeliverySocketAnswersASubscribeWithASnapshot(t *testing.T) {
+	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
+	// on is proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the
+	// instance (internal/dispatch/events, horizon.go). Keeping only the tests that hold a
+	// lock on purpose out of the parallel set left five of these timing out on events_start;
+	// the whole family is out of it (dispatch://INFRA-1075).
 	rig := newLiveSocketRig(t, testServerOptions{}, nil)
 	seedHubSettings(t, rig.database)
 	now := time.Now().UTC()
@@ -610,7 +651,7 @@ func TestTheDeliverySocketAnswersASubscribeWithASnapshot(t *testing.T) {
 
 	client := rig.dial(t, asUser("alice"))
 	client.send(t, deliverySubscribe("t", timelineRange(now.Add(-48*time.Hour), now, "")))
-	snapshot := client.snapshot(t, 10*time.Second, "t")
+	snapshot := client.snapshot(t, eventFeedWait, "t")
 	requireSameBody(t, "the socket's snapshot", snapshot.Body, getBody(t, rig.handler, windowTarget(t, deliveryLiveTimeline, snapshot.Body, "")))
 	if _, ok := snapshot.Revs.Items["prs"]["acme/widgets#1"]; !ok {
 		t.Fatalf("the snapshot's revisions %v hold no revision of acme/widgets#1", snapshot.Revs.Items)
@@ -618,7 +659,7 @@ func TestTheDeliverySocketAnswersASubscribeWithASnapshot(t *testing.T) {
 
 	// A merge after the snapshot reaches the page as a delta that lands on the GET route's body.
 	upsertPR(t, rig.database, hubPR(2, now.Add(-2*time.Hour)))
-	delta := client.delta(t, 10*time.Second, "t")
+	delta := client.delta(t, eventFeedWait, "t")
 	if got := liveUpsertIDs(t, delta, "prs"); !slices.Equal(got, []string{"acme/widgets#2"}) {
 		t.Fatalf("the merge's delta upserts %v, want acme/widgets#2", got)
 	}
@@ -626,6 +667,11 @@ func TestTheDeliverySocketAnswersASubscribeWithASnapshot(t *testing.T) {
 }
 
 func TestAnUnauthenticatedUpgradeIsRefused(t *testing.T) {
+	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
+	// on is proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the
+	// instance (internal/dispatch/events, horizon.go). Keeping only the tests that hold a
+	// lock on purpose out of the parallel set left five of these timing out on events_start;
+	// the whole family is out of it (dispatch://INFRA-1075).
 	rig := newLiveSocketRig(t, testServerOptions{}, nil)
 	for name, header := range map[string]http.Header{
 		"no credential":     nil,
@@ -641,6 +687,11 @@ func TestAnUnauthenticatedUpgradeIsRefused(t *testing.T) {
 }
 
 func TestAForeignOriginIsRefused(t *testing.T) {
+	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
+	// on is proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the
+	// instance (internal/dispatch/events, horizon.go). Keeping only the tests that hold a
+	// lock on purpose out of the parallel set left five of these timing out on events_start;
+	// the whole family is out of it (dispatch://INFRA-1075).
 	rig := newLiveSocketRig(t, testServerOptions{}, nil)
 	foreign := asUser("alice")
 	foreign.Set("Origin", "https://other.example")
@@ -653,10 +704,15 @@ func TestAForeignOriginIsRefused(t *testing.T) {
 	own.Set("Origin", "http://"+rig.host)
 	client := rig.dial(t, own)
 	client.send(t, LiveUnsubscribe{Type: "unsubscribe"})
-	client.refusal(t, 3*time.Second, "", "INVALID_FRAME")
+	client.refusal(t, eventFeedWait, "", "INVALID_FRAME")
 }
 
 func TestABearerMayReadTheSocket(t *testing.T) {
+	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
+	// on is proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the
+	// instance (internal/dispatch/events, horizon.go). Keeping only the tests that hold a
+	// lock on purpose out of the parallel set left five of these timing out on events_start;
+	// the whole family is out of it (dispatch://INFRA-1075).
 	rig := newLiveSocketRig(t, testServerOptions{}, nil)
 	seedHubSettings(t, rig.database)
 	minted := mintAgentToken(t, rig.handler)
@@ -664,36 +720,48 @@ func TestABearerMayReadTheSocket(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			client := rig.dial(t, withBearer(token))
 			client.send(t, deliverySubscribe("p", presetView(deliveryLiveTimeline, 7, "")))
-			client.snapshot(t, 10*time.Second, "p")
+			client.snapshot(t, eventFeedWait, "p")
 		})
 	}
 }
 
-// A bearer revoked while its socket is open loses the socket at the next heartbeat's resolution, as
-// the document socket does: the request's context ends, and the socket closes
-// with 1008. The heartbeat is a second, so the client's pong, which gorilla's default handler
-// writes, has a heartbeat to meet the pong deadline on a loaded runner: the socket must last until
-// the revocation, and a pong timeout would end it first.
+// A bearer revoked while its socket is open loses the socket at the next re-resolution of its
+// caller, as the document socket does: the request's context ends, and the socket closes with
+// 1008. The server re-resolves on liveRecheck and the heartbeat is long, so the socket's life
+// here is decided by the re-resolutions this test waits for and never by a pong a loaded runner
+// delayed past the pong deadline, which is two heartbeats.
 func TestARevokedBearerClosesItsSocketWithPolicyViolation(t *testing.T) {
-	const heartbeat = time.Second
-	rig := newLiveSocketRig(t, testServerOptions{streamHeartbeat: heartbeat}, nil)
+	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
+	// on is proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the
+	// instance (internal/dispatch/events, horizon.go). Keeping only the tests that hold a
+	// lock on purpose out of the parallel set left five of these timing out on events_start;
+	// the whole family is out of it (dispatch://INFRA-1075).
+	rig := newLiveSocketRig(t, testServerOptions{streamHeartbeat: time.Hour, callerRecheck: liveRecheck}, nil)
+	rechecks := countCallerRechecks(rig.served)
 	minted := mintAgentToken(t, rig.handler)
 	client := rig.dial(t, withBearer(minted.Token))
 
-	time.Sleep(3 * heartbeat)
+	// Three resolutions of a token that still resolves, with the socket open after them: what
+	// the revocation changes is the check's answer, not whether it runs.
+	rechecks.await(t, 3, "a token that still resolves")
 	if !client.open() {
 		t.Fatalf("the socket of a token that resolves ended: %v", client.err)
 	}
 	if response := dispatchRequest(t, rig.handler, http.MethodDelete, "/api/v1/me/agent-tokens/"+minted.ID, nil, "alice"); response.Code != http.StatusNoContent {
 		t.Fatalf("revoke the token: status=%d body=%s", response.Code, response.Body.String())
 	}
-	if code, _ := client.closeCode(t, heartbeat+3*time.Second); code != gws.ClosePolicyViolation {
+	if code, _ := client.closeCode(t, concurrentWait); code != gws.ClosePolicyViolation {
 		t.Fatalf("the revoked token's socket closed with %d, want 1008", code)
 	}
 	rig.sockets(t, 0)
 }
 
 func TestAMalformedFrameIsAnErrorFrameNotAClose(t *testing.T) {
+	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
+	// on is proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the
+	// instance (internal/dispatch/events, horizon.go). Keeping only the tests that hold a
+	// lock on purpose out of the parallel set left five of these timing out on events_start;
+	// the whole family is out of it (dispatch://INFRA-1075).
 	rig := newLiveSocketRig(t, testServerOptions{}, nil)
 	client := rig.dial(t, asUser("alice"))
 	for _, test := range []struct {
@@ -722,7 +790,7 @@ func TestAMalformedFrameIsAnErrorFrameNotAClose(t *testing.T) {
 		if err := client.conn.WriteMessage(kind, []byte(test.frame)); err != nil {
 			t.Fatalf("%s: send: %v", test.name, err)
 		}
-		refusal := client.refusal(t, 3*time.Second, test.sub, test.code)
+		refusal := client.refusal(t, eventFeedWait, test.sub, test.code)
 		if !strings.HasPrefix(refusal.Message, test.names) || strings.ContainsRune(refusal.Message, 0) {
 			t.Fatalf("%s: refusal %q, want one naming %q with no NUL in it", test.name, refusal.Message, test.names)
 		}
@@ -730,10 +798,15 @@ func TestAMalformedFrameIsAnErrorFrameNotAClose(t *testing.T) {
 
 	// The socket is still open, and the hub answers its next subscribe.
 	client.send(t, deliverySubscribe("h", presetView(deliveryLiveTimeline, 7, "")))
-	client.refusal(t, 10*time.Second, "h", "DELIVERY_NOT_CONFIGURED")
+	client.refusal(t, eventFeedWait, "h", "DELIVERY_NOT_CONFIGURED")
 }
 
 func TestAFrameOverTheReadLimitClosesTheSocket(t *testing.T) {
+	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
+	// on is proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the
+	// instance (internal/dispatch/events, horizon.go). Keeping only the tests that hold a
+	// lock on purpose out of the parallel set left five of these timing out on events_start;
+	// the whole family is out of it (dispatch://INFRA-1075).
 	rig := newLiveSocketRig(t, testServerOptions{streamHeartbeat: throughputWaitCap}, nil)
 	// A write buffer larger than either message sends each as one frame, as Firefox sends a message.
 	dialer := *gws.DefaultDialer
@@ -758,7 +831,7 @@ func TestAFrameOverTheReadLimitClosesTheSocket(t *testing.T) {
 	// limit as it reads the frame's header, so Dispatch answers before reading any of the 9 MiB.
 	oversized := []byte(`{"type":"unsubscribe","sub":"` + strings.Repeat("a", 9<<20) + `"}`)
 	go func() { _ = client.conn.WriteMessage(gws.TextMessage, oversized) }()
-	if code, _ := client.closeCode(t, 10*time.Second); code != gws.CloseMessageTooBig {
+	if code, _ := client.closeCode(t, eventFeedWait); code != gws.CloseMessageTooBig {
 		t.Fatalf("a 9 MiB frame closed the socket with %d, want 1009", code)
 	}
 	rig.sockets(t, 0)
@@ -769,6 +842,11 @@ func TestAFrameOverTheReadLimitClosesTheSocket(t *testing.T) {
 // limit counts a message's frames together: the frame that takes the message past 8 MiB closes the
 // socket with 1009, though the message never finishes.
 func TestAMessageOverTheReadLimitInChromesFramesClosesTheSocket(t *testing.T) {
+	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
+	// on is proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the
+	// instance (internal/dispatch/events, horizon.go). Keeping only the tests that hold a
+	// lock on purpose out of the parallel set left five of these timing out on events_start;
+	// the whole family is out of it (dispatch://INFRA-1075).
 	rig := newLiveSocketRig(t, testServerOptions{streamHeartbeat: throughputWaitCap}, nil)
 	const frame = 131000
 	dialer := *gws.DefaultDialer
@@ -791,22 +869,32 @@ func TestAMessageOverTheReadLimitInChromesFramesClosesTheSocket(t *testing.T) {
 }
 
 func TestAWindowWiderThanTheMaximumIsAnErrorFrame(t *testing.T) {
+	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
+	// on is proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the
+	// instance (internal/dispatch/events, horizon.go). Keeping only the tests that hold a
+	// lock on purpose out of the parallel set left five of these timing out on events_start;
+	// the whole family is out of it (dispatch://INFRA-1075).
 	rig := newLiveSocketRig(t, testServerOptions{}, nil)
 	seedHubSettings(t, rig.database)
 	client := rig.dial(t, asUser("alice"))
 	to := time.Now().UTC().Truncate(time.Second)
 
 	client.send(t, deliverySubscribe("wide", timelineRange(to.Add(-maxDeliveryWindow-time.Second), to, "")))
-	if refusal := client.refusal(t, 3*time.Second, "wide", "INVALID_QUERY"); refusal.Message != "from..to must not span more than 84 days" {
+	if refusal := client.refusal(t, eventFeedWait, "wide", "INVALID_QUERY"); refusal.Message != "from..to must not span more than 84 days" {
 		t.Fatalf("refusal %q, want the GET route's", refusal.Message)
 	}
 
 	// The widest window the GET route answers is answered too, on the same socket.
 	client.send(t, deliverySubscribe("widest", timelineRange(to.Add(-maxDeliveryWindow), to, "")))
-	client.snapshot(t, 10*time.Second, "widest")
+	client.snapshot(t, eventFeedWait, "widest")
 }
 
 func TestASlowReaderIsClosedNotBuffered(t *testing.T) {
+	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
+	// on is proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the
+	// instance (internal/dispatch/events, horizon.go). Keeping only the tests that hold a
+	// lock on purpose out of the parallel set left five of these timing out on events_start;
+	// the whole family is out of it (dispatch://INFRA-1075).
 	rig := newLiveSocketRig(t, testServerOptions{}, func(listener net.Listener) net.Listener { return smallSendBuffers{listener} })
 	client := rig.open(t, smallReadDialer(), asUser("alice"))
 
@@ -818,7 +906,7 @@ func TestASlowReaderIsClosedNotBuffered(t *testing.T) {
 		client.sendText(t, []byte(`{"type":"resubscribe","sub":"`+sub+strconv.Itoa(n)+`"}`))
 	}
 	socket := rig.sockets(t, 1)[0]
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(eventFeedWait)
 	for !socket.overflowed() {
 		if time.Now().After(deadline) {
 			t.Fatalf("the socket's %d-frame queue never overflowed", liveSocketQueue)
@@ -828,7 +916,7 @@ func TestASlowReaderIsClosedNotBuffered(t *testing.T) {
 
 	// Once the page reads again it is sent what the connection already carried, then 1013, and not
 	// the answers queued behind the overflow.
-	code, messages := client.read().closeCode(t, 15*time.Second)
+	code, messages := client.read().closeCode(t, eventFeedWait)
 	if code != gws.CloseTryAgainLater {
 		t.Fatalf("the slow page's socket closed with %d, want 1013", code)
 	}
@@ -839,19 +927,24 @@ func TestASlowReaderIsClosedNotBuffered(t *testing.T) {
 }
 
 func TestShutdownClosesEverySocketWithServiceRestart(t *testing.T) {
+	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
+	// on is proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the
+	// instance (internal/dispatch/events, horizon.go). Keeping only the tests that hold a
+	// lock on purpose out of the parallel set left five of these timing out on events_start;
+	// the whole family is out of it (dispatch://INFRA-1075).
 	events := newFakeLiveKind(0, 0)
 	rig := newLiveSocketRig(t, testServerOptions{liveKinds: map[string]liveKind{liveEventsView: events.kind(true)}}, nil)
 	seedHubSettings(t, rig.database)
 	person := rig.dial(t, asUser("alice"))
 	agent := rig.dial(t, withBearer("agent-token"))
 	person.send(t, deliverySubscribe("t", presetView(deliveryLiveTimeline, 7, "")))
-	person.snapshot(t, 10*time.Second, "t")
+	person.snapshot(t, eventFeedWait, "t")
 	agent.send(t, liveSubscribe("e", eventsView(), ""))
-	running := events.next(t, 5*time.Second, "the agent's events subscription")
+	running := events.next(t, eventFeedWait, "the agent's events subscription")
 
 	rig.stop()
 	for name, client := range map[string]*socketClient{"the person's": person, "the agent's": agent} {
-		if code, _ := client.closeCode(t, 5*time.Second); code != gws.CloseServiceRestart {
+		if code, _ := client.closeCode(t, eventFeedWait); code != gws.CloseServiceRestart {
 			t.Errorf("%s socket closed with %d, want 1012", name, code)
 		}
 	}
@@ -873,6 +966,11 @@ func TestShutdownClosesEverySocketWithServiceRestart(t *testing.T) {
 }
 
 func TestASocketPastItsAgeClosesWithMaxAge(t *testing.T) {
+	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
+	// on is proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the
+	// instance (internal/dispatch/events, horizon.go). Keeping only the tests that hold a
+	// lock on purpose out of the parallel set left five of these timing out on events_start;
+	// the whole family is out of it (dispatch://INFRA-1075).
 	const age = 200 * time.Millisecond
 	rig := newLiveSocketRig(t, testServerOptions{liveSocketAge: func() time.Duration { return age }}, nil)
 	opened := time.Now()
@@ -888,6 +986,11 @@ func TestASocketPastItsAgeClosesWithMaxAge(t *testing.T) {
 }
 
 func TestEachSocketsAgeFallsInItsWindow(t *testing.T) {
+	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
+	// on is proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the
+	// instance (internal/dispatch/events, horizon.go). Keeping only the tests that hold a
+	// lock on purpose out of the parallel set left five of these timing out on events_start;
+	// the whole family is out of it (dispatch://INFRA-1075).
 	served := &server{}
 	drawn := map[time.Duration]struct{}{}
 	for range 1000 {
@@ -920,25 +1023,40 @@ func requireTheHookClosesEverySocket(t *testing.T, hook string, code int, reason
 		t.Fatalf("POST %s: status=%d body=%s", hook, response.Code, response.Body.String())
 	}
 	for name, client := range map[string]*socketClient{"the person's": person, "the agent's": agent} {
-		if closed := client.closeError(t, 5*time.Second); closed.Code != code || closed.Text != reason {
+		if closed := client.closeError(t, eventFeedWait); closed.Code != code || closed.Text != reason {
 			t.Errorf("%s socket closed with %d %q, want %d %q", name, closed.Code, closed.Text, code, reason)
 		}
 	}
 
 	again := rig.dial(t, asUser("alice"))
 	again.send(t, LiveUnsubscribe{Type: "unsubscribe"})
-	again.refusal(t, 3*time.Second, "", "INVALID_FRAME")
+	again.refusal(t, eventFeedWait, "", "INVALID_FRAME")
 }
 
 func TestTheRotateHookClosesEverySocketWithMaxAge(t *testing.T) {
+	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
+	// on is proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the
+	// instance (internal/dispatch/events, horizon.go). Keeping only the tests that hold a
+	// lock on purpose out of the parallel set left five of these timing out on events_start;
+	// the whole family is out of it (dispatch://INFRA-1075).
 	requireTheHookClosesEverySocket(t, "/api/v1/live/_test/rotate", contracts.LiveSocketMaxAgeClose, "max age")
 }
 
 func TestTheDisconnectHookClosesEverySocketWithServiceRestart(t *testing.T) {
+	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
+	// on is proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the
+	// instance (internal/dispatch/events, horizon.go). Keeping only the tests that hold a
+	// lock on purpose out of the parallel set left five of these timing out on events_start;
+	// the whole family is out of it (dispatch://INFRA-1075).
 	requireTheHookClosesEverySocket(t, "/api/v1/live/_test/disconnect", gws.CloseServiceRestart, "")
 }
 
 func TestTheLiveTestHooksAreMountedOnlyUnderTestHooks(t *testing.T) {
+	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
+	// on is proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the
+	// instance (internal/dispatch/events, horizon.go). Keeping only the tests that hold a
+	// lock on purpose out of the parallel set left five of these timing out on events_start;
+	// the whole family is out of it (dispatch://INFRA-1075).
 	t.Run("without test hooks", func(t *testing.T) {
 		rig := newLiveSocketRig(t, testServerOptions{}, nil)
 		client := rig.dial(t, asUser("alice"))
@@ -948,7 +1066,7 @@ func TestTheLiveTestHooksAreMountedOnlyUnderTestHooks(t *testing.T) {
 			}
 		}
 		client.send(t, LiveUnsubscribe{Type: "unsubscribe"})
-		client.refusal(t, 3*time.Second, "", "INVALID_FRAME")
+		client.refusal(t, eventFeedWait, "", "INVALID_FRAME")
 	})
 	t.Run("the delivery socket's hook is gone", func(t *testing.T) {
 		rig := newLiveSocketRig(t, testServerOptions{testHooks: true}, nil)
@@ -962,13 +1080,17 @@ func TestTheLiveTestHooksAreMountedOnlyUnderTestHooks(t *testing.T) {
 // back the hub's frames nor overflows the hub's queue: the hub's queue fills beside it, and once
 // the writer writes again every hub frame is written ahead of the stream frames still queued.
 func TestHubFramesAreWrittenAheadOfAFullStreamQueue(t *testing.T) {
+	// No t.Parallel: this test holds a transaction, a row lock or an advisory lock open on
+	// purpose. The event log's safe horizon is proven from pg_snapshot_xmin, the oldest
+	// transaction id running anywhere on the instance (internal/dispatch/events,
+	// horizon.go), so a hold here stalls every parallel test reading that feed.
 	busy := newFakeLiveKind(-1, 512)
 	held := &heldWrites{}
 	rig := newLiveSocketRig(t, testServerOptions{liveKinds: map[string]liveKind{liveEventsView: busy.kind(true)}}, held.listen)
 	client := rig.open(t, gws.DefaultDialer, asUser("alice"))
 	held.hold(t)
 	client.send(t, liveSubscribe("busy", eventsView(), ""))
-	busy.next(t, 5*time.Second, "the busy events subscription")
+	busy.next(t, eventFeedWait, "the busy events subscription")
 	socket := rig.sockets(t, 1)[0]
 	held.waitHeld(t, socket)
 
@@ -980,7 +1102,7 @@ func TestHubFramesAreWrittenAheadOfAFullStreamQueue(t *testing.T) {
 		subs[n] = "d" + strconv.Itoa(n)
 		client.send(t, deliverySubscribe(subs[n], livePipelineView(nil)))
 	}
-	pollUntil(t, 10*time.Second, "the hub answers every delivery view", func() bool { return len(socket.queue) == answers })
+	pollUntil(t, concurrentWait, "the hub answers every delivery view", func() bool { return len(socket.queue) == answers })
 	if socket.overflowed() {
 		t.Fatal("the hub's queue overflowed beside a full stream queue")
 	}
@@ -989,10 +1111,10 @@ func TestHubFramesAreWrittenAheadOfAFullStreamQueue(t *testing.T) {
 	// then the stream again.
 	held.release()
 	client.read()
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(eventFeedWait)
 	var first LiveError
 	for {
-		frame := decodeSocketFrame(t, client.takeBy(t, deadline, 10*time.Second, "the first hub frame"))
+		frame := decodeSocketFrame(t, client.takeBy(t, deadline, eventFeedWait, "the first hub frame"))
 		if refusal, ok := frame.(LiveError); ok {
 			first = refusal
 			break
@@ -1005,8 +1127,8 @@ func TestHubFramesAreWrittenAheadOfAFullStreamQueue(t *testing.T) {
 	if len(rest) != answers-1 {
 		t.Fatalf("the first hub frame refuses %q, not one of the delivery views %v", first.Sub, subs)
 	}
-	client.refusals(t, 3*time.Second, "DELIVERY_NOT_CONFIGURED", rest...)
-	client.event(t, 5*time.Second, "busy")
+	client.refusals(t, eventFeedWait, "DELIVERY_NOT_CONFIGURED", rest...)
+	client.event(t, eventFeedWait, "busy")
 	if !client.open() {
 		t.Fatalf("the socket ended: %v", client.err)
 	}
@@ -1016,25 +1138,43 @@ func TestHubFramesAreWrittenAheadOfAFullStreamQueue(t *testing.T) {
 // second, so the page's first pong has a heartbeat to arrive before the pong deadline, two
 // heartbeats after the socket opened, and a loaded runner that delays it most of a heartbeat still
 // meets it. A page that answers no ping, which a short heartbeat ends quickly, is the next test's.
+//
+// Real time, at the server's heartbeat: the pings and pongs cross a real websocket, which no
+// synctest bubble can hold.
 func TestPingsKeepAnIdleSocketOpen(t *testing.T) {
+	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
+	// on is proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the
+	// instance (internal/dispatch/events, horizon.go). Keeping only the tests that hold a
+	// lock on purpose out of the parallel set left five of these timing out on events_start;
+	// the whole family is out of it (dispatch://INFRA-1075).
 	const heartbeat = time.Second
 	rig := newLiveSocketRig(t, testServerOptions{streamHeartbeat: heartbeat}, nil)
 	answering := rig.open(t, gws.DefaultDialer, asUser("alice"))
-	var pings atomic.Int32
+	pinged := make(chan struct{}, 64)
 	answering.conn.SetPingHandler(func(data string) error {
-		pings.Add(1)
+		select {
+		case pinged <- struct{}{}:
+		default:
+		}
 		return answering.conn.WriteControl(gws.PongMessage, []byte(data), time.Now().Add(time.Second))
 	})
 	answering.read()
 
-	// Four heartbeats is twice the pong deadline, so the page still holds its socket only through
-	// its pongs.
-	time.Sleep(4 * heartbeat)
+	// The fourth ping comes four heartbeats in, twice the pong deadline, so a socket still open
+	// when it arrives is one the page's pongs have kept: waiting for the ping itself is what says
+	// the heartbeats passed.
+	const pings = 4
+	for ping := range pings {
+		select {
+		case <-pinged:
+		case <-answering.ended:
+			t.Fatalf("an idle page that answers every ping lost its socket after %d pings: %v", ping, answering.err)
+		case <-time.After(concurrentWait):
+			t.Fatalf("the idle page was pinged %d times within %s, want one every %s", ping, concurrentWait, heartbeat)
+		}
+	}
 	if !answering.open() {
 		t.Fatalf("an idle page that answers every ping lost its socket: %v", answering.err)
-	}
-	if got := pings.Load(); got < 3 {
-		t.Fatalf("the idle page was pinged %d times in four heartbeats, want one each", got)
 	}
 	rig.sockets(t, 1)
 }
@@ -1045,6 +1185,11 @@ func TestPingsKeepAnIdleSocketOpen(t *testing.T) {
 // which starts the backoff over (packages/dispatch/web/src/api/live-socket.ts, lost). 1008 would
 // say its caller no longer resolves.
 func TestAPageThatAnswersNoPingLosesItsSocketWithNoCloseFrame(t *testing.T) {
+	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
+	// on is proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the
+	// instance (internal/dispatch/events, horizon.go). Keeping only the tests that hold a
+	// lock on purpose out of the parallel set left five of these timing out on events_start;
+	// the whole family is out of it (dispatch://INFRA-1075).
 	const heartbeat = 200 * time.Millisecond
 	rig := newLiveSocketRig(t, testServerOptions{streamHeartbeat: heartbeat}, nil)
 	// Where a page that answers no ping ends with the wrong close, it does so through a race in the
@@ -1078,6 +1223,11 @@ func TestAPageThatAnswersNoPingLosesItsSocketWithNoCloseFrame(t *testing.T) {
 }
 
 func TestAnIdleDeliverySocketIsSentAHeartbeat(t *testing.T) {
+	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
+	// on is proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the
+	// instance (internal/dispatch/events, horizon.go). Keeping only the tests that hold a
+	// lock on purpose out of the parallel set left five of these timing out on events_start;
+	// the whole family is out of it (dispatch://INFRA-1075).
 	const heartbeat = 300 * time.Millisecond
 	rig := newLiveSocketRig(t, testServerOptions{streamHeartbeat: heartbeat}, nil)
 	client := rig.dial(t, asUser("alice"))

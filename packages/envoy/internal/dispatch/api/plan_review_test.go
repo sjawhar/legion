@@ -12,6 +12,7 @@ import (
 // that approval of one version, the document then reads as approved, a later version makes it
 // stale, and no approval request for a plan ever reaches a human.
 func TestPlanReviewApprovesAPlanVersionAndNoPersonIsAsked(t *testing.T) {
+	t.Parallel()
 	handler, _, _ := newTestServer(t, testServerOptions{})
 	issue := createInteractionIssue(t, handler, "PLAN", "Approve the plan", "A spec\n")
 	owner := "/api/v1/issues/" + issue.Key
@@ -60,6 +61,7 @@ func TestPlanReviewApprovesAPlanVersionAndNoPersonIsAsked(t *testing.T) {
 // "Approved by plan review" and the agent that restored the text is never recorded as a person
 // approving a plan.
 func TestARestoredPlanVersionCarriesThePlanReviewsOwnKind(t *testing.T) {
+	t.Parallel()
 	handler := approvalCarryHandler(t)
 	issue := createInteractionIssue(t, handler, "PLAN", "Restore the approved plan", "A spec\n")
 	plan := uploadDocument(t, handler, "/api/v1/issues/"+issue.Key, "plan.md", "# Plan\n\nThe service ships behind a flag.\n")
@@ -107,6 +109,7 @@ func TestARestoredPlanVersionCarriesThePlanReviewsOwnKind(t *testing.T) {
 // Only a plan document is approved by a plan review: the issue's spec, and every other document,
 // is refused.
 func TestPlanReviewRefusesEveryDocumentThatIsNotAPlan(t *testing.T) {
+	t.Parallel()
 	handler, _, _ := newTestServer(t, testServerOptions{})
 	issue := createInteractionIssue(t, handler, "PLAN", "Not a plan", "A spec\n")
 	notes := uploadDocument(t, handler, "/api/v1/issues/"+issue.Key, "notes.md", "# Notes\n\nOne.\n")
@@ -126,6 +129,7 @@ func TestPlanReviewRefusesEveryDocumentThatIsNotAPlan(t *testing.T) {
 
 // A version the plan does not have is refused, so no approval ever names one nobody reviewed.
 func TestPlanReviewRefusesAVersionThePlanDoesNotHave(t *testing.T) {
+	t.Parallel()
 	handler, _, _ := newTestServer(t, testServerOptions{})
 	issue := createInteractionIssue(t, handler, "PLAN", "One version", "A spec\n")
 	plan := uploadDocument(t, handler, "/api/v1/issues/"+issue.Key, "plan.md", "# Plan\n\nOne.\n")
@@ -144,6 +148,7 @@ func TestPlanReviewRefusesAVersionThePlanDoesNotHave(t *testing.T) {
 // it does for every other reader of a document's role (documentPlays). The plan review takes it,
 // and an approval request for a person is still refused on it.
 func TestPlanReviewTakesAPlanRowThatCarriesNoRole(t *testing.T) {
+	t.Parallel()
 	handler, database, _ := newTestServer(t, testServerOptions{})
 	issue := createInteractionIssue(t, handler, "PLANR", "Role-less plan", "A spec\n")
 	plan := uploadDocument(t, handler, "/api/v1/issues/"+issue.Key, "plan.md", "# Plan\n\nOne.\n")

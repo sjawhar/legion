@@ -1,5 +1,8 @@
 package bus_test
 
+// Every test here captures the default slog handler (captureLogs, stream_config_test.go), a
+// process-wide swap, so none of them is parallel (dispatch://INFRA-1075).
+
 import (
 	"context"
 	"encoding/json"
@@ -49,7 +52,7 @@ func TestADrainEndsTheKVWatchersBeforeTheConnection(t *testing.T) {
 			}
 			watcher := kvwatch.New("drain-test", kv, discardingCache{})
 			watcher.Start()
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), busWait)
 			defer cancel()
 			if err := watcher.WaitReady(ctx); err != nil {
 				t.Fatalf("wait for the watcher: %v", err)
@@ -114,7 +117,7 @@ func TestDrainRunsItsHooksWhileTheConnectionCarriesRequests(t *testing.T) {
 	}
 	select {
 	case <-started:
-	case <-time.After(5 * time.Second):
+	case <-time.After(busWait):
 		t.Fatal("the delivery never reached its handler")
 	}
 	type observed struct {

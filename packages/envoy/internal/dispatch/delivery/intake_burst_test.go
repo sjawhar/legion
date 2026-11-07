@@ -16,7 +16,6 @@ import (
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
-	"github.com/sjawhar/envoy/internal/testnats"
 )
 
 // burstGitHubLatency is what the fake GitHub adds to every call it answers.
@@ -85,7 +84,7 @@ func TestIntakeBurstOfMergedPullRequests(t *testing.T) {
 	fake.mux.Handle("/", withLatency(burstGitHubLatency, routes))
 	github := fake.newTestClient()
 
-	natsURL := testnats.URL(t)
+	natsURL := deliveryTestNATS(t)
 	publisher := intakeTestClient(t)
 	runCtx, cancel := context.WithCancel(ctx)
 	stop := startIntakesForBurst(t, runCtx, func(name string) (*bus.Client, error) {

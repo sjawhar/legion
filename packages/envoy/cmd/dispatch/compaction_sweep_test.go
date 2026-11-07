@@ -19,6 +19,7 @@ import (
 // held them in a compaction queue that went with it - folds into its head within the sweep's first
 // tick, which comes at the boot, and the document reads as it did.
 func TestTheCompactionSweepFoldsABackdatedLogWithNATSDisabled(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	database := storetest.Open(t)
 	const artifactID = "5a660655-04ad-4ce0-8a9b-93dd03c41300"

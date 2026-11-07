@@ -2,11 +2,17 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"net/http"
+	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
+	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 	"github.com/sjawhar/envoy/internal/pglisten"
@@ -54,6 +60,44 @@ func lastEventID(t *testing.T, database *store.Store) int64 {
 		t.Fatalf("read the last event id: %v", err)
 	}
 	return id
+}
+
+// ageIssueEvents moves every event of issueKey back by by, so a test that needs an event the
+// sweep reads as settle old sets that age on the row rather than waiting the window out. Every
+// one of the issue's events moves together, so the order the writes made is the order that
+// stands.
+func ageIssueEvents(t *testing.T, database *store.Store, issueKey string, by time.Duration) {
+	t.Helper()
+	if _, err := database.Pool.Exec(context.Background(),
+		`update events set created_at = created_at - $2::float8 * interval '1 second' where issue_key = $1`,
+		issueKey, by.Seconds()); err != nil {
+		t.Fatalf("age the events of %s: %v", issueKey, err)
+	}
+}
+
+// ageSuggestion moves the suggestion sourceIssueKey offered back by by, which is how a test makes
+// one settle old without waiting: the pass judges a suggestion by now() - created_at, as it judges
+// an event (readSuggestionPage, touchedSuggestions).
+func ageSuggestion(t *testing.T, database *store.Store, sourceIssueKey string, by time.Duration) {
+	t.Helper()
+	if _, err := database.Pool.Exec(context.Background(),
+		`update write_suggestions set created_at = created_at - $2::float8 * interval '1 second' where source_issue_key = $1`,
+		sourceIssueKey, by.Seconds()); err != nil {
+		t.Fatalf("age the suggestion of %s: %v", sourceIssueKey, err)
+	}
+}
+
+// suggestionAge is how old the suggestion sourceIssueKey offered is by the database's clock, the
+// one the pass compares against settle.
+func suggestionAge(t *testing.T, database *store.Store, sourceIssueKey string) time.Duration {
+	t.Helper()
+	var seconds float64
+	if err := database.Pool.QueryRow(context.Background(),
+		`select extract(epoch from now() - created_at)::float8 from write_suggestions where source_issue_key = $1`,
+		sourceIssueKey).Scan(&seconds); err != nil {
+		t.Fatalf("read the age of the suggestion of %s: %v", sourceIssueKey, err)
+	}
+	return time.Duration(seconds * float64(time.Second))
 }
 
 // sweepSuggestionOutcomes judges everything there is to judge at the server's page size, holding
@@ -113,10 +157,10 @@ func startIdleSweep(t *testing.T, project string, settle time.Duration) idleSwee
 	runSweep(t, func(ctx context.Context) { runSuggestionOutcomeSweep(ctx, counted.Pool, srv.horizon(), wake, schedule) })
 	select {
 	case <-connected:
-	case <-time.After(10 * time.Second):
-		t.Fatal("the hub did not connect within 10s")
+	case <-time.After(concurrentWait):
+		t.Fatalf("the hub did not connect within %s", concurrentWait)
 	}
-	waitUntil(t, 10*time.Second, "the boot pass to set the cursor", func() bool { return outcomeCursor(t, database) != nil })
+	waitUntil(t, concurrentWait, "the boot pass to set the cursor", func() bool { return outcomeCursor(t, database) != nil })
 	// The hub's signal after its LISTEN earns one more pass, no sooner than the gap after the boot
 	// pass began; after it the loop is idle.
 	time.Sleep(time.Until(started.Add(idleSweepGap + 300*time.Millisecond)))
@@ -127,6 +171,9 @@ func startIdleSweep(t *testing.T, project string, settle time.Duration) idleSwee
 // With no event written, the sweep makes no statement at all - no pass on a timer, no lease
 // attempt - over a window fifteen times its gap between passes, though a suggestion is pending.
 func TestTheSuggestionSweepMakesNoStatementWithNoEvents(t *testing.T) {
+	// No t.Parallel: this test measures a window of wall-clock time, fifteen gaps of the sweep
+	// it runs, and asserts nothing was done in it; a parallel test's CPU is what would stretch
+	// that window past a pass the sweep then makes inside it.
 	sweep := startIdleSweep(t, "OIDLE", idleSweepGap)
 	seedWriteSuggestion(t, sweep.server, "issue", sweep.source, "", "alice", "issue", sweep.target, sweep.target)
 
@@ -143,12 +190,14 @@ func TestTheSuggestionSweepMakesNoStatementWithNoEvents(t *testing.T) {
 // An event the suggestion's actor writes on the suggested issue wakes the idle sweep through its
 // notification on a real pglisten.Hub, and the suggestion is marked acted_on within seconds.
 func TestAnEventByTheActorOnTheSuggestedIssueWakesTheSweepAndMarksActedOn(t *testing.T) {
+	// No t.Parallel: startIdleSweep measures a quiet window of the sweep it runs
+	// (storetest.AwaitQuiet) before the test's own write, and a parallel test's CPU is what
+	// would stretch that window.
 	sweep := startIdleSweep(t, "OWAKE", idleSweepGap)
 	seedWriteSuggestion(t, sweep.server, "issue", sweep.source, "", "alice", "issue", sweep.target, sweep.target)
-	time.Sleep(10 * time.Millisecond) // the event must postdate the suggestion row
 
 	postOutcomeMessage(t, sweep.handler, sweep.target, "alice", "Adding the new detail here instead.")
-	waitUntil(t, 5*time.Second, "the suggestion to be marked acted_on", func() bool {
+	waitUntil(t, concurrentWait, "the suggestion to be marked acted_on", func() bool {
 		return readSuggestionOutcome(t, sweep.server, sweep.source, sweep.target).Outcome == "acted_on"
 	})
 	if row := readSuggestionOutcome(t, sweep.server, sweep.source, sweep.target); row.Detail != "the suggested issue was updated directly" {
@@ -160,16 +209,17 @@ func TestAnEventByTheActorOnTheSuggestedIssueWakesTheSweepAndMarksActedOn(t *tes
 // on the suggestion. The comment wakes the sweep at once, but an event is judged by only once it
 // is settle old, by which time the update is written too, so the rules see both and the acted_on
 // rules run before the overridden one: the comment is not judged alone as an override.
+// Serial: startIdleSweep measures a quiet window of wall-clock time (storetest.AwaitQuiet)
+// before the test's own write, and a parallel test's CPU is what would stretch that window.
 func TestWritesMomentsApartAreJudgedTogetherAsActedOn(t *testing.T) {
 	const settle = 1500 * time.Millisecond
 	sweep := startIdleSweep(t, "OTOGETHER", settle)
 	seedWriteSuggestion(t, sweep.server, "issue", sweep.source, "", "alice", "issue", sweep.target, sweep.target)
-	time.Sleep(10 * time.Millisecond) // the events must postdate the suggestion row
 
 	postOutcomeMessage(t, sweep.handler, sweep.source, "alice", "Looking into this here first.")
 	time.Sleep(300 * time.Millisecond)
 	postOutcomeMessage(t, sweep.handler, sweep.target, "alice", "Adding the new detail here instead.")
-	waitUntil(t, 10*time.Second, "the suggestion to be judged", func() bool {
+	waitUntil(t, concurrentWait, "the suggestion to be judged", func() bool {
 		return readSuggestionOutcome(t, sweep.server, sweep.source, sweep.target).Outcome != "ignored"
 	})
 	if row := readSuggestionOutcome(t, sweep.server, sweep.source, sweep.target); row.Outcome != "acted_on" {
@@ -178,12 +228,22 @@ func TestWritesMomentsApartAreJudgedTogetherAsActedOn(t *testing.T) {
 }
 
 // A suggestion younger than settle is not judged, whatever older event a page carries: here
-// another person's message on the suggested issue, written before the suggestion, becomes settle
-// old while the suggestion is not. The agent comments on what it filed and, moments later, updates
+// another person's message on the suggested issue, written before the suggestion, is settle old
+// while the suggestion is not. The agent comments on what it filed and, moments later, updates
 // the suggested issue; judged at the older event's turn, the comment alone would read as an
 // override. Judged once it is settle old, the rules see both writes, and it is acted_on.
 func TestAYoungSuggestionIsNotJudgedByAnOlderEventOfItsIssues(t *testing.T) {
-	const settle = 2 * time.Second
+	// No t.Parallel: this test reads the event log by id cursor up to the safe horizon, which is
+	// instance-wide - it is proven from pg_snapshot_xmin, the oldest transaction id running
+	// anywhere on the Postgres server (internal/dispatch/events, horizon.go) - so any open
+	// transaction, this package's tests' included, holds it back.
+	//
+	// settle is the window the pass is given, a parameter of every call below rather than a span
+	// the test waits out: an hour, so no load between the age the test checks and the pass's own
+	// now() can age the young suggestion past it. The two ages the test turns on are set on the
+	// rows themselves (ageIssueEvents, ageSuggestion), as seedWriteSuggestion stamps its row ten
+	// milliseconds back rather than sleeping for the gap it needs.
+	const settle = time.Hour
 	ctx := context.Background()
 	handler, database, deps := newTestServer(t, testServerOptions{})
 	srv := directServer(deps)
@@ -198,17 +258,13 @@ func TestAYoungSuggestionIsNotJudgedByAnOlderEventOfItsIssues(t *testing.T) {
 		t.Fatalf("clear the suggestions filing recorded: %v", err)
 	}
 
-	older := time.Now()
 	postOutcomeMessage(t, handler, target, "bob", "A note of my own on the target.")
-	time.Sleep(settle / 2)
+	// bob's message is settle old, and still older than the suggestion the test seeds next.
+	ageIssueEvents(t, database, target, settle+time.Minute)
 	seedWriteSuggestion(t, srv, "issue", source, "", "alice", "issue", target, target)
-	recorded := time.Now()
-	time.Sleep(10 * time.Millisecond) // the events must postdate the suggestion row
 	postOutcomeMessage(t, handler, source, "alice", "Looking into this here first.")
 
-	// bob's message is settle old now; the suggestion is not.
-	time.Sleep(time.Until(older.Add(settle + 200*time.Millisecond)))
-	if age := time.Since(recorded); age >= settle {
+	if age := suggestionAge(t, database, source); age >= settle {
 		t.Fatalf("the suggestion is already %v old; the test needs it younger than %v here", age, settle)
 	}
 	if _, err := sweepSuggestionOutcomePages(ctx, database.Pool, safeHorizon(t, srv), suggestionOutcomePage, settle); err != nil {
@@ -219,7 +275,9 @@ func TestAYoungSuggestionIsNotJudgedByAnOlderEventOfItsIssues(t *testing.T) {
 	}
 
 	postOutcomeMessage(t, handler, target, "alice", "Adding the new detail here instead.")
-	time.Sleep(settle + 200*time.Millisecond)
+	// The suggestion is settle old now, with both of alice's writes still after it and both made
+	// while it was young: what the pass has to judge together.
+	ageSuggestion(t, database, source, settle+30*time.Second)
 	if _, err := sweepSuggestionOutcomePages(ctx, database.Pool, safeHorizon(t, srv), suggestionOutcomePage, settle); err != nil {
 		t.Fatalf("sweep once the suggestion is settle old: %v", err)
 	}
@@ -234,6 +292,9 @@ func TestAYoungSuggestionIsNotJudgedByAnOlderEventOfItsIssues(t *testing.T) {
 // visible only after a pass has read that event and moved its cursor past it. The next pass
 // judges it against that event all the same, with no further event written, because a suggestion
 // no pass has swept is judged against all its events rather than only the page's.
+// Serial: it reads the event log by id cursor up to the safe horizon, which is instance-wide -
+// proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the instance
+// (internal/dispatch/events, horizon.go).
 func TestASuggestionCommittedAfterALaterStartedEventIsStillJudged(t *testing.T) {
 	ctx := context.Background()
 	handler, database, deps := newTestServer(t, testServerOptions{})
@@ -253,7 +314,8 @@ func TestASuggestionCommittedAfterALaterStartedEventIsStillJudged(t *testing.T) 
 		t.Fatalf("open the suggestion's transaction: %v", err)
 	}
 	defer func() { _ = recording.Rollback(context.Background()) }()
-	time.Sleep(10 * time.Millisecond) // the event must postdate the suggestion's created_at
+	// No wait: this transaction's now() is its start, before the event's own transaction, which
+	// is what makes the suggestion's created_at the older of the two.
 	postOutcomeMessage(t, handler, target, "alice", "Adding the new detail here instead.")
 
 	if err := sweepSuggestionOutcomes(t, srv); err != nil {
@@ -285,6 +347,7 @@ func TestASuggestionCommittedAfterALaterStartedEventIsStillJudged(t *testing.T) 
 // the suggestion is on the third page of two events each, and one page alone reports itself full
 // and leaves the suggestion pending.
 func TestASweepReadsEveryPageOfABacklog(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	handler, database, deps := newTestServer(t, testServerOptions{})
 	srv := directServer(deps)
@@ -296,7 +359,6 @@ func TestASweepReadsEveryPageOfABacklog(t *testing.T) {
 	if err := sweepSuggestionOutcomes(t, srv); err != nil {
 		t.Fatalf("first sweep: %v", err)
 	}
-	time.Sleep(10 * time.Millisecond) // the events must postdate the suggestion row
 	for range 4 {
 		postOutcomeMessage(t, handler, noise, "bob", "Unrelated progress.")
 	}
@@ -402,7 +464,6 @@ func measureTouchedPass(t *testing.T, project string, pending bool) touchedPassC
 		t.Fatalf("%d of the old suggestions are pending after the first sweep; want %d", stillPending, want)
 	}
 	seedWriteSuggestion(t, srv, "issue", source, "", "alice", "issue", target, target)
-	time.Sleep(10 * time.Millisecond) // the event must postdate the suggestion row
 	postOutcomeMessage(t, handler, target, "alice", "Adding the new detail here instead.")
 	commented := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+activeDocument.ID+"/comments", map[string]any{
 		"body": "Progress on the active notes.",
@@ -413,10 +474,23 @@ func measureTouchedPass(t *testing.T, project string, pending bool) touchedPassC
 	if _, err := database.Pool.Exec(ctx, `vacuum analyze write_suggestions`); err != nil {
 		t.Fatalf("vacuum write_suggestions: %v", err)
 	}
+	// Both halves hold the same nine events and the same write_suggestions rows, and each runs
+	// on a database of its own cloned from the template, so the statistics the planner reads are
+	// the same statistics on both sides. That is what makes the two row counts comparable: a
+	// database carrying another test's statistics gave 8 rows for a half against 10 for the
+	// other in CI run 41789493503, back when a test could be handed a database the test before
+	// it had written in (dispatch://INFRA-1075).
 
-	// Read outside the page's transaction: an observation of the horizon waits on every
-	// transaction id open on the instance, this test's own included (events.Horizon.Await).
-	safe := safeHorizon(t, srv)
+	// The page is bounded by this database's own event head, not by the safe horizon. Both are
+	// an id every event at or below which is final, and here every event is this test's and
+	// committed; but the horizon is proven from pg_snapshot_xmin, the oldest transaction id
+	// running anywhere on the instance (internal/dispatch/events, horizon.go), so a transaction
+	// another test or the harness's own create and drop held open while one of the two
+	// measurements ran left that half a shorter range of the log to read, and the two then
+	// disagreed about
+	// how many rows of events a page reads - two rows apart in CI run 41762847452. The head is
+	// the same bound for both halves whatever else is running.
+	safe := eventHead(t, database)
 	counter := &storetest.StatementCounter{}
 	counted := storetest.Traced(t, database.Pool, counter, map[string]string{"enable_seqscan": "off"})
 	tx, err := counted.Begin(ctx)
@@ -466,6 +540,8 @@ func measureTouchedPass(t *testing.T, project string, pending bool) touchedPassC
 // thousand rows, resolved), and reads no table sequentially. The pass of the previous release read
 // every pending row on every pass.
 func TestOldPendingSuggestionsOnOtherIssuesCostAPassNothing(t *testing.T) {
+	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
+	// on is instance-wide — any open transaction anywhere on the Postgres server holds it back.
 	without := measureTouchedPass(t, "OCOST", false)
 	with := measureTouchedPass(t, "OCOST", true)
 	t.Logf("none pending: %+v; 1,000 pending: %+v", without, with)
@@ -513,12 +589,17 @@ func suggestionOutcomeAt(t *testing.T, srv *server, sourceIssueKey, suggestedID 
 // An event that can still commit is never passed over. Transaction A appends an event on the
 // suggested issue, the one that resolves the suggestion, and stays open while transaction B
 // appends a later id and commits, so the highest committed id stands above an id that can still
-// commit. A pass run then reads only up to the safe horizon (events.Horizon), which stays below
-// A's id while A is open: it judges nothing, leaves the cursor below that id, and asks for a pass
-// of its own no sooner than the loop's gap rather than spinning on the gap above the horizon.
+// commit. A pass run then reads only up to the id the log is final through
+// (suggestionOutcomeFloor): A holds a write lock on this database's events, so no mark the pass
+// takes counts and the floor falls back to the horizon already proven, which stands below A's
+// id while A is open. It judges nothing, leaves the cursor below that id, and asks for a pass of
+// its own no sooner than the loop's gap rather than spinning on the gap above the floor.
 // Once A commits, the next pass reads its event and judges the suggestion by it, once. A pass
 // reading `id > cursor` uncapped moves the cursor past A's event on the first pass, and the
 // suggestion is then never judged.
+// Serial: it reads the event log by id cursor up to the safe horizon, which is instance-wide -
+// proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the instance
+// (internal/dispatch/events, horizon.go).
 func TestTheSuggestionSweepTrailsTheSafeHorizon(t *testing.T) {
 	ctx := t.Context()
 	handler, database, deps := newTestServer(t, testServerOptions{})
@@ -535,19 +616,23 @@ func TestTheSuggestionSweepTrailsTheSafeHorizon(t *testing.T) {
 	if _, err := database.Pool.Exec(ctx, `delete from write_suggestions where source_issue_key = $1`, source); err != nil {
 		t.Fatalf("clear the suggestions filing recorded: %v", err)
 	}
+	// created_at ten milliseconds back, as seedWriteSuggestion writes it: the events below must
+	// postdate this row, and the stamp is that gap.
 	if _, err := database.Pool.Exec(ctx, `
 		insert into write_suggestions
-			(source_kind, source_issue_key, actor_kind, actor_id, role, rank, suggested_kind, suggested_id, suggested_issue_key)
-		values ('issue', $1, 'session', 'seed', 'related', 0, 'issue', $2, $2)
+			(source_kind, source_issue_key, actor_kind, actor_id, role, rank, suggested_kind, suggested_id, suggested_issue_key, created_at)
+		values ('issue', $1, 'session', 'seed', 'related', 0, 'issue', $2, $2, now() - interval '10 milliseconds')
 	`, source, target); err != nil {
 		t.Fatalf("record the suggestion: %v", err)
 	}
-	time.Sleep(10 * time.Millisecond) // the events must postdate the suggestion row
 
 	schedule := suggestionSchedule{minGap: time.Second, page: suggestionOutcomePage}
+	// One floor across the three passes below, as the loop keeps one across its own
+	// (runSuggestionOutcomeSweep): the marks it takes are what a later pass reads the log up to.
+	floor := &suggestionOutcomeFloor{horizon: srv.horizon()}
 	low, _, commitLow := appendOutOfOrder(t, database, deps.Events, target, other)
 	started := time.Now()
-	next, err := suggestionOutcomePass(ctx, database.Pool, srv.horizon(), schedule)
+	next, err := suggestionOutcomePass(ctx, database.Pool, floor, schedule)
 	if err != nil {
 		t.Fatalf("the pass run while the lower id is still open: %v", err)
 	}
@@ -569,7 +654,7 @@ func TestTheSuggestionSweepTrailsTheSafeHorizon(t *testing.T) {
 	if safe := safeHorizon(t, srv); safe < low {
 		t.Fatalf("the safe horizon is %d once event %d has committed; want it at or above that id", safe, low)
 	}
-	if _, err := suggestionOutcomePass(ctx, database.Pool, srv.horizon(), schedule); err != nil {
+	if _, err := suggestionOutcomePass(ctx, database.Pool, floor, schedule); err != nil {
 		t.Fatalf("the pass run once the lower id has committed: %v", err)
 	}
 	if row := readSuggestionOutcome(t, srv, source, target); row.Outcome != "acted_on" || row.Detail != "the suggested issue was updated directly" {
@@ -582,11 +667,198 @@ func TestTheSuggestionSweepTrailsTheSafeHorizon(t *testing.T) {
 		t.Fatalf("cursor = %d after the pass that read event %d; want it at or above that id", *cursor, low)
 	}
 	judged := suggestionOutcomeAt(t, srv, source, target)
-	if _, err := suggestionOutcomePass(ctx, database.Pool, srv.horizon(), schedule); err != nil {
+	if _, err := suggestionOutcomePass(ctx, database.Pool, floor, schedule); err != nil {
 		t.Fatalf("the pass after the suggestion was judged: %v", err)
 	}
 	if again := suggestionOutcomeAt(t, srv, source, target); judged == nil || again == nil || !again.Equal(*judged) {
 		t.Fatalf("the suggestion was judged at %v and again at %v; want one judgement", judged, again)
+	}
+}
+
+// A pass reads the log and moves its cursor at once while a transaction in another database of
+// the same Postgres instance holds a transaction id. The pass caps its page at a writer floor
+// (suggestionOutcomeFloor, events.Horizon.WriterFloor), not at the safe horizon. Both are an id
+// every event at or below which is final, which is all a page needs (judgeSuggestionPage); they
+// differ only in what they wait on. The horizon is proven from pg_snapshot_xmin, the oldest
+// transaction id running anywhere on the instance (internal/dispatch/events, horizon.go), so an
+// open transaction in any database on it - another service's write, an operator's psql session,
+// a `create database ... template`, another package's test - holds it back, and a process whose
+// horizon has proven nothing yet, as one just started has, can only await it: the whole hold,
+// with every judgement the sweep owes behind it. The floor counts only the transactions that
+// hold a write lock on this database's events (oldestEventWriterSQL), which are the only ones
+// that can hold an id of this log open, so a mark taken now counts at once and the pass answers
+// under a hold of any length.
+func TestTheSuggestionSweepDoesNotWaitOnATransactionInAnotherDatabase(t *testing.T) {
+	// No t.Parallel: holdClusterTransactionID below holds a transaction id on the whole Postgres
+	// instance for thirty seconds, which keeps every horizon on it from being proven
+	// (internal/dispatch/events, horizon.go), and this test bounds how long one pass takes.
+	ctx := t.Context()
+	handler, database, deps := newTestServer(t, testServerOptions{})
+	// srv's is the one events.Horizon of a process that has just started: nothing proven and no
+	// observation taken, as the server's is on its boot pass.
+	srv := directServer(deps)
+	createSuggestionProject(t, handler, "OELSEWHERE")
+	target := createOutcomeIssue(t, handler, "OELSEWHERE", "Target issue")
+	postOutcomeMessage(t, handler, target, "alice", "A message on the target issue.")
+	newest := lastEventID(t, database)
+	if cursor := outcomeCursor(t, database); cursor != nil {
+		t.Fatalf("cursor = %d before any pass has run; want it null, so this pass is a just-started process's first", *cursor)
+	}
+
+	holdClusterTransactionID(t, 30*time.Second)
+	schedule := suggestionSchedule{minGap: time.Second, settle: time.Minute, page: suggestionOutcomePage}
+	began := time.Now()
+	if _, err := suggestionOutcomePass(ctx, database.Pool, &suggestionOutcomeFloor{horizon: srv.horizon()}, schedule); err != nil {
+		t.Fatalf("the pass run while another database holds a transaction id: %v", err)
+	}
+	if waited := time.Since(began); waited > 5*time.Second {
+		t.Fatalf("the pass took %v while another database held a transaction id for thirty seconds; want a pass that waits on no transaction of another database", waited)
+	}
+	switch cursor := outcomeCursor(t, database); {
+	case cursor == nil:
+		t.Fatalf("the cursor is unset after a pass run while another database held a transaction id; want it at %d, the newest event, which the floor bounds though no horizon is proven", newest)
+	case *cursor != newest:
+		t.Fatalf("cursor = %d after that pass; want %d, the newest event: the floor the pass read bounds the log where the horizon it could only await does not", *cursor, newest)
+	}
+}
+
+// No prepared transaction of this database can hold an event id, and the floor stays below one
+// that holds the lock an insert takes anyway.
+//
+// PREPARE TRANSACTION keeps a transaction, its locks and its right to commit, but leaves it no
+// backend, and pg_locks lists its locks with a null pid. So the arm of oldestEventWriterSQL that
+// joins a lock on events to its holder's transactionid lock on pid matches nothing for a
+// prepared transaction, and a floor read from that arm alone would count a mark while one could
+// still commit an event below it. Two things close that gap, and this test is both halves.
+//
+// Postgres refuses to prepare a transaction that has executed NOTIFY, and the trigger on every
+// insert into events notifies dispatch_events (migration 0107), so a transaction that has drawn
+// an event id cannot be prepared at all: the first half. And the floor's second arm counts every
+// prepared transaction of this database straight from pg_prepared_xacts, whatever it holds, so
+// one holding the RowExclusiveLock an insert takes keeps every mark the reader has from counting
+// and leaves the floor at the horizon already proven: the second half, which is what would hold
+// were a later schema to insert an event without notifying.
+//
+// The server has to allow prepared transactions: with max_prepared_transactions at 0, the stock
+// Postgres image's setting, none can be prepared and the test has no subject. Every CI job that
+// runs this package raises it (.github/workflows/ci.yaml, envoy-go and envoy-go-race-api), so in
+// CI a zero is a failure rather than a skip: a skip there would be a pass proving nothing, in the
+// one place this test has to hold.
+func TestNoPreparedTransactionHoldsAnEventIDAndTheFloorTrailsOneAnyway(t *testing.T) {
+	// No t.Parallel: this test leaves a prepared transaction on the Postgres instance across the
+	// floor's statements, which holds the instance-wide safe horizon back for every test beside
+	// it.
+	ctx := t.Context()
+	handler, database, deps := newTestServer(t, testServerOptions{})
+	srv := directServer(deps)
+	var allowed int
+	if err := database.Pool.QueryRow(ctx, `select current_setting('max_prepared_transactions')::int`).Scan(&allowed); err != nil {
+		t.Fatalf("read max_prepared_transactions: %v", err)
+	}
+	if allowed == 0 {
+		const why = "this Postgres server runs with max_prepared_transactions = 0 and can prepare no transaction"
+		if os.Getenv("CI") != "" {
+			t.Fatalf("%s; the job must raise it", why)
+		}
+		t.Skip(why)
+	}
+	createSuggestionProject(t, handler, "OPREPARED")
+	target := createOutcomeIssue(t, handler, "OPREPARED", "Target issue")
+	other := createOutcomeIssue(t, handler, "OPREPARED", "Other issue")
+	// A connection of this test's own: PREPARE TRANSACTION ends the session's transaction and
+	// leaves it on the server, which no connection handed back to the pool may be left in.
+	config := database.Pool.Config().ConnConfig.Copy()
+	conn, err := pgx.ConnectConfig(ctx, config)
+	if err != nil {
+		t.Fatalf("connect to prepare a transaction: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close(context.Background()) })
+	gid := "dispatch-floor-" + config.Database
+
+	// A transaction that has appended an event cannot be prepared: its insert notified.
+	appended, err := conn.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the transaction that appends an event: %v", err)
+	}
+	held, err := deps.Events.Append(ctx, appended, model.Event{
+		IssueKey: new(target),
+		Type:     "test.prepared",
+		Actor:    model.Actor{Kind: "session", ID: "seed"},
+		Payload:  map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("append the event the transaction holds: %v", err)
+	}
+	switch _, err := appended.Exec(ctx, fmt.Sprintf(`prepare transaction '%s'`, gid)); {
+	case err == nil:
+		_, _ = database.Pool.Exec(context.Background(), fmt.Sprintf(`rollback prepared '%s'`, gid))
+		t.Fatalf("a transaction holding event %d was prepared; want Postgres to refuse it, since the insert's trigger notified dispatch_events", held.ID)
+	case !strings.Contains(err.Error(), "LISTEN, UNLISTEN, or NOTIFY"):
+		t.Fatalf("preparing a transaction holding event %d failed with %v; want the refusal of a transaction that has notified", held.ID, err)
+	}
+	if err := appended.Rollback(ctx); err != nil {
+		t.Fatalf("roll back the transaction that could not be prepared: %v", err)
+	}
+
+	// The horizon this process has proven, which is the floor's only bound once no mark counts.
+	proven := safeHorizon(t, srv)
+	if proven == 0 {
+		t.Fatalf("no horizon is proven before the transaction below is prepared; this test could not tell the floor's fallback from a mark it took")
+	}
+	// A prepared transaction holding the lock an insert takes on events, and its transaction id,
+	// as a writer holds both (the writer invariant, events.Broker.Append).
+	locking, err := conn.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the transaction to prepare: %v", err)
+	}
+	if _, err := locking.Exec(ctx, `select pg_current_xact_id()`); err != nil {
+		t.Fatalf("take the prepared transaction's id: %v", err)
+	}
+	if _, err := locking.Exec(ctx, `lock table events in row exclusive mode`); err != nil {
+		t.Fatalf("lock events as an insert does: %v", err)
+	}
+	if _, err := locking.Exec(ctx, fmt.Sprintf(`prepare transaction '%s'`, gid)); err != nil {
+		t.Fatalf("prepare the transaction holding the lock on events: %v", err)
+	}
+	resolved := false
+	t.Cleanup(func() {
+		if resolved {
+			return
+		}
+		if _, err := database.Pool.Exec(context.Background(), fmt.Sprintf(`rollback prepared '%s'`, gid)); err != nil {
+			t.Errorf("roll back the prepared transaction %q, which would otherwise stay on the server: %v", gid, err)
+		}
+	})
+	// An event commits while it is prepared, so the mark the floor takes sees a newest id above
+	// the horizon already proven: a floor that counted that mark would stand above an id a
+	// writer of this database could still be holding.
+	postOutcomeMessage(t, handler, other, "alice", "Unrelated progress on another issue.")
+	newest := lastEventID(t, database)
+	if newest <= proven {
+		t.Fatalf("the newest committed id is %d, not above the proven horizon %d: this test proves nothing", newest, proven)
+	}
+
+	floor := &suggestionOutcomeFloor{horizon: srv.horizon()}
+	read, gap, err := floor.read(ctx)
+	if err != nil {
+		t.Fatalf("read the floor while a prepared transaction holds the lock on events: %v", err)
+	}
+	if read != proven {
+		t.Fatalf("the floor is %d while a prepared transaction holds the lock an insert takes on events; want the horizon %d already proven, the only bound left while no mark counts", read, proven)
+	}
+	if !gap {
+		t.Fatalf("the floor %d reports no id above it while the log holds %d; want the pass told it read less than the log holds", read, newest)
+	}
+
+	if _, err := database.Pool.Exec(ctx, fmt.Sprintf(`rollback prepared '%s'`, gid)); err != nil {
+		t.Fatalf("roll back the prepared transaction: %v", err)
+	}
+	resolved = true
+	switch read, _, err := floor.read(ctx); {
+	case err != nil:
+		t.Fatalf("read the floor once the prepared transaction has ended: %v", err)
+	case read < newest:
+		t.Fatalf("the floor is %d once the prepared transaction has ended; want it at %d, the newest committed id, which nothing holds open any more", read, newest)
 	}
 }
 
@@ -596,6 +868,9 @@ func TestTheSuggestionSweepTrailsTheSafeHorizon(t *testing.T) {
 // read that 0 as its safe horizon would move the cursor to the highest event id at or below it
 // (startSuggestionCursor), which is 0, and every later pass would then page through the whole
 // event log before reaching anything it has to judge.
+// Serial: it reads the event log by id cursor up to the safe horizon, which is instance-wide -
+// proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the instance
+// (internal/dispatch/events, horizon.go).
 func TestTheFirstPassOfAJustStartedProcessStartsAtTheNewestEvent(t *testing.T) {
 	handler, database, deps := newTestServer(t, testServerOptions{})
 	// srv's is the one events.Horizon of a process that has just started: on the store's horizon
@@ -610,7 +885,7 @@ func TestTheFirstPassOfAJustStartedProcessStartsAtTheNewestEvent(t *testing.T) {
 
 	newest := lastEventID(t, database)
 	schedule := suggestionSchedule{minGap: time.Second, settle: time.Minute, page: suggestionOutcomePage}
-	if _, err := suggestionOutcomePass(t.Context(), database.Pool, srv.horizon(), schedule); err != nil {
+	if _, err := suggestionOutcomePass(t.Context(), database.Pool, &suggestionOutcomeFloor{horizon: srv.horizon()}, schedule); err != nil {
 		t.Fatalf("the first pass of a just-started process: %v", err)
 	}
 	switch cursor := outcomeCursor(t, database); {

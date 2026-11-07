@@ -9,6 +9,7 @@ import (
 )
 
 func TestIsSummaryOrGuardJob(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		want bool
@@ -35,6 +36,7 @@ func TestIsSummaryOrGuardJob(t *testing.T) {
 }
 
 func TestRootFailingJob(t *testing.T) {
+	t.Parallel()
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
 	t.Run("picks earliest-finishing non-guard failed job over a later one", func(t *testing.T) {
@@ -95,6 +97,7 @@ func jobNames(jobs []DeliveryRunJob) []string {
 // the order a store read answers rows tied on its order in, are neither of them the run's: whatever
 // a run's jobs show must not move with them, or the live Delivery hub sends the run again.
 func TestAFailedRunReadsTheSameInEveryListingOrder(t *testing.T) {
+	t.Parallel()
 	base := time.Date(2026, 10, 14, 9, 0, 0, 0, time.UTC)
 	t.Run("failed jobs started and finished together", func(t *testing.T) {
 		jobs := []DeliveryRunJob{

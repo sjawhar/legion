@@ -71,6 +71,7 @@ func (f *azureFake) take() [][]string {
 // request - never bisected, never confirmed with a canary - however many times it recurs, and
 // nothing is dead-lettered; once Azure answers, the batch is embedded under the Azure identity.
 func TestAnAzureThrottleRetriesTheWholeBatchAndNeverDeadLetters(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	ids := []string{"AZTH-1", "AZTH-2", "AZTH-3"}
 	for _, id := range ids {
@@ -136,6 +137,7 @@ func TestAnAzureThrottleRetriesTheWholeBatchAndNeverDeadLetters(t *testing.T) {
 // own BackgroundTokensPerMinute: two rows whose estimates together pass it go in separate calls,
 // and the shared bucket is capped at it.
 func TestBatchSizeAndTokenCeilingFollowTheEmbeddersLimits(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	ctx := context.Background()
 	// 30,400 characters is 7,600 estimated tokens: one fits under a 15,000 ceiling, two do not.
@@ -213,6 +215,7 @@ func batchBytes(texts []string) int {
 // groups of three, each at most Azure's 320,000-byte budget, every row in exactly one group and in
 // order; the token ceiling alone (MaxBatchBytes 0) groups the same rows 25 at a time, as before.
 func TestChunkForBudgetKeepsEachCallWithinTheByteBudget(t *testing.T) {
+	t.Parallel()
 	limits := azureLimits(t)
 	if limits.MaxBatchBytes != 320_000 || limits.MaxBatchTexts != 96 {
 		t.Fatalf("Azure limits = %+v, want 96 texts and 320,000 bytes", limits)
@@ -278,6 +281,7 @@ func (e *timeoutEmbedder) Embed(ctx context.Context, texts []string, inputType e
 // call over its byte budget would time out: every call stays within the budget and succeeds the
 // first time, so nothing is bisected or sent twice, and every row is current.
 func TestAFullBatchOfDenseTextIsEmbeddedWithinTheByteBudgetWithoutBisection(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	limits := azureLimits(t)
 	// The token pace is not under test: a ceiling this high never waits.

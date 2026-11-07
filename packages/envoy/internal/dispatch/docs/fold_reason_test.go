@@ -16,6 +16,7 @@ import (
 // that refusal (recordUnfoldable, "serving them merged"), so the error must be the line an
 // operator can act on.
 func TestAStoredLogThatDoesNotFoldIsRefusedNamingItsReasonOnce(t *testing.T) {
+	t.Parallel()
 	writer := newProofHistory(t, 101)
 	first := writer.write("A first paragraph.\n")
 	second := writer.write("A first paragraph.\n\nA second paragraph, longer than the first.\n")

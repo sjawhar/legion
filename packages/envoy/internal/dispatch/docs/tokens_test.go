@@ -78,6 +78,7 @@ func sameError(got, want error) bool {
 }
 
 func TestDocumentTokensKeepTheLastNodeInPreOrderForARepeatedID(t *testing.T) {
+	t.Parallel()
 	tree := parseTokenTree(t, "- Item one.\n\nFirst.\n\nSecond.\n")
 	list := tree.Children[0]
 	item := list.Children[0]
@@ -130,6 +131,7 @@ func TestDocumentTokensKeepTheLastNodeInPreOrderForARepeatedID(t *testing.T) {
 }
 
 func TestDocumentTokensRefuseAnUnencodableValueInsideABlockAsTheBlockDoes(t *testing.T) {
+	t.Parallel()
 	tree := parseTokenTree(t, "Intro.\n\nBody text.\n")
 	paragraph := tree.Children[1]
 	setBlockID(tree.Children[0], "intro")
@@ -191,6 +193,7 @@ func TestDocumentTokensRefuseAnUnencodableValueInsideABlockAsTheBlockDoes(t *tes
 }
 
 func TestDocumentTokensKeepEveryBlockWhenOnlyTheDocumentCannotBeEncoded(t *testing.T) {
+	t.Parallel()
 	tree := parseTokenTree(t, "Intro.\n\n- Item one.\n- Item two.\n")
 	setBlockID(tree.Children[0], "intro")
 	setBlockID(tree.Children[1], "list")

@@ -44,18 +44,32 @@ func shortTempDir(t *testing.T) string {
 	return testtmp.Dir(t, "helper.sock")
 }
 
+// testEnrollRetryMin, testEnrollRetryMax and testRevokeRetry are the retry waits every rig here
+// gives its Server. These rows drive a fake broker in this process, which answers or refuses at
+// once, so the production second-to-a-minute enroll backoff and two-second revoke would be the
+// whole of a row's clock rather than anything it measures. A row whose subject is the shape of a
+// retry - that a login wakes one, that a backoff grows - passes tune and sets its own
+// (dispatch://INFRA-1075).
+const (
+	testEnrollRetryMin = 20 * time.Millisecond
+	testEnrollRetryMax = 100 * time.Millisecond
+	testRevokeRetry    = 20 * time.Millisecond
+)
+
 // newRig builds and serves a rig whose Broker holds no machine credential yet: the caller must
 // log it in (see rig.login) before any Enroll — machine session or box — can succeed, since Task
 // 1's Broker fails closed until a human has run `agent-secrets machine login`. startRig below
-// is newRig plus that login, for every test that doesn't care about the pre-login state itself.
-func newRig(t *testing.T, statePath string) *rig {
+// is newRig plus a credential, for every test that doesn't care about the pre-login state itself.
+// Each tune, when given, runs on the rig after its Server is built and before it recovers and
+// serves, for a row that needs a setting — or a credential — of its own.
+func newRig(t *testing.T, statePath string, tune ...func(*rig)) *rig {
 	t.Helper()
-	return newLoggedRig(t, statePath, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	return newLoggedRig(t, statePath, slog.New(slog.NewTextHandler(os.Stderr, nil)), tune...)
 }
 
 // newLoggedRig is newRig with log as both the Server's and the Broker's logger, as
 // cmd/agent-secrets-helper wires them, so a test can read every line the helper writes.
-func newLoggedRig(t *testing.T, statePath string, log *slog.Logger) *rig {
+func newLoggedRig(t *testing.T, statePath string, log *slog.Logger, tune ...func(*rig)) *rig {
 	t.Helper()
 	f := newFakeBroker(t)
 	of := operatorFile(t, "ada@example.com")
@@ -64,11 +78,14 @@ func newLoggedRig(t *testing.T, statePath string, log *slog.Logger) *rig {
 		statePath = filepath.Join(t.TempDir(), "sessions.json")
 	}
 	r.srv = &Server{
-		Registry: NewRegistry(statePath),
-		Broker:   &Broker{URL: f.srv.URL, OperatorFile: of, MachineFile: machineFilePath(t), HTTP: f.srv.Client(), Log: log},
-		Hostname: "testhost",
-		Log:      log,
-		MinRenew: 50 * time.Millisecond,
+		Registry:       NewRegistry(statePath),
+		Broker:         &Broker{URL: f.srv.URL, OperatorFile: of, MachineFile: machineFilePath(t), HTTP: f.srv.Client(), Log: log},
+		Hostname:       "testhost",
+		Log:            log,
+		MinRenew:       50 * time.Millisecond,
+		EnrollRetryMin: testEnrollRetryMin,
+		EnrollRetryMax: testEnrollRetryMax,
+		RevokeRetry:    testRevokeRetry,
 	}
 	r.srv.Registry.parent = func(pid int) (int, error) {
 		if parent := r.parentOf.Load(); parent != nil {
@@ -120,23 +137,32 @@ func newLoggedRig(t *testing.T, statePath string, log *slog.Logger) *rig {
 		// lives in.
 		<-served
 	})
+	// Last, so the credential a tune installs (startRig) is covered by the Close above, and
+	// before Recover and Serve, which a setting of the rig's own must be in place for.
+	for _, set := range tune {
+		set(r)
+	}
 	r.srv.Recover(ctx)
 	go func() { defer close(served); _ = r.srv.Serve(ctx, ln) }()
 	return r
 }
 
-// startRig is newRig plus an immediate machine login, so the returned rig's Broker already
-// holds a credential and ordinary session enrollment (Enroll) can succeed. Tests exercising the
-// pre-login state itself (TestLoginOverTheSocketReturnsTheCodeAndEnrollSessionKeyWorksAfterIssue,
+// startRig is newRig plus a machine credential, held before anything is recovered: the order
+// cmd/agent-secrets-helper starts in is Broker.Start, which resumes the login kept on disk, and
+// only then Recover. The order matters to what Recover does with a recorded session whose
+// process is gone: its enrollment goes to the bounded revoke, three tries that no login wakes,
+// so a credential arriving after Recover leaves that revoke racing it (dispatch://INFRA-1075).
+// The credential is installed rather than approved (installLogin), since none of these rows has
+// the login ceremony for its subject. Tests exercising the pre-login state itself
+// (TestLoginOverTheSocketReturnsTheCodeAndEnrollSessionKeyWorksAfterIssue,
 // TestSignStillRequiresDescendancyButEnrollSessionKeyDoesNot) call newRig directly instead.
-func startRig(t *testing.T, statePath string) *rig {
+func startRig(t *testing.T, statePath string, tune ...func(*rig)) *rig {
 	t.Helper()
-	r := newRig(t, statePath)
-	r.login(t)
-	return r
+	return newRig(t, statePath, append(tune, func(r *rig) { installLogin(t, r.fake, r.srv.Broker) })...)
 }
 
-// login logs r's Broker in against its own fake and waits for the credential to install.
+// login logs r's Broker in through the device ceremony and waits for the credential to install,
+// for a test that builds its rig with none (newRig) and logs it in at a moment of its own.
 func (r *rig) login(t *testing.T) {
 	t.Helper()
 	if _, err := r.srv.Broker.Login(context.Background(), r.srv.Hostname); err != nil {
@@ -158,6 +184,7 @@ func (r *rig) call(t *testing.T, req Request) Response {
 // that refuses every later register and enroll-session-key, so none can lose its grants to the
 // restart drain licensed.
 func TestDrainRefusesARegisterThatArrivesAfterIt(t *testing.T) {
+	t.Parallel()
 	r := startRig(t, "")
 	if d := r.call(t, Request{Op: "drain"}); !d.OK || len(d.Sessions) != 0 {
 		t.Fatalf("drain: %+v", d)
@@ -176,6 +203,7 @@ func TestDrainRefusesARegisterThatArrivesAfterIt(t *testing.T) {
 // TestUndrainTakesSessionsAgain: undrain, install's undo of a drain whose restart failed, leaves
 // a helper that registers sessions again.
 func TestUndrainTakesSessionsAgain(t *testing.T) {
+	t.Parallel()
 	r := startRig(t, "")
 	if d := r.call(t, Request{Op: "drain"}); !d.OK || !r.srv.Registry.Draining() {
 		t.Fatalf("drain: %+v", d)
@@ -194,6 +222,7 @@ func TestUndrainTakesSessionsAgain(t *testing.T) {
 // TestDrainWithSessionsSetsNothing: a drain that finds sessions answers them and leaves the
 // helper taking registrations.
 func TestDrainWithSessionsSetsNothing(t *testing.T) {
+	t.Parallel()
 	r := startRig(t, "")
 	if resp := r.call(t, Request{Op: "register"}); !resp.OK && resp.Code != CodeNoCredential {
 		t.Fatalf("register: %+v", resp)
@@ -211,6 +240,7 @@ func TestDrainWithSessionsSetsNothing(t *testing.T) {
 }
 
 func TestRegisterPinsCallerEnrollsAndSigns(t *testing.T) {
+	t.Parallel()
 	r := startRig(t, "")
 	resp := r.call(t, Request{Op: "register", WaitSeconds: 5})
 	if !resp.OK || resp.State != "enrolled" || resp.EnrollmentID == "" || resp.Operator != "ada@example.com" {
@@ -244,6 +274,7 @@ func TestRegisterPinsCallerEnrollsAndSigns(t *testing.T) {
 }
 
 func TestSignOnlyForDescendantsOfARoot(t *testing.T) {
+	t.Parallel()
 	r := startRig(t, "")
 	child := sleeper(t)
 	r.callerPID.Store(int64(child.Process.Pid))
@@ -279,6 +310,7 @@ func TestSignOnlyForDescendantsOfARoot(t *testing.T) {
 // TestVerifyRequestObjectAcceptsItsOwnSignAndRefusesTheProofTyp proves the converse: a proof
 // refused as a request object).
 func TestSignRequestBuildsAValidRequestObject(t *testing.T) {
+	t.Parallel()
 	r := startRig(t, "")
 	reg := r.call(t, Request{Op: "register", WaitSeconds: 5})
 	if !reg.OK || reg.State != "enrolled" {
@@ -310,6 +342,7 @@ func TestSignRequestBuildsAValidRequestObject(t *testing.T) {
 // outside the session's process tree and a peer with no registered session at all must both be
 // refused, never handed a signed request object.
 func TestSignRequestOnlyForDescendantsOfARoot(t *testing.T) {
+	t.Parallel()
 	r := startRig(t, "")
 	child := sleeper(t)
 	r.callerPID.Store(int64(child.Process.Pid))
@@ -332,6 +365,7 @@ func TestSignRequestOnlyForDescendantsOfARoot(t *testing.T) {
 }
 
 func TestRegisterFromDescendantReturnsTheAncestorSession(t *testing.T) {
+	t.Parallel()
 	r := startRig(t, "")
 	root := r.call(t, Request{Op: "register", WaitSeconds: 5}) // this test process
 	child := sleeper(t)
@@ -347,6 +381,7 @@ func TestRegisterFromDescendantReturnsTheAncestorSession(t *testing.T) {
 }
 
 func TestExitRevokesAndUnregisterRevokes(t *testing.T) {
+	t.Parallel()
 	r := startRig(t, "")
 	child := sleeper(t)
 	r.callerPID.Store(int64(child.Process.Pid))
@@ -386,6 +421,7 @@ func TestExitRevokesAndUnregisterRevokes(t *testing.T) {
 }
 
 func TestEnrollRetriesUntilTheBrokerAnswers(t *testing.T) {
+	t.Parallel()
 	r := startRig(t, "")
 	r.fake.mu.Lock()
 	r.fake.failFirst = 2
@@ -408,6 +444,7 @@ func TestEnrollRetriesUntilTheBrokerAnswers(t *testing.T) {
 }
 
 func TestRenewRunsAndARefusedRenewReenrolls(t *testing.T) {
+	t.Parallel()
 	r := startRig(t, "")
 	// A 150 ms lease: the helper renews at a third of it (floored by MinRenew = 50 ms). Poll
 	// for the first renew instead of guessing how long that takes under load — enrollment
@@ -448,6 +485,7 @@ func TestRenewRunsAndARefusedRenewReenrolls(t *testing.T) {
 }
 
 func TestRecoverRepinsLiveSessionsWithFreshKeys(t *testing.T) {
+	t.Parallel()
 	state := filepath.Join(t.TempDir(), "sessions.json")
 	r := startRig(t, state)
 	child := sleeper(t)
@@ -498,11 +536,9 @@ func TestRecoverRepinsLiveSessionsWithFreshKeys(t *testing.T) {
 	// A second helper on the same state and the same fake broker.
 	of := operatorFile(t, "ada@example.com")
 	srv2 := &Server{Registry: NewRegistry(state), Broker: &Broker{URL: r.fake.srv.URL, OperatorFile: of, MachineFile: machineFilePath(t), HTTP: r.fake.srv.Client()},
-		Hostname: "testhost", PeerOf: PeerOf, Log: slog.Default(), MinRenew: time.Second}
-	if _, err := srv2.Broker.Login(context.Background(), "testhost"); err != nil {
-		t.Fatalf("srv2 login: %v", err)
-	}
-	waitFor(t, func() bool { return srv2.Broker.LoginStatus().State == "issued" })
+		Hostname: "testhost", PeerOf: PeerOf, Log: slog.Default(), MinRenew: time.Second,
+		EnrollRetryMin: testEnrollRetryMin, EnrollRetryMax: testEnrollRetryMax, RevokeRetry: testRevokeRetry}
+	installLogin(t, r.fake, srv2.Broker)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	srv2.Recover(ctx)
@@ -577,6 +613,7 @@ func TestRecoverRepinsLiveSessionsWithFreshKeys(t *testing.T) {
 // before its first Broker.EnrollIdentity call, so no enroll is ever attempted during that window
 // and conflicts stays zero however long the delay runs.
 func TestRecoverRevokesThePriorEnrollmentBeforeReenrolling(t *testing.T) {
+	t.Parallel()
 	state := filepath.Join(t.TempDir(), "sessions.json")
 	r := startRig(t, state)
 	child := sleeper(t)
@@ -619,11 +656,9 @@ func TestRecoverRevokesThePriorEnrollmentBeforeReenrolling(t *testing.T) {
 	r.fake.mu.Unlock()
 	of := operatorFile(t, "ada@example.com")
 	srv2 := &Server{Registry: NewRegistry(state), Broker: &Broker{URL: r.fake.srv.URL, OperatorFile: of, MachineFile: machineFilePath(t), HTTP: r.fake.srv.Client()},
-		Hostname: "testhost", PeerOf: PeerOf, Log: slog.Default(), MinRenew: time.Second}
-	if _, err := srv2.Broker.Login(context.Background(), "testhost"); err != nil {
-		t.Fatalf("srv2 login: %v", err)
-	}
-	waitFor(t, func() bool { return srv2.Broker.LoginStatus().State == "issued" })
+		Hostname: "testhost", PeerOf: PeerOf, Log: slog.Default(), MinRenew: time.Second,
+		EnrollRetryMin: testEnrollRetryMin, EnrollRetryMax: testEnrollRetryMax, RevokeRetry: testRevokeRetry}
+	installLogin(t, r.fake, srv2.Broker)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	srv2.Recover(ctx)
@@ -679,8 +714,10 @@ func TestRecoverRevokesThePriorEnrollmentBeforeReenrolling(t *testing.T) {
 // 503 (an unreachable broker, not merely a slow one) until the session has ended and its own
 // retry loop has stopped, so revokeLapsed is genuinely retrying when the session ends, however
 // long the test takes to get there: no assertion here has to land inside a real backoff window.
-// Only then is the fault cleared, so only the handed-off revoke can land the prior id.
+// The end leaves one last failure behind it and clears the fault (endSessionThenReleaseRevokes),
+// so only the handed-off revoke can land the prior id.
 func TestRecoverFallsBackToIndependentRevokeIfTheRepinnedSessionEndsMidBackoff(t *testing.T) {
+	t.Parallel()
 	state := filepath.Join(t.TempDir(), "sessions.json")
 	r := startRig(t, state)
 	child := sleeper(t)
@@ -722,11 +759,9 @@ func TestRecoverFallsBackToIndependentRevokeIfTheRepinnedSessionEndsMidBackoff(t
 	r.fake.mu.Unlock()
 	of := operatorFile(t, "ada@example.com")
 	srv2 := &Server{Registry: NewRegistry(state), Broker: &Broker{URL: r.fake.srv.URL, OperatorFile: of, MachineFile: machineFilePath(t), HTTP: r.fake.srv.Client()},
-		Hostname: "testhost", PeerOf: PeerOf, Log: slog.Default(), MinRenew: time.Second}
-	if _, err := srv2.Broker.Login(context.Background(), "testhost"); err != nil {
-		t.Fatalf("srv2 login: %v", err)
-	}
-	waitFor(t, func() bool { return srv2.Broker.LoginStatus().State == "issued" })
+		Hostname: "testhost", PeerOf: PeerOf, Log: slog.Default(), MinRenew: time.Second,
+		EnrollRetryMin: testEnrollRetryMin, EnrollRetryMax: testEnrollRetryMax, RevokeRetry: testRevokeRetry}
+	installLogin(t, r.fake, srv2.Broker)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	srv2.Recover(ctx)
@@ -794,6 +829,7 @@ func TestRecoverFallsBackToIndependentRevokeIfTheRepinnedSessionEndsMidBackoff(t
 }
 
 func TestRecoverDropsDeadRecords(t *testing.T) {
+	t.Parallel()
 	state := filepath.Join(t.TempDir(), "sessions.json")
 	dead := exec.Command("true")
 	_ = dead.Run()
@@ -837,6 +873,7 @@ func TestRecoverDropsDeadRecords(t *testing.T) {
 // however slow the host is. The first enrollment's short lease is the fake's nextLease, so the
 // fresh enrollment gets the fake's 900 s default and cannot lapse again under the assertions.
 func TestRenewRefusedRevokesTheLapsedEnrollmentBeforeReenrolling(t *testing.T) {
+	t.Parallel()
 	r := startRig(t, "")
 	gate, open := testGate(t)
 	r.fake.mu.Lock()
@@ -890,6 +927,7 @@ func TestRenewRefusedRevokesTheLapsedEnrollmentBeforeReenrolling(t *testing.T) {
 // to a DIFFERENT live process than the pid argument reproduces exactly that mismatch without
 // needing to win a real kernel race.
 func TestRegisterRejectsAPeerWhosePIDChangedDuringTheAncestryWalk(t *testing.T) {
+	t.Parallel()
 	r := startRig(t, "")
 	root := r.call(t, Request{Op: "register", WaitSeconds: 5})
 	if !root.OK {
@@ -910,6 +948,7 @@ func TestRegisterRejectsAPeerWhosePIDChangedDuringTheAncestryWalk(t *testing.T) 
 // session" path: a pid the ancestry walk finds unclaimed must not be adopted for a peer that no
 // longer names it, and the registry must not keep a half-adopted entry for the pid either.
 func TestRegisterRejectsAPeerWhosePIDChangedBeforeAdopting(t *testing.T) {
+	t.Parallel()
 	r := startRig(t, "")
 	victim := sleeper(t)
 	impostor := sleeper(t)
@@ -932,6 +971,7 @@ func TestRegisterRejectsAPeerWhosePIDChangedBeforeAdopting(t *testing.T) {
 // session, exactly like register's "existing session" path — otherwise a pid the kernel reuses
 // mid-walk could get a signed proof for another session's enrollment (full impersonation).
 func TestSignRejectsAPeerWhosePIDChangedDuringTheAncestryWalk(t *testing.T) {
+	t.Parallel()
 	r := startRig(t, "")
 	root := r.call(t, Request{Op: "register", WaitSeconds: 5})
 	if !root.OK || root.State != "enrolled" {
@@ -952,6 +992,7 @@ func TestSignRejectsAPeerWhosePIDChangedDuringTheAncestryWalk(t *testing.T) {
 // unregister(): a peer that no longer names the resolved pid must not be trusted to force-revoke
 // that session's enrollment (denial of service).
 func TestUnregisterRejectsAPeerWhosePIDChangedDuringTheAncestryWalk(t *testing.T) {
+	t.Parallel()
 	r := startRig(t, "")
 	root := r.call(t, Request{Op: "register", WaitSeconds: 5})
 	if !root.OK {
@@ -996,6 +1037,7 @@ func (d *delayingTransport) RoundTrip(req *http.Request) (*http.Response, error)
 // Broker.Revoke's 204/404-both-succeed contract). newRig, not startRig: this test needs the
 // rig's OWN pre-login window, which startRig's automatic login would already have closed.
 func TestLoginOverTheSocketReturnsTheCodeAndEnrollSessionKeyWorksAfterIssue(t *testing.T) {
+	t.Parallel()
 	r := newRig(t, "")
 	r.srv.Broker.HTTP = &http.Client{Transport: &delayingTransport{
 		RoundTripper: r.fake.srv.Client().Transport,
@@ -1040,6 +1082,7 @@ func TestLoginOverTheSocketReturnsTheCodeAndEnrollSessionKeyWorksAfterIssue(t *t
 // widen sign's own check. newRig, not startRig: register (WaitSeconds omitted) only needs the child
 // to be a registered session for the descendancy check below, never for it to finish enrolling.
 func TestSignStillRequiresDescendancyButEnrollSessionKeyDoesNot(t *testing.T) {
+	t.Parallel()
 	r := newRig(t, "")
 	child := sleeper(t)
 	r.callerPID.Store(int64(child.Process.Pid))

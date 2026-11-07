@@ -38,6 +38,7 @@ func mentionOf(sessionID string) []model.Mention {
 // Notify decided by the broker's own rule when it was written, its payload decoded from JSON - and
 // reads every topic it reached, in order.
 func TestClaimantRouteReachesTheSessionHoldingTheIssue(t *testing.T) {
+	t.Parallel()
 	alice := model.Actor{Kind: "user", ID: "alice"}
 	claimant := model.Actor{Kind: "session", ID: "session-claimant"}
 	asker := model.Actor{Kind: "session", ID: "session-asker"}
@@ -426,6 +427,7 @@ func TestClaimantRouteReachesTheSessionHoldingTheIssue(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			database := storetest.Open(t)
 			seedIssue(t, database, "T-1", tc.route)
 			if tc.claim != nil {
@@ -470,6 +472,7 @@ func TestClaimantRouteReachesTheSessionHoldingTheIssue(t *testing.T) {
 // event's recorded destinations, so an attempt that fails at a later destination is retried
 // without publishing to the claimant a second time.
 func TestRunRecordsTheClaimantRouteSoARetryDoesNotRepublishIt(t *testing.T) {
+	t.Parallel()
 	const (
 		issueTopic    = "notifications.dispatch.issue.T-1.ask.answered"
 		claimantTopic = "notifications.agent.session-claimant"

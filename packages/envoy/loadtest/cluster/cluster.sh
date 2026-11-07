@@ -269,6 +269,15 @@ RUNNER_STOP_GRACE_SECONDS=120
 # started with (its warm-up, window, grace and drain): a job that is slow to come back is still
 # the step's to measure, and past it the wait stops the job at its deadline.
 RUNNER_RUN_SLACK_SECONDS=900
+# How often runner_wait reads the runner job's exit status, and how often it tries the stop it
+# owes past its deadline. It is longer than one stop's grace, so a stop that kubectl cannot
+# deliver is tried once more and then given up on, rather than at every poll of the grace.
+RUNNER_POLL_SECONDS=15
+# A step's warm-up before its window and the drain after it, which run_step passes loadgen and
+# the wait on that run adds to the window for the bound it starts the run with. cluster.test.sh
+# gives a step short ones where what it drives is the wait past that bound.
+STEP_WARMUP=30s
+STEP_GRACE=20s
 RUN_LABEL=dispatch-loadtest/run
 ROLE_LABEL=dispatch-loadtest/role
 LEGION_REPO=cybermonklabs/legion
@@ -1441,12 +1450,20 @@ pg_disk_watch() {
 # longer than the longest act -- and then kills it, and the children of its act with it, so no
 # path out of a step hangs on a watcher that is stuck. The line it writes names the step, since
 # a watcher killed there left whatever it was doing in the copy half done.
+#
+# The first second of that wait is looked at in twentieths rather than in whole seconds: a
+# watcher between naps is gone within milliseconds of its TERM, and a whole-second nap gave each
+# step's teardown a second it spent on a watcher that had already left -- 56 of them in one run
+# of cluster.test.sh, which is a third of that step's time in CI (dispatch://INFRA-1075). After
+# that second the nap is a whole one again, so a watcher inside a long act -- what
+# PG_DISK_STOP_SECONDS is there for -- is still waited out without spinning.
 pg_disk_watch_stop() {
-  local pid=$PG_DISK_WATCHER name=$PG_DISK_WATCH_STEP deadline kids=()
+  local pid=$PG_DISK_WATCHER name=$PG_DISK_WATCH_STEP deadline fine kids=()
   [ -n "$pid" ] || return 0
   PG_DISK_WATCHER="" PG_DISK_WATCH_STEP=""
   kill -- "$pid" 2>/dev/null || true
   deadline=$((EPOCHSECONDS + PG_DISK_STOP_SECONDS))
+  fine=$((EPOCHSECONDS + 1))
   while kill -0 -- "$pid" 2>/dev/null; do
     if ((EPOCHSECONDS >= deadline)); then
       read -ra kids <"/proc/$pid/task/$pid/children" 2>/dev/null || true
@@ -1454,7 +1471,7 @@ pg_disk_watch_stop() {
       note "step $name: the disk watcher did not end within $PG_DISK_STOP_SECONDS s of its SIGTERM, so it was killed"
       break
     fi
-    sleep 1
+    if ((EPOCHSECONDS < fine)); then sleep 0.05; else sleep 1; fi
   done
   wait "$pid" 2>/dev/null || true
 }
@@ -1775,7 +1792,7 @@ runner_wait() {
       note "job $name: no exit status was read from the runner pod within $RUNNER_STOP_GRACE_SECONDS s of the SIGKILL; the wait ends and gives no exit status"
       return 1
     fi
-    sleep 15
+    sleep "$RUNNER_POLL_SECONDS"
   done
   kube_read exec runner -c runner -- cat "/work/logs/$name.log" >"$log_dir/$name.log" 2>/dev/null || true
   printf '%s\n' "$rc"
@@ -2605,7 +2622,7 @@ run_step() {
   [ ! -e "$dir" ] || die "$dir exists: name another step, or remove it"
   [ -f "$RUN_DIR/seed.json" ] || die "no $RUN_DIR/seed.json: cluster.sh seed first"
   ensure_daemons
-  local events requests sessions rng_seed=1 warmup=30s
+  local events requests sessions rng_seed=1 warmup=$STEP_WARMUP grace=$STEP_GRACE
   events=$(awk -v f="$factor" 'BEGIN { printf "%g", 4 * f }')
   requests=$(awk -v f="$factor" 'BEGIN { printf "%g", 60 * f }')
   sessions=$(loadgen_local series-sessions "$factor") || die "loadgen series-sessions $factor failed"
@@ -2633,11 +2650,12 @@ run_step() {
   # the copy's capacity, not one build's CPU against another's, so the heap profile Dispatch
   # writes every 15 s is worth its cost here; a replay, which is compared on Dispatch's CPU, runs
   # without it (run_replay).
-  run_in_runner "$name" "$dir" "step-$name" $((30 + $(duration_seconds "$duration") + 20 + RUNNER_RUN_SLACK_SECONDS)) \
+  run_in_runner "$name" "$dir" "step-$name" \
+    $(($(duration_seconds "$warmup") + $(duration_seconds "$duration") + $(duration_seconds "$grace") + RUNNER_RUN_SLACK_SECONDS)) \
     /work/loadgen run -allow-foreign -name "$name" -out "/work/steps/$name" \
     -seed /work/seed.json -copy-meta "/work/meta/$name.json" -build-commit "$(state .dispatch_commit)" \
     -events "$events" -sessions "$sessions" -requests "$requests" -duration "$duration" \
-    -warmup "$warmup" -grace 20s -rng-seed "$rng_seed" -heap-samples "${ENDPOINTS[@]}"
+    -warmup "$warmup" -grace "$grace" -rng-seed "$rng_seed" -heap-samples "${ENDPOINTS[@]}"
   note "step $name done: $dir"
 }
 

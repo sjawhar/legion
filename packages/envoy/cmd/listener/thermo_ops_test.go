@@ -1,5 +1,8 @@
 package main
 
+// Every test here sets a listener setting with t.Setenv, which panics the process beside
+// t.Parallel, so none of them is parallel (dispatch://INFRA-1075).
+
 import (
 	"context"
 	"errors"

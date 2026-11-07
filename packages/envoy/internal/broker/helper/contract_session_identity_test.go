@@ -264,6 +264,7 @@ func TestContractASessionThatDoesNotComeBackLosesItsGrant(t *testing.T) {
 // enrollment still there afterwards; it also shows a helper upgraded in place carrying the
 // records it finds at the old path over to the new one.
 func TestContractTheProductionRecordsPathSurvivesTheRuntimeDirectoryGoing(t *testing.T) {
+	t.Parallel()
 	home := t.TempDir()
 	runtime := t.TempDir()
 	getenv := func(key string) string {

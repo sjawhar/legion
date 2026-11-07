@@ -8,6 +8,7 @@ import (
 )
 
 func TestIssueAskEventsExposeOpenedEventID(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Ask event identity", "A spec")
 	created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
@@ -78,6 +79,7 @@ func TestIssueAskEventsExposeOpenedEventID(t *testing.T) {
 }
 
 func TestIssueAskEventsHydrateAnchorDocument(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Ask event document", "A quoted passage.")
 	created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
@@ -133,6 +135,7 @@ func TestIssueAskEventsHydrateAnchorDocument(t *testing.T) {
 }
 
 func TestIssueAskEventsKeepDeletedAnchorDocumentReadable(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Deleted anchor document", "A spec")
 	uploaded := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{

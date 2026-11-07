@@ -79,6 +79,7 @@ type commentAuthor struct {
 // Kubernetes subject rides along on every actor it persists — the comment read back
 // and the issue event both carry it, and no owner is invented for it.
 func TestServiceTokenActorCarriesVerifiedSubject(t *testing.T) {
+	t.Parallel()
 	issuer := newServiceTokenIssuer(t)
 	handler, _, _ := newTestServer(t, testServerOptions{oidc: issuer.verifier(t)})
 	key := seedServiceTokenIssue(t, handler)
@@ -134,6 +135,7 @@ func TestServiceTokenActorCarriesVerifiedSubject(t *testing.T) {
 // GET /whoami is the surface an agent reads to learn its own identity: a verified
 // service token is an agent with no owner and the subject it authenticated as.
 func TestServiceTokenWhoamiNamesTheSubject(t *testing.T) {
+	t.Parallel()
 	issuer := newServiceTokenIssuer(t)
 	handler, _, _ := newTestServer(t, testServerOptions{oidc: issuer.verifier(t)})
 
@@ -158,6 +160,7 @@ func TestServiceTokenWhoamiNamesTheSubject(t *testing.T) {
 // bearer: OIDC_TOKEN_INVALID is how an operator knows the JWT was verified and
 // rejected rather than looked up as a personal token, whose 401 carries UNAUTHORIZED.
 func TestServiceTokenForAnotherAudienceIsRejectedAsInvalidToken(t *testing.T) {
+	t.Parallel()
 	issuer := newServiceTokenIssuer(t)
 	handler, _, _ := newTestServer(t, testServerOptions{oidc: issuer.verifier(t)})
 
@@ -191,6 +194,7 @@ func (signInDownIdentity) Login(*http.Request) (string, error) {
 // whose confirmation the sign-in issuer could not renew is 503 SIGNIN_UNAVAILABLE, though that
 // error carries oidc.ErrIssuerUnavailable too.
 func TestAServiceTokenIssuerOutageAndASignInOutageEachAnswerTheirOwnCode(t *testing.T) {
+	t.Parallel()
 	handler, _, _ := newTestServer(t, testServerOptions{oidc: issuerDownVerifier{}, identity: signInDownIdentity{}})
 
 	service := agentRequest(t, handler, http.MethodGet, "/api/v1/whoami", nil, "header.payload.signature")
@@ -208,6 +212,7 @@ func TestAServiceTokenIssuerOutageAndASignInOutageEachAnswerTheirOwnCode(t *test
 // verified token that decides it. A shared-token caller naming a privileged subject
 // gets an actor with none.
 func TestSuppliedServiceIsIgnored(t *testing.T) {
+	t.Parallel()
 	issuer := newServiceTokenIssuer(t)
 	handler, _, _ := newTestServer(t, testServerOptions{oidc: issuer.verifier(t)})
 	key := seedServiceTokenIssue(t, handler)
@@ -245,6 +250,8 @@ func TestSuppliedServiceIsIgnored(t *testing.T) {
 // operator acts on; writing the caller's own strings into the operator's log on
 // every request is a log-injection surface bounded only by the header limit.
 func TestRejectionLogOmitsTheTokensUnverifiedClaims(t *testing.T) {
+	// No t.Parallel: this test reads what the process's own default logger was handed, which
+	// every other test running beside it would write into too.
 	issuer := newServiceTokenIssuer(t)
 	handler, _, _ := newTestServer(t, testServerOptions{oidc: issuer.verifier(t)})
 
@@ -272,6 +279,7 @@ func TestRejectionLogOmitsTheTokensUnverifiedClaims(t *testing.T) {
 // With no issuer configured the JWT branch does not exist: a JWT-shaped bearer is
 // an unknown personal token.
 func TestJWTBearerWithoutConfiguredIssuerTakesThePersonalTokenPath(t *testing.T) {
+	t.Parallel()
 	issuer := newServiceTokenIssuer(t)
 	handler, _, _ := newTestServer(t, testServerOptions{})
 

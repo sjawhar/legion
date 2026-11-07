@@ -1,5 +1,10 @@
 package files_test
 
+// Every test here that opens a store does so over a fake bucket of its own, which it points this
+// process's AWS SDK at with t.Setenv (filestest.PointSDKAt): a process-wide swap, which the
+// testing package refuses a test that has called t.Parallel, so none of those is parallel. The
+// verifying reader's test, which opens no store, is (dispatch://INFRA-1075).
+
 import (
 	"bytes"
 	"context"
@@ -106,6 +111,7 @@ func TestS3ReadsAccessDeniedAsAFailureNotAnAbsence(t *testing.T) {
 // A body that answers (0, nil) without ending would keep the reader's loop, and the response
 // copying from it, spinning; after bufio's hundred empty reads it fails with io.ErrNoProgress.
 func TestVerifyingReaderFailsABodyThatMakesNoProgress(t *testing.T) {
+	t.Parallel()
 	reader := files.NewVerifyingReader(io.NopCloser(stuck{}), files.SHA256([]byte("never")), 5)
 	n, err := reader.Read(make([]byte, 8))
 	if n != 0 || !errors.Is(err, io.ErrNoProgress) {

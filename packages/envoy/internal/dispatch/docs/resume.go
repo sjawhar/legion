@@ -3,7 +3,6 @@ package docs
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/duty"
@@ -37,7 +36,7 @@ const settlementResumptionLease = "settlement-resumption"
 func (s *Service) RunSettlementResumption(ctx context.Context, leases duty.Leases) {
 	duty.RunLeased(ctx, leases, settlementResumptionLease, SettlementResumeInterval, duty.TickAtStart, func(ctx context.Context) {
 		if err := s.resumeOwedSettlements(ctx, settlementResumeAge); err != nil && ctx.Err() == nil {
-			slog.Error("dispatch: resume owed document settlements", "error", err)
+			s.log().Error("dispatch: resume owed document settlements", "error", err)
 		}
 	})
 }
@@ -77,7 +76,7 @@ func (s *Service) resumeOwedSettlements(ctx context.Context, age time.Duration) 
 	}
 	if len(rooms) > 0 {
 		s.hooks.countSettlementResumption(rooms, time.Now())
-		slog.Info("dispatch: resumed owed document settlements", "documents", len(rooms))
+		s.log().Info("dispatch: resumed owed document settlements", "documents", len(rooms))
 	}
 	return nil
 }

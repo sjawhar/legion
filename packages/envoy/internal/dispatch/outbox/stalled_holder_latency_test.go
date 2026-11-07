@@ -20,6 +20,11 @@ import (
 // live run at fd93819c measured that: with two issues routed to a holder
 // that never answers, 24 of 30 comments on a third issue reached their answering holder more
 // than 1 s late (median 2.8 s, max 5.0 s), against 3 of 30 on main's build.
+//
+// Serial: it measures the process. What it bounds is how long another issue's event took to reach
+// its holder, so a parallel test's load would count against that bound (docs/testing.md). Its
+// receipt timeout stays production's five seconds, since the bound below has to sit well under
+// the wait a send to the silent holder makes.
 func TestAHolderThatNeverAnswersDoesNotDelayAnotherIssuesEvents(t *testing.T) {
 	const (
 		silentRole, silentHolder = "silent-reviewer", "ses_never_answers"
@@ -42,7 +47,7 @@ func TestAHolderThatNeverAnswersDoesNotDelayAnotherIssuesEvents(t *testing.T) {
 	rig.routedEvent(t, "T-1", silentRole, model.Actor{Kind: "user", ID: "alice"})
 	select {
 	case <-silent.arrived:
-	case <-time.After(10 * time.Second):
+	case <-time.After(eventWait):
 		t.Fatal("the silent holder never received its forward")
 	}
 
@@ -56,7 +61,7 @@ func TestAHolderThatNeverAnswersDoesNotDelayAnotherIssuesEvents(t *testing.T) {
 			t.Fatalf("the answering holder received T-2's forward %s after its commit, want within %s: "+
 				"the silent holder's receipt wait held back another issue's send", waited.Round(time.Millisecond), within)
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(eventWait):
 		t.Fatal("the answering holder never received T-2's forward")
 	}
 }

@@ -10,6 +10,7 @@ import (
 // lookup (blockIndex, plain_tree_test.go, which is documentBlock for one position), over every
 // document of the corpus and every position in it.
 func TestBlockIndexesAnswerTwoBlockIndexLookups(t *testing.T) {
+	t.Parallel()
 	for _, document := range corpusMarkdown(t) {
 		t.Run(document.name, func(t *testing.T) {
 			tree, err := Parse(document.markdown)

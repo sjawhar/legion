@@ -201,6 +201,7 @@ func TestRolesHeldByFollowsTheRoleClaims(t *testing.T) {
 // claim watcher has ended (here its bucket went away) and nothing has replaced it, or no watcher
 // follows the claims at all.
 func TestRolesHeldByRefusesWhenItsViewCannotAnswer(t *testing.T) {
+	t.Parallel()
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 	reg, err := Open(conn, WithReplicas(1))
@@ -295,6 +296,7 @@ func restartRoleViewTimingOutAfter(t *testing.T, conn *natsgo.Conn, reg *Registr
 // of a claim the scan did not deliver without its roles. The watcher scans the bucket again
 // (newRoleWatcher's kvwatch.WithRescan), and the view answers once that scan completes.
 func TestARoleViewWhoseFirstScanTimedOutAnswersOnlyOnceItsRescanCompletes(t *testing.T) {
+	t.Parallel()
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 	reg, err := Open(conn, WithReplicas(1))
@@ -338,6 +340,7 @@ func TestARoleViewWhoseFirstScanTimedOutAnswersOnlyOnceItsRescanCompletes(t *tes
 // WaitForCacheReady returns only once that view is complete, and RolesHeldBy answers the moment it
 // returns, with no retry and no poll.
 func TestWaitForCacheReadyHoldsUntilTheRoleClaimViewAnswers(t *testing.T) {
+	t.Parallel()
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 	reg, err := Open(conn, WithReplicas(1))
@@ -386,6 +389,7 @@ func TestWaitForCacheReadyHoldsUntilTheRoleClaimViewAnswers(t *testing.T) {
 // writes at a lower revision than the old bucket's claim of the same role (architect's) gives its
 // holder the role.
 func TestARecreatedRoleBucketsViewAnswersOnlyOnceItsRefillCompletes(t *testing.T) {
+	t.Parallel()
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 	reg, err := Open(conn, WithReplicas(1))
@@ -533,6 +537,7 @@ func TestAClaimWhoseRequestEndsDuringItsCleanupSucceedsAndLogsNoFailure(t *testi
 // it. The control is the same write through the view's own handle: it applies, and fences out an
 // older delivery.
 func TestAClaimWriteAnsweredAcrossARecreatedRoleBucketLeavesTheNewBucketsView(t *testing.T) {
+	t.Parallel()
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 	reg, err := Open(conn, WithReplicas(1))

@@ -20,6 +20,7 @@ import (
 // no second. A window whose deadline has passed writes nothing at all: its forward answers
 // ErrWindowDeadline before anything is sent, and the stream holds nothing of it.
 func TestAForwardRequestTheFullClusterStreamRefusedIsStoredOnceTheStreamHasRoom(t *testing.T) {
+	t.Parallel()
 	const limit = 16 << 10
 	cluster := testnats.StartCluster(t, 3)
 	client := startOnCluster(t, cluster, WithReplicas(3), WithStreamMaxBytes(limit))

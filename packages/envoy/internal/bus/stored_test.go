@@ -15,6 +15,7 @@ import (
 // matches, wildcards included, with the concrete subject, body and stored time; past the last one
 // it is nats.ErrMsgNotFound, and with no stream nats.ErrStreamNotFound.
 func TestNextStoredMessageReadsByFilterAfterASequence(t *testing.T) {
+	t.Parallel()
 	client, err := ConnectOwningStream([]string{testnats.URL(t)})
 	if err != nil {
 		t.Fatalf("connect: %v", err)
@@ -59,6 +60,7 @@ func TestNextStoredMessageReadsByFilterAfterASequence(t *testing.T) {
 }
 
 func TestSubjectContainsFollowsNATSWildcards(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		pattern, subject string
 		want             bool
@@ -87,6 +89,7 @@ func TestSubjectContainsFollowsNATSWildcards(t *testing.T) {
 }
 
 func TestCheckFilterSubjectRefusesWhatNATSCannotFilterOn(t *testing.T) {
+	t.Parallel()
 	for subject, refused := range map[string]bool{
 		"notifications.dispatch.issue.KEY-1.>": false,
 		"notifications.*.ses_a":                false,
@@ -112,6 +115,7 @@ func TestCheckFilterSubjectRefusesWhatNATSCannotFilterOn(t *testing.T) {
 // included) or a wildcard over them, the Legion controller lane, and wildcards reaching any of
 // those. Its own agent subject is its own only when it is one literal subject.
 func TestReachesPrivateStreamSubjectBoundsInterests(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		sessionID, topic string
 		want             bool

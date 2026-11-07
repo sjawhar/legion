@@ -1571,16 +1571,18 @@ func TestAReadInsideAnAppendsCursorWindowHoldsTheRoomsKeystroke(t *testing.T) {
 // observer, which takes the record (consumeUpdateClass). An observer registered in
 // OnLoadDocument after the service's own runs there: ygo fires a transaction's update observers in
 // the order they were registered, and the room registers its persistence observer after
-// OnLoadDocument returns. Only rooms loaded after recordClasses installs it are read.
+// OnLoadDocument returns. Only rooms loaded after the recorder is installed are read. Each record
+// names the room it came from, so a service holding more than one recorded room reads each room's
+// records apart from the others' (count, since).
 type recordedClasses struct {
 	mu      sync.Mutex
 	classes []recordedClass
 }
 
-// recordedClass is what the room recorded for one update, kept as the six facts its readers
-// decide on: origin, a label for the origin the room applied the update with -
-// publishedWriteClass for a *liveWriteOrigin, the string itself for a string origin, and the
-// origin's type otherwise; marginOnly, that *liveWriteOrigin's own tag (false for every other
+// recordedClass is what the room recorded for one update, kept as the facts its readers decide
+// on: room, the room that applied it; origin, a label for the origin the room applied the update
+// with - publishedWriteClass for a *liveWriteOrigin, the string itself for a string origin, and
+// the origin's type otherwise; marginOnly, that *liveWriteOrigin's own tag (false for every other
 // origin); found, false when the room recorded no class for the update; and contentChanged,
 // durable and credited (class.credit != nil) from the class it recorded.
 //
@@ -1590,6 +1592,7 @@ type recordedClasses struct {
 // bytes. The slice grows for the whole life of each side's flows, so every pointer in it is
 // memory the test binary never gives back (dispatch://INFRA-1085).
 type recordedClass struct {
+	room           string
 	origin         string
 	marginOnly     bool
 	found          bool
@@ -1606,11 +1609,10 @@ type recordedClass struct {
 // for byte unchanged.
 const publishedWriteClass = "a published write"
 
-// recordClasses installs the recorder on service and reloads artifactID's room, which a seed may
-// have loaded before the recorder was there, so the room it returns is read.
-func recordClasses(t *testing.T, service *Service, artifactID string) (*recordedClasses, *crdt.Doc) {
-	t.Helper()
-	ctx := context.Background()
+// installClassRecorder installs the recorder on service, for every room it loads from now on. A
+// caller that installs it before the service has loaded anything - before any test goroutine of
+// its own runs - needs no reload; recordClasses is for one that does.
+func installClassRecorder(service *Service) *recordedClasses {
 	recorded := &recordedClasses{}
 	load := service.srv.OnLoadDocument
 	service.srv.OnLoadDocument = func(ctx context.Context, room string, doc *crdt.Doc) error {
@@ -1618,7 +1620,7 @@ func recordClasses(t *testing.T, service *Service, artifactID string) (*recorded
 			return err
 		}
 		doc.OnUpdate(func(update []byte, origin any) {
-			var read recordedClass
+			read := recordedClass{room: room}
 			switch published := origin.(type) {
 			case *liveWriteOrigin:
 				read.origin, read.marginOnly = publishedWriteClass, published.marginOnly
@@ -1645,6 +1647,15 @@ func recordClasses(t *testing.T, service *Service, artifactID string) (*recorded
 		})
 		return nil
 	}
+	return recorded
+}
+
+// recordClasses installs the recorder on service and reloads artifactID's room, which a seed may
+// have loaded before the recorder was there, so the room it returns is read.
+func recordClasses(t *testing.T, service *Service, artifactID string) (*recordedClasses, *crdt.Doc) {
+	t.Helper()
+	ctx := context.Background()
+	recorded := installClassRecorder(service)
 	if err := service.Evict(ctx, artifactID); err != nil {
 		t.Fatalf("evict the room loaded before the recorder: %v", err)
 	}
@@ -1652,6 +1663,38 @@ func recordClasses(t *testing.T, service *Service, artifactID string) (*recorded
 		t.Fatalf("load the recorded room: %v", err)
 	}
 	return recorded, service.srv.GetDoc(artifactID)
+}
+
+// count is how many updates the rooms of artifactID have recorded so far: the cursor a caller
+// reads its own records from (since).
+func (r *recordedClasses) count(artifactID string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	counted := 0
+	for _, class := range r.classes {
+		if class.room == artifactID {
+			counted++
+		}
+	}
+	return counted
+}
+
+// since is every class the rooms of artifactID recorded past the first from of them, oldest first.
+func (r *recordedClasses) since(artifactID string, from int) []recordedClass {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var taken []recordedClass
+	for _, class := range r.classes {
+		if class.room != artifactID {
+			continue
+		}
+		if from > 0 {
+			from--
+			continue
+		}
+		taken = append(taken, class)
+	}
+	return taken
 }
 
 // latest is the record the room left for the latest update it applied that matches accepts,

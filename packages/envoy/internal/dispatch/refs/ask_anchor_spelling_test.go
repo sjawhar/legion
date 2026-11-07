@@ -13,6 +13,7 @@ import (
 // the spec's uuid, so the ask node keeps the spec as its parent, as it did before the guard: only
 // an artifact_id that cannot cast falls through to the ask's block document.
 func TestAskNodeKeepsTheDocumentAnUpperCaseOrBracedAnchorNames(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	ctx := context.Background()
 	tx, err := database.Pool.Begin(ctx)

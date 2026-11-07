@@ -95,7 +95,7 @@ func heldRosterListener(t *testing.T) (url string, calls *atomic.Int32, release 
 // awaitCalls waits until the listener has seen want calls, failing after a few seconds.
 func awaitCalls(t *testing.T, calls *atomic.Int32, want int32) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(concurrentWait)
 	for calls.Load() < want {
 		if time.Now().After(deadline) {
 			t.Fatalf("the listener saw %d calls, want %d", calls.Load(), want)
@@ -109,6 +109,7 @@ func awaitCalls(t *testing.T, calls *atomic.Int32, want int32) {
 // by routeRosterTimeout, no test's override. It reads the server register mounts, the only one a
 // deployment runs.
 func TestTheDeploymentsRosterCacheKeepsAnAnswerAndASilenceFiveSeconds(t *testing.T) {
+	t.Parallel()
 	rosters := &register(http.NewServeMux(), t.Context(), Deps{}).rosters
 	if rosters.ttl != 5*time.Second || rosters.silenceTTL != 5*time.Second {
 		t.Fatalf("the server a deployment runs keeps an answer %s and a silence %s, want 5s and 5s", rosters.ttl, rosters.silenceTTL)
@@ -122,6 +123,7 @@ func TestTheDeploymentsRosterCacheKeepsAnAnswerAndASilenceFiveSeconds(t *testing
 // even though the listener's own answer has changed since: a route_status as old as the TTL is
 // the contract.
 func TestTwoIssueReadsWithinTheTTLMakeOneListenerCall(t *testing.T) {
+	t.Parallel()
 	roster := &fakeRoster{}
 	roster.set("ses-sre", "sre")
 	handler, _, served := cachedRouteStatusServer(t, roster)
@@ -146,6 +148,7 @@ func TestTwoIssueReadsWithinTheTTLMakeOneListenerCall(t *testing.T) {
 // A read after the TTL asks the listener again and reads its new answer. The silence TTL is
 // left at a second, so a cache that kept an answered roster for the silence TTL would fail too.
 func TestAnIssueReadAfterTheTTLAsksTheListenerAgain(t *testing.T) {
+	t.Parallel()
 	roster := &fakeRoster{}
 	roster.set("ses-sre", "sre")
 	handler, _, served := cachedRouteStatusServer(t, roster)
@@ -170,6 +173,7 @@ func TestAnIssueReadAfterTheTTLAsksTheListenerAgain(t *testing.T) {
 // as an unreachable listener always has: unknown on the detail, 503 for a judged filter. The
 // answered-roster TTL is zero here, so a cache that held a failure for that TTL would ask again.
 func TestAFailingListenerIsAskedOnceWithinTheSilenceWindow(t *testing.T) {
+	t.Parallel()
 	roster := &fakeRoster{}
 	roster.down.Store(true)
 	handler, _, served := cachedRouteStatusServer(t, roster)
@@ -197,6 +201,7 @@ func TestAFailingListenerIsAskedOnceWithinTheSilenceWindow(t *testing.T) {
 // again and reads its answer. The answered TTL is a minute, so a cache that held a failure for
 // that TTL, or for ever, would still read unknown.
 func TestAListenerThatFailedIsAskedAgainOnceItsSilenceWindowPasses(t *testing.T) {
+	t.Parallel()
 	roster := &fakeRoster{}
 	roster.down.Store(true)
 	handler, _, served := cachedRouteStatusServer(t, roster)
@@ -222,6 +227,7 @@ func TestAListenerThatFailedIsAskedAgainOnceItsSilenceWindowPasses(t *testing.T)
 // window (a minute here), and the reads after it read unknown at once without asking again. The
 // bound is half a second, so even a loaded machine's request reaches the listener inside it.
 func TestAListenerThatDoesNotAnswerHoldsAReadOnlyForTheFetchBound(t *testing.T) {
+	t.Parallel()
 	served, calls, _ := heldRosterServer(t)
 	served.rosters.timeout, served.rosters.silenceTTL = 500*time.Millisecond, time.Minute
 
@@ -272,7 +278,13 @@ func timedRosterServer(t *testing.T, delay time.Duration, hang bool, lifetime co
 // age of the answers a read is served past the TTL. A 1 s fetch with a 1.5 s TTL expires 1.5 s
 // after it was sent: a read 2.2 s in asks again, where a TTL counted from the answer would serve
 // it until 2.5 s.
+//
+// Real time, at the TTL this row sets: the fetch it times is an HTTP call to an httptest listener
+// over TCP, which no synctest bubble can hold.
 func TestAnAnswersTTLCountsFromWhenItsCallWasSent(t *testing.T) {
+	// No t.Parallel: this test measures the process. It bounds how long the cached answer
+	// outlives the call that fetched it, against a TTL of 1.5 s, and another test's work on
+	// the same core would read as the cache holding it longer.
 	served, calls := timedRosterServer(t, time.Second, false, nil)
 	served.rosters.ttl, served.rosters.silenceTTL, served.rosters.timeout = 1500*time.Millisecond, time.Minute, time.Minute
 	started := time.Now()
@@ -290,7 +302,13 @@ func TestAnAnswersTTLCountsFromWhenItsCallWasSent(t *testing.T) {
 // alone for the whole window after its call times out. A call bound at 1 s with a 1.5 s window
 // leaves the listener alone until 2.5 s: a read 2 s in asks nothing, where a window counted from
 // the send would have ended at 1.5 s.
+//
+// Real time, at the window this row sets: the call that times out is an HTTP call to an httptest
+// listener over TCP, which no synctest bubble can hold.
 func TestAFailuresWindowCountsFromWhenTheFailureIsKnown(t *testing.T) {
+	// No t.Parallel: this test measures the process. It bounds when the failure window starts
+	// from, against a silence TTL of 1.5 s, and another test's work on the same core would
+	// read as the window running long.
 	served, calls := timedRosterServer(t, 0, true, nil)
 	served.rosters.ttl, served.rosters.silenceTTL, served.rosters.timeout = time.Minute, 1500*time.Millisecond, time.Second
 	started := time.Now()
@@ -313,6 +331,7 @@ func TestAFailuresWindowCountsFromWhenTheFailureIsKnown(t *testing.T) {
 // listener that hangs returns unknown once the lifetime ends, not when the fetch's bound (a minute
 // here) runs out.
 func TestAShutdownEndsAFetchInFlight(t *testing.T) {
+	t.Parallel()
 	lifetime, shutdown := context.WithCancel(t.Context())
 	defer shutdown()
 	served, _ := timedRosterServer(t, 0, true, lifetime)
@@ -326,14 +345,15 @@ func TestAShutdownEndsAFetchInFlight(t *testing.T) {
 		if roster.answered {
 			t.Fatal("a read answered a roster after the shutdown")
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("a read waiting on a listener that hangs did not return within 5 s of the shutdown")
+	case <-time.After(concurrentWait):
+		t.Fatalf("a read waiting on a listener that hangs did not return within %s of the shutdown", concurrentWait)
 	}
 }
 
 // Reads that miss a cold cache together share one listener call: each waits for the one fetch
 // rather than starting its own.
 func TestConcurrentReadsOnAColdCacheMakeOneListenerCall(t *testing.T) {
+	t.Parallel()
 	served, calls, release := heldRosterServer(t)
 	const readers = 16
 	results := make([]routeRoster, readers)
@@ -368,6 +388,7 @@ func TestConcurrentReadsOnAColdCacheMakeOneListenerCall(t *testing.T) {
 // route as unknown, whether it started that fetch or joined it; the fetch runs on for the other
 // readers, and its answer is the one the cache keeps.
 func TestAReadWhoseRequestEndsWhileItWaitsReturnsPromptly(t *testing.T) {
+	t.Parallel()
 	served, calls, release := heldRosterServer(t)
 	read := func(ctx context.Context) <-chan routeRoster {
 		answer := make(chan routeRoster, 1)

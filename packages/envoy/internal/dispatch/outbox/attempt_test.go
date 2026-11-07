@@ -77,6 +77,7 @@ func seedThreeDestinationEvent(t *testing.T, database *store.Store, broker *even
 // the event is released with no attempt counted, to be sent again when a wake comes (a reconnect),
 // rather than sent again and again while NATS stays unreachable.
 func TestAnUnreachableNATSReleasesTheBatchAndSendsNothingAfterIt(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	broker := events.NewBroker()
 	event := seedThreeDestinationEvent(t, database, broker)
@@ -118,6 +119,7 @@ func TestAnUnreachableNATSReleasesTheBatchAndSendsNothingAfterIt(t *testing.T) {
 // attempt is counted, and once the store records again the event is published with every
 // destination it reached.
 func TestABatchWhoseRecordWriteFailsIsLeftAsItWasRead(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	broker := events.NewBroker()
 	event := seedThreeDestinationEvent(t, database, broker)
@@ -183,6 +185,7 @@ func denial(subject string) error {
 // An attempt that goes on past a denial and then ends at a connection failure returns both: the
 // denial is not lost behind the error that ended the attempt.
 func TestAnAttemptEndedAfterADenialReturnsBoth(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	broker := events.NewBroker()
 	event := seedThreeDestinationEvent(t, database, broker)
@@ -204,6 +207,7 @@ func TestAnAttemptEndedAfterADenialReturnsBoth(t *testing.T) {
 // ask's thread reaches the ask's followers, and a claim reaches the previous claimant, each besides
 // the issue's route.
 func TestEveryDenialNamesItsDestination(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	broker := events.NewBroker()
 	reply := seedThreeDestinationEvent(t, database, broker)

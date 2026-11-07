@@ -58,13 +58,14 @@ var Interval = 5 * time.Second
 // that has stopped answering costs a pass and not the loop: the next tick tries again.
 const statementTimeout = 3 * time.Second
 
-// publishTimeout bounds one publish: its context, which the bus client gives the reconnect wait,
-// the flush and the acknowledgement alike, and once it ends sends nothing. The bus client bounds
-// its own publish too, but a client that is still dialling or reconnecting must not hold the
+// defaultPublishTimeout bounds one publish: its context, which the bus client gives the reconnect
+// wait, the flush and the acknowledgement alike, and once it ends sends nothing. The bus client
+// bounds its own publish too, but a client that is still dialling or reconnecting must not hold the
 // publishing transaction, and with it every other process's publish, for longer than this: the
-// next pass tries again. A variable rather than a constant only so this package's tests can
-// shorten it; nothing else sets it.
-var publishTimeout = 10 * time.Second
+// next pass tries again. New defaults every Announcer's publishTimeout to it, and only this
+// package's tests set that field, each on an Announcer of its own, so no test shortens another's
+// (docs/testing.md).
+const defaultPublishTimeout = 10 * time.Second
 
 // publishPassTimeout bounds a pass's publishing transaction as a whole, its statements and its
 // publishes together, so a database link that stalls mid-pass ends the pass rather than the loop.
@@ -104,11 +105,13 @@ type Deps struct {
 type Announcer struct {
 	deps  Deps
 	fleet atomic.Pointer[string]
+	// publishTimeout bounds each of this Announcer's publishes (defaultPublishTimeout).
+	publishTimeout time.Duration
 }
 
 // New returns an Announcer over deps; nothing runs until Run.
 func New(deps Deps) *Announcer {
-	return &Announcer{deps: deps}
+	return &Announcer{deps: deps, publishTimeout: defaultPublishTimeout}
 }
 
 // FleetCommit is the commit of the latest announcement as of this process's last pass, nil when
@@ -282,7 +285,7 @@ func (a *Announcer) publish(ctx context.Context) error {
 			failed = err
 			break
 		}
-		publishCtx, cancelPublish := context.WithTimeout(ctx, publishTimeout)
+		publishCtx, cancelPublish := context.WithTimeout(ctx, a.publishTimeout)
 		duplicate, err := a.deps.Publisher.PublishReportingDuplicateWithin(publishCtx, item)
 		cancelPublish()
 		if err != nil {

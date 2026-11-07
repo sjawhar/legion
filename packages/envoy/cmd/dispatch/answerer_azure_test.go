@@ -79,7 +79,7 @@ func (h localHosts) RoundTrip(request *http.Request) (*http.Response, error) {
 // It is the one client because it is the one newAnswerer's chat client and its token source take:
 // neither going.NewHTTPClient nor embed.NewEntraTokenSource is handed a client there, and both
 // fall back to http.DefaultClient, so this is how the sign-in a deployment's settings describe is
-// driven without a test-only seam in the boot path. No test in this package runs in parallel.
+// driven without a test-only seam in the boot path. Its caller stays serial for that reason.
 func serveHostsLocally(t *testing.T, byHost map[string]string) {
 	t.Helper()
 	routes := make(map[string]*url.URL, len(byHost))
@@ -104,6 +104,9 @@ func serveHostsLocally(t *testing.T, byHost map[string]string) {
 // The embedder's own rows stand refused beside it - DISPATCH_AZURE_EMBED_* is read only with
 // DISPATCH_EMBEDDER=azure - which TestResolveBootConfigRefusesEveryEmbedderShapeItCannotUse holds
 // for every one of them, under the default and under bedrock alike.
+// Serial: it swaps process-wide state, http.DefaultClient's transport (serveHostsLocally),
+// which is the client newAnswerer's chat client and its token source both fall back to, so a
+// parallel test's own call would be routed by it too.
 func TestNewAnswererOnAzureBesideABedrockEmbedderSignsInAtTheConfiguredScope(t *testing.T) {
 	if azureChatScope == embed.DefaultEntraScope {
 		t.Fatalf("the configured scope is %s, the embedder's own: this test says nothing unless they differ", azureChatScope)

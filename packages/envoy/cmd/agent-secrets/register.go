@@ -21,13 +21,16 @@ import (
 
 // helperConnectPatience is how long cmdRegister retries connecting to a still-starting helper
 // before giving up (or, under --exec, warning and launching anyway) — the launch-ordering case
-// tmux-resurrect hits at boot.
+// tmux-resurrect hits at boot. It is the default of --connect-patience, which a test that starts
+// no helper at all passes a short one, since it waits the whole patience out
+// (dispatch://INFRA-1075).
 const helperConnectPatience = 10 * time.Second
 
 func cmdRegister(args []string, stdout, stderr io.Writer) int {
 	flags := newFlagSet("register", stderr)
 	wait := flags.Int("wait", 0, "wait up to this many seconds for the helper to enroll the session (0 returns at once, as does a helper holding no launcher credential)")
 	doExec := flags.Bool("exec", false, "after registering, exec the command that follows as this same process")
+	patience := flags.Duration("connect-patience", helperConnectPatience, "how long to retry connecting to a still-starting helper before giving up")
 	// --session-id is what makes a broker identity outlive the process. Without it the helper
 	// names the session <hostname>:<pid>:<start ticks since boot>, which is a different string
 	// after a restart and necessarily a different one after a reboot, so the session enrols
@@ -59,6 +62,12 @@ func cmdRegister(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "agent-secrets register: unexpected argument %q\n", command[0])
 		return exitUsageError
 	}
+	// A zero or negative patience would make the retry loop give up before it dialled once,
+	// which is not what "wait less" means.
+	if *patience <= 0 {
+		fmt.Fprintln(stderr, "agent-secrets register: --connect-patience must be positive")
+		return exitUsageError
+	}
 
 	// The helper's socket as every other helper-mode form finds it (identity.go): the variable when
 	// set, else the default socket when it is there. An agent box has neither: its key dir sits
@@ -69,7 +78,7 @@ func cmdRegister(args []string, stdout, stderr io.Writer) int {
 		return exitUsageError
 	}
 
-	resp, err := registerWithPatience(sock, *wait, *sessionID, helperConnectPatience)
+	resp, err := registerWithPatience(sock, *wait, *sessionID, *patience)
 	if !*doExec {
 		if err != nil {
 			fmt.Fprintf(stderr, "agent-secrets register: %v\n", err)

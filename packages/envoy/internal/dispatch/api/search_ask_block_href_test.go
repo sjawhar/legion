@@ -22,6 +22,7 @@ import (
 // hit can come from carries it: the keyword list, the meaning list, and the keyword-only
 // fallback when the query's embedding cannot be had.
 func TestSearchLinksAnAskBlockOnlyWhileTheBlockIsANode(t *testing.T) {
+	t.Parallel()
 	const server = "https://dispatch.example"
 	embedder := &fakeEmbedder{vectors: map[string][]float32{"wibbleflorp": queryVector()}}
 	handler, database, _ := newTestServer(t, testServerOptions{embedder: embedder})

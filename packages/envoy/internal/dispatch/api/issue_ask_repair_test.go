@@ -188,6 +188,7 @@ func captureLogs(t *testing.T) *storetest.LockedLog {
 // stores, dated when the repair ran. A second repair changes nothing, and a later reopen restores
 // them.
 func TestRepairWithdrawsTheOpenAsksOfAnIssueClosedWithoutWithdrawing(t *testing.T) {
+	t.Parallel()
 	f := newRepairFixture(t)
 	issue := createInteractionIssue(t, f.handler, "TEST", "Closed by an older release", closeDecision)
 	awaitIndexedAskBlock(t, f.handler, issue.PrimaryArtifactID, "close-decision", "Ship it?")
@@ -271,6 +272,7 @@ func TestRepairWithdrawsTheOpenAsksOfAnIssueClosedWithoutWithdrawing(t *testing.
 
 // Two repairs started together serialise on the issue's row: each ask is withdrawn once.
 func TestTwoRepairsAtOnceWithdrawEachAskOnce(t *testing.T) {
+	t.Parallel()
 	f := newRepairFixture(t)
 	issue := createInteractionIssue(t, f.handler, "TEST", "Repaired twice at once", closeDecision)
 	awaitIndexedAskBlock(t, f.handler, issue.PrimaryArtifactID, "close-decision", "Ship it?")
@@ -316,6 +318,8 @@ func TestTwoRepairsAtOnceWithdrawEachAskOnce(t *testing.T) {
 // A closed issue with no issue.closed event has no closer to name: the repair logs it and leaves
 // its asks open, writing nothing.
 func TestRepairSkipsAClosedIssueWithNoClosingEvent(t *testing.T) {
+	// No t.Parallel: this test reads what the process's own default logger was handed, which
+	// every other test running beside it would write into too.
 	f := newRepairFixture(t)
 	issue := createInteractionIssue(t, f.handler, "TEST", "Closed with no event", "Context\n")
 	ask := createSessionAsk(t, f.handler, issue.Key, "Which region?")
@@ -342,6 +346,7 @@ func TestRepairSkipsAClosedIssueWithNoClosingEvent(t *testing.T) {
 // restoration - gets them back, credited to the actor of the event that reopened it, not to a
 // later editor.
 func TestRepairRestoresTheWithdrawnAsksOfAnIssueReopenedWithoutRestoring(t *testing.T) {
+	t.Parallel()
 	f := newRepairFixture(t)
 	issue := createInteractionIssue(t, f.handler, "TEST", "Reopened by an older release", closeDecision)
 	awaitIndexedAskBlock(t, f.handler, issue.PrimaryArtifactID, "close-decision", "Ship it?")
@@ -400,6 +405,7 @@ func TestRepairRestoresTheWithdrawnAsksOfAnIssueReopenedWithoutRestoring(t *test
 // while the issue is closed. The repair gives that issue the close's final sweep, so the block
 // reads resolved; a closed issue whose document owes no settlement is not touched.
 func TestRepairSweepsAClosedIssuesDocumentWrittenByAnotherProcess(t *testing.T) {
+	t.Parallel()
 	f := newRepairFixture(t)
 	swept := createInteractionIssue(t, f.handler, "TEST", "Written after its close", "Context\n")
 	untouched := createInteractionIssue(t, f.handler, "OTHER", "Settled after its close", "Context\n")
@@ -459,6 +465,7 @@ func TestRepairSweepsAClosedIssuesDocumentWrittenByAnotherProcess(t *testing.T) 
 // settlement was marked before the pass's bound is left for a full pass, while one marked after
 // it is swept.
 func TestAnIntervalRepairSweepsOnlyTheDocumentsMarkedSinceItsLastPass(t *testing.T) {
+	t.Parallel()
 	f := newRepairFixture(t)
 	stale := createInteractionIssue(t, f.handler, "TEST", "Marked before the bound", "Context\n")
 	fresh := createInteractionIssue(t, f.handler, "OTHER", "Marked after the bound", "Context\n")
@@ -512,6 +519,7 @@ func TestAnIntervalRepairSweepsOnlyTheDocumentsMarkedSinceItsLastPass(t *testing
 // then an interval pass bounded one interval back, each change nothing, append no update to
 // either document, and leave each document's owed settlement marked when it was.
 func TestARepairThatChangesNothingAppendsNoUpdateAndMarksNoDocument(t *testing.T) {
+	t.Parallel()
 	// An hour, so the only settlement is the one the close through PATCH runs.
 	f := newRepairFixtureSettlingAfter(t, time.Hour)
 	closed := createInteractionIssue(t, f.handler, "TEST", "Closed by this release", closeDecision)
@@ -612,6 +620,7 @@ func (d *issueAskFailingDocs) takeWrites() map[string]int {
 // pass, bounded by nothing, reaches all three issues; the second reaches the failed issue and the
 // one marked again, never the third.
 func TestARepairPassThatFailsOneIssueStillMovesTheWindowAndRetriesIt(t *testing.T) {
+	t.Parallel()
 	// An hour, so the only settlement is the one each close through PATCH runs.
 	f := newRepairFixtureSettlingAfter(t, time.Hour)
 	failing := createInteractionIssue(t, f.handler, "FAIL", "Fails every pass", closeDecision)
@@ -671,6 +680,7 @@ func TestARepairPassThatFailsOneIssueStillMovesTheWindowAndRetriesIt(t *testing.
 // settlement runs on the closed issue. The loop still indexes that document at its latest version,
 // leaves nothing owed, and every block of it resolves by its dispatch://KEY/spec#b- reference.
 func TestTheBlockIndexAfterTheBootRepairIndexesAClosedIssuesDocument(t *testing.T) {
+	t.Parallel()
 	f := newRepairFixture(t)
 	issue := createInteractionIssue(t, f.handler, "TEST", "Closed by an older release", closeDecision)
 	awaitIndexedAskBlock(t, f.handler, issue.PrimaryArtifactID, "close-decision", "Ship it?")
@@ -721,7 +731,7 @@ func TestTheBlockIndexAfterTheBootRepairIndexesAClosedIssuesDocument(t *testing.
 	}()
 	var indexed *int
 	var owed int
-	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+	for deadline := time.Now().Add(concurrentWait); ; time.Sleep(20 * time.Millisecond) {
 		if err := f.database.Pool.QueryRow(ctx, `
 			select (select version from document_block_versions where artifact_id = $1),
 			       (select count(*) from document_block_versions where version is null)
@@ -764,7 +774,7 @@ func TestTheBlockIndexAfterTheBootRepairIndexesAClosedIssuesDocument(t *testing.
 // awaitOwedSettlement waits until document owes a settlement.
 func awaitOwedSettlement(t *testing.T, database *store.Store, document string) {
 	t.Helper()
-	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+	for deadline := time.Now().Add(concurrentWait); ; time.Sleep(20 * time.Millisecond) {
 		var owed bool
 		if err := database.Pool.QueryRow(context.Background(), `
 			select exists (select 1 from doc_settlements_pending where artifact_id = $1)
@@ -783,7 +793,7 @@ func awaitOwedSettlement(t *testing.T, database *store.Store, document string) {
 // awaitLiveText waits until document's live text, as this server reads it, holds part.
 func awaitLiveText(t *testing.T, handler http.Handler, document, part string) {
 	t.Helper()
-	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+	for deadline := time.Now().Add(concurrentWait); ; time.Sleep(20 * time.Millisecond) {
 		live, _ := documentTexts(t, handler, document)
 		if strings.Contains(live, part) {
 			return

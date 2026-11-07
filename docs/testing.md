@@ -50,6 +50,47 @@ the limit, as on a dev box whose `TMPDIR` is on a data disk.
   TMPDIR="$L" GOTMPDIR="$L" go test ./<package>/... -count=1
   ```
 
+## A test that calls `t.Parallel()`
+
+The tests of a Go package run one at a time unless they call `t.Parallel()`, and most of this
+repository's do call it: `packages/envoy` alone has about 3,700 such calls, which is what keeps
+CI's `envoy-go` job inside its limit (dispatch://INFRA-1075).
+A test may call it only when it reads and writes nothing the whole process shares.
+
+Three kinds of test must not, and each of them has already been found by the failure of a
+different test rather than of itself:
+
+- **One that swaps process-wide state**:
+  `t.Setenv`, `t.Chdir`, `slog.SetDefault` or `internal/logtest`'s capture,
+  `pmdoc.SetBlockIDGenerator`, `pmdoctest.UseBlockSchema`, or a package-level `var` a test
+  assigns.
+
+  The victim is whatever ran beside it: a parse against another test's block schema, a log line
+  another test was counting, a query through another test's SQL.
+
+- **One that measures the process**:
+  `runtime.ReadMemStats`, a goroutine dump, a CPU window (`internal/cputest`), or a bound on how
+  long something took.
+
+  Every other parallel test's allocations, goroutines and CPU count against it.
+
+- **One that shares a database, a NATS subject, a stream or a durable name with another test.**
+
+  `internal/dispatch/store/storetest` and `internal/broker/store/storetest` give each test a
+  database of its own, so this is about what a test names for itself.
+
+Find them through the helpers, not line by line:
+every one of those found so far reached its swap through a helper two or three calls away, and a
+file-by-file read missed them.
+Where a test stays serial, say in a comment beside it which of the three it is, so the next pass
+over the package does not undo it.
+
+Prefer the cause to the exclusion.
+A package-level `var` a test assigns becomes a field of the thing under test, defaulted from the
+constant it replaces, which the test then sets on its own instance;
+that is how `internal/dispatch/docs`'s drain budget and room cap, `internal/bus`'s drain-hook
+reserve and `cmd/listener`'s retry delays stopped forbidding parallelism.
+
 ## Go's package deadline
 
 `go test` panics a package that runs longer than ten minutes (`panic: test timed out after 10m0s`),
@@ -64,12 +105,16 @@ go test -timeout 20m ./internal/dispatch/api
 
 A Legion issue pod does not run that whole package: `skills/legion-worker/references/tools.md` says what the pod runs and where the rest goes.
 
-CI's `envoy-go` job runs it that way, alone and before the module's other packages
+CI's `envoy-go` job gives the whole module that deadline in one `go test` call
 (`.github/workflows/ci.yaml`), and `envoy-go-race-api`, the race job that runs that package by
 itself, gives it 30 minutes; `docs` runs under `-race` in `envoy-go-race-docs`, which gives it 60.
-A command that runs one of its tests by name (`-run`) needs no deadline of its own. Run it alone
-rather than beside the module's other Postgres-backed packages: together they share one database
-service and the machine's CPU, and on a small machine `api` and `docs` then each overran the default
+A command that runs one of its tests by name (`-run`) needs no deadline of its own.
+The packages used to be run apart because each test cloned and dropped a database of its own, and
+those cleanups queued on one Postgres checkpointer; every job's Postgres now runs with `fsync`,
+`full_page_writes` and `synchronous_commit` off, where a forced checkpoint writes nothing
+durable, so they run together.
+On a small machine `api` and `docs` each overran the default when they ran beside the module's
+other Postgres-backed packages
 (`docs/solutions/testing/the-dispatch-servers-go-suites-in-an-issue-pod-run-api-and-docs-alone-with-a-timeout-and-read-the-c-collation-docker-and-bun-failures-as-the-environment-LEGION-752.md`).
 
 `packages/daemon/internal/daemon` is the daemon's slow, Postgres-backed package. The test
@@ -129,7 +174,8 @@ A `runtime.AddCleanup` or `runtime.SetFinalizer` added in another package comes 
 ## A database a Go test creates
 
 A Go test that creates a Postgres database writes `create database … strategy file_copy`, as
-`packages/envoy/internal/dispatch/store/storetest` and both modules' `internal/testpg` do. Without
+both `storetest` harnesses (`packages/envoy/internal/dispatch/store/storetest`,
+`packages/envoy/internal/broker/store/storetest`) and both modules' `internal/testpg` do. Without
 it, PostgreSQL 15 and later copy the source database through the write-ahead log, every page of it:
 4.4 MB of log for an empty database made from `template1`, and 6.4 MB for a clone of Dispatch's
 migrated template, which made one run of the `api` and `docs` packages write 16 GiB of log. A file
@@ -168,6 +214,47 @@ A test changes no server setting (`fsync`, `full_page_writes`, `max_wal_size`): 
 `DISPATCH_TEST_DATABASE_URL` names can hold other databases, such as the local Dispatch's on
 `packages/envoy/scripts/dev-postgres.sh`'s container.
 
+Each test's database is dropped when that test ends, and no database is handed from one test to
+another. A file copy forces a checkpoint before the copy and another
+after it, and a `drop database` forces one more, so a run pays three forced checkpoints a test;
+what makes that affordable is the server, not the harness. Every CI job that runs a Postgres
+service runs a container deleted with the job, with `fsync`, `full_page_writes` and
+`synchronous_commit` off, where a forced checkpoint writes nothing durable
+(dispatch://INFRA-1075).
+
+Each test's database is dropped by the harness itself, on every server: one left behind is one
+nothing else knows to drop. **The one database that is deliberately left behind is the template**,
+and it is the single exception to that rule.
+
+Both harnesses clone from one migrated template, and the template stays. Applying 210 Dispatch
+migrations, each in its own committed transaction, cost about 21 s of every test process that
+wanted a database (measured on a two-core pod: `internal/dispatch/events` ran in 60 s building a
+template and 39 s cloning one already there), and a lane runs about twenty packages on the
+Dispatch harness and thirteen on the broker's. The template is named
+`dispatch_template_<fingerprint>` or `broker_template_<fingerprint>`, where the fingerprint is 32
+hex characters digesting the migration set the build embeds (`store.MigrationsFingerprint`): the
+first process to want it builds it under a cluster-wide advisory lock, under a
+`…_building_<random>` name it is renamed out of only once every migration is applied, and every
+process after it clones what is already there.
+
+No process drops it. The test processes of one run start minutes apart - a lane runs eight
+package binaries at a time - so a process that dropped the template on its way out would take it
+from the processes still cloning it, and there is no moment at which a process can know it is the
+last. A developer or operator who finds a `dispatch_template_…` or `broker_template_…` database
+on a server is looking at that: a read-only, connection-refusing copy of one migration set's
+schema, holding no row any test wrote, left for the next test process.
+
+A set that gains, loses or edits a migration gets a template of its own, so no run clones a stale
+schema; what a stale template costs is 13 MB on a server that outlives the run. CI's Postgres is
+a container deleted with the job. On a long-lived server, such as
+`packages/envoy/scripts/dev-postgres.sh`'s, reclaim them by hand:
+
+```sh
+psql "$DISPATCH_TEST_DATABASE_URL" -tAc \
+  "select datname from pg_database where datname like 'dispatch\_template\_%' or datname like 'broker\_template\_%'" |
+  xargs -r -n1 -I{} psql "$DISPATCH_TEST_DATABASE_URL" -c 'drop database "{}"'
+```
+
 ## A test that reads `GET /api/v1/references?since=` reads again
 
 A since read answers only the edges at or below the event log's safe horizon (`getReferences` and
@@ -176,9 +263,10 @@ A since read answers only the edges at or below the event log's safe horizon (`g
 that wait it answers at the horizon it has and leaves the rest to a later read: the route defers,
 it never loses an edge. The horizon is instance-wide,
 so any transaction holding a transaction id on the Postgres instance holds it back, and in
-`packages/envoy/internal/dispatch/api` the holder is the test process itself: `storetest.Open`'s
-`create database … template … strategy file_copy` and `storetest`'s
-`drop database … with (force)` (`packages/envoy/internal/dispatch/store/storetest/storetest.go`).
+`packages/envoy/internal/dispatch/api` the holder is the test process itself: the writes of the
+tests running beside the read, and the harness's own `create database … template … strategy
+file_copy` and `drop database`, one of each a test
+(`packages/envoy/internal/dispatch/store/storetest/storetest.go`).
 
 So a read that answered within `referencesSinceWait` was not held back: what it listed is what it
 owed, and a wrong answer fails the test at once. Only a read held past that wait is read again,

@@ -12,6 +12,7 @@ import (
 )
 
 func TestLastPeerDisconnectSettlesDocumentBeforeEviction(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "before")

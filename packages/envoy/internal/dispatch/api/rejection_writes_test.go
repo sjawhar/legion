@@ -7,6 +7,7 @@ import (
 )
 
 func TestRejectedConditionalEditWritesNothingDurable(t *testing.T) {
+	t.Parallel()
 	handler, database, _ := preconditionTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Zero mutation", "before")
 	read := readDocumentPrecondition(t, handler, issue.PrimaryArtifactID)

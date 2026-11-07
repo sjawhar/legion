@@ -159,6 +159,9 @@ func (w *approvingWriter) Write(p []byte) (int, error) {
 // the name to, so it must ask under brokerclient.SessionFor and never under
 // AGENT_SECRETS_SESSION — which is unset on most boxes, and on the rest is the name this machine
 // trades its own identity under.
+// Serial: it sets process-wide variables - AGENT_SECRETS_KEY_DIR and the brokerclient sign-in
+// ones (BrokerURLVar, SignInDirVar, SessionVar, IdentityVar, MachineTokenFileVar) - which
+// login and brokerclient.SignIns read for themselves; t.Setenv panics under t.Parallel.
 func TestLoginTradesUnderThePersonsOwnSessionName(t *testing.T) {
 	const person = "ada@example.com"
 	for _, machineSession := range []string{"", "machine-of-this-box"} {
@@ -204,6 +207,9 @@ func TestLoginTradesUnderThePersonsOwnSessionName(t *testing.T) {
 // somebody ran `agent-secrets login` again — which made a second box key and a second sign-in
 // on that person's own list. The box registers the session again under the same box key
 // instead, once, and writes the fresh id into the record it already has.
+// Serial: it sets process-wide variables - AGENT_SECRETS_KEY_DIR, AGENT_SECRETS_HELPER_SOCK and
+// the brokerclient sign-in ones - which login and brokerclient.SignIns read for themselves;
+// t.Setenv panics under t.Parallel.
 func TestASignInWhoseLeaseLapsedRegistersItselfAgain(t *testing.T) {
 	const person = "ada@example.com"
 	broker := newLoginBroker(t)
@@ -280,6 +286,7 @@ func writeLoginFile(t *testing.T, name, content string) string {
 // and the box key's thumbprint, which is what tells two boxes of one person apart, and which
 // registerSignInSession and SignInAuthority.Current ask under too.
 func TestLoginsSessionNameIsTheOneEveryLaterTradeAsks(t *testing.T) {
+	t.Parallel()
 	record := brokerclient.SignInRecord{Person: "ada@example.com", Thumbprint: "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG"}
 	if got, want := brokerclient.SessionFor(record), "signin-ada@example.com-abcdefghijkl"; got != want {
 		t.Fatalf("SessionFor = %q, want %q", got, want)

@@ -15,6 +15,7 @@ const deliveryProductionJobNamesVersion = 109
 // the earlier release during the roll) becomes the list, this release's write of the list alone keeps
 // production_job_name at its first name for that older binary's reads, and an empty list is refused.
 func TestMigrationTurnsTheProductionJobIntoAList(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store := openEmptyTestStore(t)
 	if err := store.migrate(ctx, migrationsThrough(t, deliveryProductionJobNamesVersion-1)); err != nil {

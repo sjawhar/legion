@@ -39,6 +39,7 @@ func insertAnchoredReferenceAsk(t *testing.T, tx pgx.Tx, id, issueKey, anchorArt
 // recorded no text of the block and so does not know the version that first held it. The ask
 // anchored canonically beside it keeps the document parent and version it had.
 func TestAskNodeAnswersOverAnAnchorArtifactIDThatDoesNotCast(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	ctx := context.Background()
 	tx, err := database.Pool.Begin(ctx)

@@ -55,6 +55,7 @@ func streamConfig(t *testing.T, js nats.JetStreamContext) nats.StreamConfig {
 // operator commands - owns nothing on the bus it reaches, so its connect leaves the shared
 // stream's configuration exactly as the deployment that owns it left it (LEGION-249).
 func TestConnectLeavesADeployedStreamAlone(t *testing.T) {
+	t.Parallel()
 	uri := testnats.URL(t)
 	js := deployStream(t, uri)
 	before := streamConfig(t, js)
@@ -77,6 +78,7 @@ func TestConnectLeavesADeployedStreamAlone(t *testing.T) {
 // The same caller against a server with no stream creates none: a scratch NATS is not a tool's to
 // lay out, and a stream it created would stand in for the one the owner configures.
 func TestConnectCreatesNoStream(t *testing.T) {
+	t.Parallel()
 	uri := testnats.URL(t)
 	client, err := bus.Connect([]string{uri})
 	if err != nil {

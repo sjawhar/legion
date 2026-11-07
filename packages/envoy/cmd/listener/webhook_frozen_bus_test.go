@@ -126,13 +126,14 @@ func wantDeliveryFailed(t *testing.T, route string, recorder *httptest.ResponseR
 // the answer a record that failed always got, 503, inside the CI store's 4 s record wait. The
 // negative control is a delivery recorded on the same store before the freeze.
 func TestAGitHubCIDeliveryAnswersAFrozenBusInsideTheRecordWait(t *testing.T) {
+	t.Parallel()
 	frozen := newFrozenWebhookBus(t)
 	store, err := cistore.Open(frozen.client.Conn, logging.New("test"), cistore.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("open the CI store: %v", err)
 	}
 	t.Cleanup(store.StopWatch)
-	ready, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ready, cancel := context.WithTimeout(context.Background(), listenerWait)
 	defer cancel()
 	if err := store.WaitForCacheReady(ready); err != nil {
 		t.Fatalf("wait for the CI cache: %v", err)
@@ -166,6 +167,7 @@ func TestAGitHubCIDeliveryAnswersAFrozenBusInsideTheRecordWait(t *testing.T) {
 // and after the others' callers had gone. Each must still get the answer a failed publish always
 // got, 503. The negative control is each route served on the same bus before the freeze.
 func TestTheWebhookPublishesAnswerAFrozenBusInsideTheirCallersWait(t *testing.T) {
+	t.Parallel()
 	frozen := newFrozenWebhookBus(t)
 	slack := webhook.SlackHandler(webhookSecret, frozen.client)
 	ghostWispr := webhook.GhostWisprHandler(webhookSecret, frozen.client)

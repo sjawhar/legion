@@ -25,6 +25,7 @@ func proxiedLookup(address string) func(string) (string, bool) {
 // never answers the SOCKS5 greeting holds the dial open: the client closes it at the connect's
 // one-second deadline, not at the bus's five-second connect timeout.
 func TestAProxiedDialEndsAtTheConnectsDeadline(t *testing.T) {
+	t.Parallel()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen for the silent proxy: %v", err)
@@ -79,6 +80,7 @@ func TestAProxiedDialEndsAtTheConnectsDeadline(t *testing.T) {
 // under -race (the envoy-go-race job), a record that is not synchronized fails here. Each connect
 // makes the bus's ten attempts a second apart, so this takes about ten seconds.
 func TestConnectsSharingADialerRecordItsLastError(t *testing.T) {
+	t.Parallel()
 	dialer, err := socks5Proxy(proxiedLookup("127.0.0.1:1"))
 	if err != nil {
 		t.Fatalf("read the proxy setting: %v", err)

@@ -16,6 +16,7 @@ import (
 // replace that only shortens, a retype - has nothing a concurrent change could take, and answers
 // the same way rather than telling the agent its edit could not be confirmed.
 func TestAnEditReportsThatTheLiveDocumentKeptIt(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Lost edit",
 		"Alpha paragraph.\n\nBravo paragraph.\n\nCharlie paragraph.\n\nDelta paragraph.\n")
@@ -68,6 +69,7 @@ func TestAnEditReportsThatTheLiveDocumentKeptIt(t *testing.T) {
 // A write the document lost before it could be versioned is refused, and the refusal says which
 // operations went and who else was in the room, so the caller knows what to re-read and why.
 func TestALostWriteIsRefusedWithItsOperationsAndParticipants(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name string
 		err  *docs.ErrEditLost

@@ -263,6 +263,7 @@ func paragraphLine(t *testing.T, markdown, prefix string) string {
 // the room itself, with no origin - credits no browser. It holds on both paths: where the room's
 // observer classifies the commit as a content change, and where it classifies it as no change.
 func TestRenderReuseANilOriginCommitCreditsNoOne(t *testing.T) {
+	t.Parallel()
 	t.Run("the browser's delete of a bold run it never saw", testADeleteThatDanglesABoldRun)
 	t.Run("a nil-origin commit a recovered replica counts as changed", testANilOriginCommitAfterARecover)
 	t.Run("a nil-origin commit an open write's shadow counts as changed", testANilOriginCommitAnOpenWritesShadowMeasures)
@@ -277,6 +278,9 @@ func TestRenderReuseANilOriginCommitCreditsNoOne(t *testing.T) {
 // takes no text away and is classified as no content change, so the room credits nothing for it
 // and no second row is owed.
 func testADeleteThatDanglesABoldRun(t *testing.T) {
+	// This case drives a service, a database and a document of its own, so it runs beside the
+	// other two.
+	t.Parallel()
 	service, artifactID, sh := newRenderReuseService(t)
 	watch := watchNilOriginCredits(t, service, artifactID)
 
@@ -403,6 +407,7 @@ func testADeleteThatDanglesABoldRun(t *testing.T) {
 // commits, here made by hand so any pinned ygo takes this path - is then a content change credited
 // to whoever is connected, unless creditContentChange refuses it.
 func testANilOriginCommitAfterARecover(t *testing.T) {
+	t.Parallel()
 	service, artifactID, sh := newRenderReuseService(t)
 	watch := watchNilOriginCredits(t, service, artifactID)
 
@@ -503,6 +508,7 @@ func testANilOriginCommitAfterARecover(t *testing.T) {
 // class the shadow measures as a change is stored with the authors the room recorded for it, none
 // here, is TestAShadowMeasuresTheClassesInItsWindowAndCreditsWhatItMeasures.
 func testANilOriginCommitAnOpenWritesShadowMeasures(t *testing.T) {
+	t.Parallel()
 	service, artifactID, sh := newRenderReuseService(t)
 	watch := watchNilOriginCredits(t, service, artifactID)
 

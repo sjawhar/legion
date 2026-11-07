@@ -117,6 +117,9 @@ func TestTaskProgressIsCountedAtStartAndThenNothingRuns(t *testing.T) {
 // A row another writer holds through the whole boot pass - its own retries included - is left
 // to the retries after it, and the first of those after the writer lets go counts it; the
 // reconciliation then returns.
+//
+// Serial: it swaps process-wide state, the default slog logger, which is how it reads the pass's
+// own line back (captureLogs).
 func TestTaskProgressLockedThroughTheBootPassIsCountedByARetry(t *testing.T) {
 	database := storetest.Open(t)
 	ctx := context.Background()
@@ -132,6 +135,13 @@ func TestTaskProgressLockedThroughTheBootPassIsCountedByARetry(t *testing.T) {
 		t.Fatalf("hold %s: %v", held, err)
 	}
 	service := New(Deps{Store: database, Events: events.NewBroker(), Settle: time.Hour})
+	// The waits this test spends are its own: the boot pass's five backoffs add up to three
+	// seconds of the package at the step production takes, and its first boot retry to one more.
+	// The schedule it sets still outlasts the steps below - six retries at 200 ms, doubling, are
+	// 12.6 s, and the test holds its row for a fraction of that - so the retries are still
+	// running when the writer lets go, which is what the test is about (dispatch://INFRA-1075).
+	service.taskProgressRetryBackoff = 20 * time.Millisecond
+	service.taskProgressBootRetryFirst = 200 * time.Millisecond
 	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
 
 	done := runTaskProgress(t, service)
@@ -162,7 +172,7 @@ func TestTaskProgressLockedThroughTheBootPassIsCountedByARetry(t *testing.T) {
 	}
 	select {
 	case <-done:
-	case <-time.After(10 * time.Second):
+	case <-time.After(roomWait(t)):
 		t.Fatal("the reconciliation did not return once no drift was left")
 	}
 }

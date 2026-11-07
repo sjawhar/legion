@@ -60,6 +60,7 @@ func describeError(err error) string {
 // takes its copy from the room itself and starts the replica from it, which the tree read then
 // walks, and after each of its browser edits.
 func TestTheSettlementTreeReadMatchesTheReadPointsTreeAcrossTheCorpus(t *testing.T) {
+	t.Parallel()
 	reads, documents := driveCorpusRooms(t, func(at corpusRoom) {
 		if err := settlementTreeReads(t, at); err != nil {
 			t.Fatalf("%s: both reads of a corpus document answered %s, want the tree", at.stage, describeError(err))

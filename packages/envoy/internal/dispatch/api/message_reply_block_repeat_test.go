@@ -15,6 +15,7 @@ import (
 // message row by itself, so without hydrateMessageReplyBlocks both answer reply_block null and a
 // double press loses the block the reader pressed Reply on.
 func TestARepeatOfAKeyedMessageReplyAnswersItsBlockAgain(t *testing.T) {
+	t.Parallel()
 	live := true
 	sent := []map[string]any{}
 	listener := sessionListener(t, &live, &sent)

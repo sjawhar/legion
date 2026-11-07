@@ -31,6 +31,7 @@ func readIssueRoleDocuments(t *testing.T, handler http.Handler, key string) issu
 // role. The role is the document's for life: a second upload of the same name is its next
 // version, under the row that already holds the role.
 func TestIssueDocumentsTakeTheirRoleFromTheirName(t *testing.T) {
+	t.Parallel()
 	handler, _, _ := newTestServer(t, testServerOptions{})
 	issue := createInteractionIssue(t, handler, "ROLE", "Roles", "A spec\n")
 	owner := "/api/v1/issues/" + issue.Key

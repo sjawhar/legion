@@ -23,6 +23,7 @@ import (
 // google-service-account secret's to the service account minter, each against an endpoint of its
 // own, so wiring a kind to another kind's minter, which would refuse the value, fails here.
 func TestEachKindReachesItsOwnMinter(t *testing.T) {
+	t.Parallel()
 	_, pemText := githubapptest.Key(t)
 	github := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {

@@ -1,5 +1,8 @@
 package bus
 
+// Every test here captures the default slog handler (captureLogs, stream_config_test.go), a
+// process-wide swap, so none of them is parallel (dispatch://INFRA-1075).
+
 import (
 	"errors"
 	"fmt"
@@ -689,8 +692,8 @@ func TestStoppingABackgroundClientBeforeItsFirstConnectionStartsNoKeeper(t *test
 			}()
 			select {
 			case <-stopped:
-			case <-time.After(10 * time.Second):
-				t.Fatalf("%s of a client that never connected did not return within 10s", stop.name)
+			case <-time.After(busWait):
+				t.Fatalf("%s of a client that never connected did not return within %s", stop.name, busWait)
 			}
 			client.mu.Lock()
 			started := client.keeperDone != nil

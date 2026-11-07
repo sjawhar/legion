@@ -67,6 +67,10 @@ type roleRig struct {
 	broker   *events.Broker
 }
 
+// newRoleRig is a roleRig on the package's shared NATS server, in a JetStream account of this
+// test's own (testnats.URL): the stream, the role bucket and the session bucket this rig owns are
+// that account's, so they are this test's alone though every one of them carries production's
+// name. A test that stops or freezes its server starts one of its own instead.
 func newRoleRig(t *testing.T) *roleRig {
 	t.Helper()
 	return newRoleRigWith(t)
@@ -82,10 +86,11 @@ func newRoleRigWithSessionMaxAge(t *testing.T, maxAge time.Duration) *roleRig {
 	return newRoleRigWith(t, session.WithSessionTTL(maxAge))
 }
 
-// newRoleRigWith is a roleRig on a server of its own, its session registry opened with options.
+// newRoleRigWith is a roleRig in a JetStream account of its own, its session registry opened with
+// options.
 func newRoleRigWith(t *testing.T, options ...session.SessionRegistryOption) *roleRig {
 	t.Helper()
-	_, url := testnats.Start(t)
+	url := testnats.URL(t)
 	client, err := bus.ConnectOwningStream([]string{url})
 	if err != nil {
 		t.Fatalf("connect the outbox's client: %v", err)
@@ -347,7 +352,11 @@ func dueNow(t *testing.T, database *store.Store, id int64) {
 // event backed off with its attempt and the reason; once it answers, a retry publishes it, and the
 // stream, which captures the holder's subject, holds one copy of the forward however often it was
 // sent. Nothing crosses the role's topic.
+//
+// Real time, at roleReceiptTimeout: the forward and the receipt it waits for cross a live NATS
+// server over TCP, which no synctest bubble can hold.
 func TestARoleRouteIsForwardedToASelfSubscribedHolderAndPublishedOnItsReceipt(t *testing.T) {
+	t.Parallel()
 	rig := newRoleRig(t)
 	const role, holder = "reviewer", "ses_self_subscribed"
 	rig.claim(t, role, holder, session.SessionEntry{SelfSubscribed: true})
@@ -364,7 +373,7 @@ func TestARoleRouteIsForwardedToASelfSubscribedHolderAndPublishedOnItsReceipt(t 
 		var forward contracts.Envelope
 		select {
 		case forward = <-recv.arrived:
-		case <-time.After(10 * time.Second):
+		case <-time.After(eventWait):
 			t.Fatal("the holder received no forward")
 		}
 		if forward.Topic != contracts.RoleTopicPrefix+role || forward.DedupeKey != contracts.RoleForwardDedupePrefix+fmt.Sprintf("dispatch-%d", event.ID) ||
@@ -410,6 +419,7 @@ func TestARoleRouteIsForwardedToASelfSubscribedHolderAndPublishedOnItsReceipt(t 
 // request, so the stream's acknowledgement of that copy is the receipt: the event is published with
 // nobody subscribed to the holder's subject, and the stream holds the forward once.
 func TestARoleRouteToAHolderWithAServingPortIsPublishedOnTheStreamsAcknowledgement(t *testing.T) {
+	t.Parallel()
 	rig := newRoleRig(t)
 	const role, holder = "reviewer", "ses_serving"
 	rig.claim(t, role, holder, session.SessionEntry{Port: 40123})
@@ -431,6 +441,7 @@ func TestARoleRouteToAHolderWithAServingPortIsPublishedOnTheStreamsAcknowledgeme
 // nothing is sent to any session - the copy kept for the role's next holder goes to that role's
 // kept lane, which is no session's subject (TestARoleRouteToAnUnheldRoleIsKeptForTheRolesNextHolder).
 func TestARoleRouteWithNoClaimIsPublishedWithNothingSentToASession(t *testing.T) {
+	t.Parallel()
 	rig := newRoleRig(t)
 	const role = "unclaimed"
 	rig.silent(t, contracts.RoleTopicPrefix+role)
@@ -456,6 +467,7 @@ func TestARoleRouteWithNoClaimIsPublishedWithNothingSentToASession(t *testing.T)
 // holder, the one send it makes. A role route reached with nothing to send at all is no send of
 // its batch, which TestARoleTokenNoClaimCanNameIsSkippedWithNothingKept holds.
 func TestABatchWhoseOnlyRouteLeftIsAnUnclaimedRoleKeepsItForTheNextHolder(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	rig := newRoleRig(t)
 	const role = "unclaimed"
@@ -495,6 +507,7 @@ func TestABatchWhoseOnlyRouteLeftIsAnUnclaimedRoleKeepsItForTheNextHolder(t *tes
 // The copy on the role's kept lane is the envelope as its sender sent it, kept for the holder the
 // role-claim reaper's release of this claim lets claim the role next.
 func TestARoleRouteWhoseHolderIsGoneKeepsTheClaimAndIsPublished(t *testing.T) {
+	t.Parallel()
 	rig := newRoleRig(t)
 	const role, holder = "reviewer", "ses_gone"
 	rig.claimRegisteredAt(t, role, holder, session.GoneHorizon+time.Minute)
@@ -530,6 +543,7 @@ func TestARoleRouteWhoseHolderIsGoneKeepsTheClaimAndIsPublished(t *testing.T) {
 // unresponsive, not gone: the event stays unpublished, backed off with its attempt and the
 // reason, to be retried when the session answers again, and the claim stands.
 func TestARoleRouteToAnUnresponsiveHolderStaysPending(t *testing.T) {
+	t.Parallel()
 	rig := newRoleRig(t)
 	const role, holder = "reviewer", "ses_stale"
 	rig.claimRegisteredAt(t, role, holder, session.LiveWindow+time.Minute)
@@ -651,6 +665,7 @@ func TestARoleRouteWhoseHolderSessionKeyExpiredKeepsTheClaimAndStaysPending(t *t
 // event as one that notifies nobody (events.Broker.Notify), which leaves it no route at all, so the
 // row is marked to notify here: the echo is what keeps such a row from reaching its own actor.
 func TestARoleRouteWhoseHolderIsTheActorIsPublishedWithoutAForward(t *testing.T) {
+	t.Parallel()
 	rig := newRoleRig(t)
 	const role, holder = "reviewer", "ses_actor"
 	rig.claim(t, role, holder, session.SessionEntry{SelfSubscribed: true})
@@ -677,6 +692,9 @@ func TestARoleRouteWhoseHolderIsTheActorIsPublishedWithoutAForward(t *testing.T)
 // One holder's forward that Dispatch's grant denies fails only its own event: in a batch of 50
 // role-routed events on distinct issues, each with a live self-subscribed holder that answers, the
 // 49 others are published with no attempt counted, and the denied one is backed off.
+//
+// Serial: it swaps process-wide state, the nkey seed its granted client reads from the
+// environment (t.Setenv, docs/testing.md).
 func TestOneRefusedSubjectFailsOnlyItsOwnEvent(t *testing.T) {
 	const events, denied = 50, 17
 	holderOf := func(index int) string { return fmt.Sprintf("ses_holder_%02d", index) }
@@ -743,6 +761,7 @@ func TestOneRefusedSubjectFailsOnlyItsOwnEvent(t *testing.T) {
 // (forwardOf), and the event is backed off as TestARoleRouteToAnUnresponsiveHolderStaysPending
 // holds.
 func TestAForwardHeldByItsHoldersResolutionIsAWaitNotAFailure(t *testing.T) {
+	t.Parallel()
 	rig := newRoleRig(t)
 	const role, holder = "reviewer", "ses_stale_counted"
 	rig.claimRegisteredAt(t, role, holder, session.LiveWindow+time.Minute)
@@ -779,7 +798,11 @@ func TestAForwardHeldByItsHoldersResolutionIsAWaitNotAFailure(t *testing.T) {
 // flush confirmed the publish, so what is missing is the holder's answer and not the bus. The
 // holder here is registered and self-subscribed, as a session plugin registers it, with nothing
 // subscribed to its agent subject, which is the shape a holder that stopped reading has.
+//
+// Real time, at roleReceiptTimeout: the forward NATS took and the answer that never comes cross a
+// live NATS server over TCP, which no synctest bubble can hold.
 func TestAForwardNoHolderAnsweredIsCountedUnanswered(t *testing.T) {
+	t.Parallel()
 	rig := newRoleRig(t)
 	const role, holder = "reviewer", "ses_silent"
 	rig.claim(t, role, holder, session.SessionEntry{SelfSubscribed: true})

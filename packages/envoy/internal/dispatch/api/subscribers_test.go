@@ -20,6 +20,7 @@ import (
 )
 
 func TestMatchingTopics(t *testing.T) {
+	t.Parallel()
 	base := "notifications.dispatch.issue.T-1"
 	cases := []struct {
 		name   string
@@ -222,6 +223,7 @@ func createTestIssue(t *testing.T, handler http.Handler, project, title string) 
 }
 
 func TestListIssueSubscribersFiltersEnrichesAndSortsByLastSeen(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	key := createTestIssue(t, newSubscribersHandler(t, database, ""), "TEST", "Issue")
 	envoyURL, _ := newFakeListener(t, map[string][]string{
@@ -258,6 +260,7 @@ func TestListIssueSubscribersFiltersEnrichesAndSortsByLastSeen(t *testing.T) {
 // the listener sends none. A live subscriber keeps its session's own last_seen. The list is read
 // straight from the listener, so this asks the handler body with no database behind it.
 func TestSubscribersShowADeadSessionsLastHeartbeat(t *testing.T) {
+	t.Parallel()
 	const topic = "notifications.dispatch.issue.TEST-1.>"
 	envoyURL, listener := newFakeListener(t, map[string][]string{
 		"live":       {topic},
@@ -296,6 +299,7 @@ func TestSubscribersShowADeadSessionsLastHeartbeat(t *testing.T) {
 // The subscriber list needs the person scope: the deployment's shared token holds none and is
 // turned away, and a person's own token reads the list their browser reads.
 func TestListIssueSubscribersRejectsACredentialWithoutThePersonScope(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	key := createTestIssue(t, newSubscribersHandler(t, database, ""), "TEST", "Issue")
 	envoyURL, _ := newFakeListener(t, nil, nil)
@@ -317,6 +321,7 @@ func TestListIssueSubscribersRejectsACredentialWithoutThePersonScope(t *testing.
 }
 
 func TestListIssueSubscribersReportsEnvoyUnavailable(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	handler := newSubscribersHandler(t, database, "")
 	key := createTestIssue(t, handler, "TEST", "Issue")
@@ -331,6 +336,7 @@ func TestListIssueSubscribersReportsEnvoyUnavailable(t *testing.T) {
 // refused as refilling answers 503 ENVOY_REFILLING with the listener's Retry-After, never a
 // subscriber list missing rows; any other refusal is still ENVOY_UNAVAILABLE.
 func TestListSubscribersReportsARefillingListenerAsRefilling(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	bootstrap := newSubscribersHandler(t, database, "")
 	key := createTestIssue(t, bootstrap, "TEST", "Issue")
@@ -369,6 +375,7 @@ func TestListSubscribersReportsARefillingListenerAsRefilling(t *testing.T) {
 }
 
 func TestListArtifactSubscribersRejectsIssueLinkedArtifacts(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	bootstrap := newSubscribersHandler(t, database, "")
 	key := createTestIssue(t, bootstrap, "TEST", "Issue")
@@ -393,6 +400,7 @@ func TestListArtifactSubscribersRejectsIssueLinkedArtifacts(t *testing.T) {
 }
 
 func TestListArtifactSubscribersForUnlinkedDocument(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	bootstrap := newSubscribersHandler(t, database, "")
 	if response := dispatchRequest(t, bootstrap, http.MethodPost, "/api/v1/projects", map[string]string{
@@ -417,6 +425,7 @@ func TestListArtifactSubscribersForUnlinkedDocument(t *testing.T) {
 }
 
 func TestUnsubscribeIssueSessionRemovesTopicsAppendsEventAndNotifiesTheSession(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	bootstrap := newSubscribersHandler(t, database, "")
 	key := createTestIssue(t, bootstrap, "TEST", "Issue")
@@ -462,6 +471,7 @@ func TestUnsubscribeIssueSessionRemovesTopicsAppendsEventAndNotifiesTheSession(t
 }
 
 func TestUnsubscribeRefusesABroadWildcardSubscriptionAndLeavesItIntact(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	bootstrap := newSubscribersHandler(t, database, "")
 	key1 := createTestIssue(t, bootstrap, "TEST", "Issue one")
@@ -503,6 +513,7 @@ func TestUnsubscribeRefusesABroadWildcardSubscriptionAndLeavesItIntact(t *testin
 }
 
 func TestUnsubscribeCommitsItsAuditEventBeforeAListenerFailureAndRetriesIdempotently(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	bootstrap := newSubscribersHandler(t, database, "")
 	key := createTestIssue(t, bootstrap, "TEST", "Issue")
@@ -538,6 +549,7 @@ func TestUnsubscribeCommitsItsAuditEventBeforeAListenerFailureAndRetriesIdempote
 }
 
 func TestUnsubscribeAfterResubscriptionAppendsAnotherCompletion(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	bootstrap := newSubscribersHandler(t, database, "")
 	key := createTestIssue(t, bootstrap, "TEST", "Issue")
@@ -582,6 +594,7 @@ func TestUnsubscribeAfterResubscriptionAppendsAnotherCompletion(t *testing.T) {
 }
 
 func TestUnsubscribeIssueSessionReportsNotFoundWhenNotSubscribed(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	bootstrap := newSubscribersHandler(t, database, "")
 	key := createTestIssue(t, bootstrap, "TEST", "Issue")
@@ -597,6 +610,7 @@ func TestUnsubscribeIssueSessionReportsNotFoundWhenNotSubscribed(t *testing.T) {
 }
 
 func TestUnsubscribeIssueSessionReportsNotFoundForAnUnknownSession(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	bootstrap := newSubscribersHandler(t, database, "")
 	key := createTestIssue(t, bootstrap, "TEST", "Issue")
@@ -612,6 +626,7 @@ func TestUnsubscribeIssueSessionReportsNotFoundForAnUnknownSession(t *testing.T)
 // Unsubscribing a session needs the person scope, which the deployment's shared token, holding
 // none, does not.
 func TestUnsubscribeIssueSessionRejectsACredentialWithoutThePersonScope(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	bootstrap := newSubscribersHandler(t, database, "")
 	key := createTestIssue(t, bootstrap, "TEST", "Issue")
@@ -629,6 +644,7 @@ func TestUnsubscribeIssueSessionRejectsACredentialWithoutThePersonScope(t *testi
 }
 
 func TestUnsubscribeArtifactSessionRejectsIssueLinkedArtifacts(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	bootstrap := newSubscribersHandler(t, database, "")
 	key := createTestIssue(t, bootstrap, "TEST", "Issue")

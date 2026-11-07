@@ -169,6 +169,7 @@ func (r *Reconcile) backfillDeploys(t *testing.T, now time.Time) {
 // pass lists hour B again in full, both pages, before hour C. A third pass, the step finished,
 // lists nothing. The backfill's failure stays out of the reconcile's health state.
 func TestBackfillRunsAdvancesOneFinishedHourAtATime(t *testing.T) {
+	t.Parallel()
 	pool, ctx := deliveryTestPool(t)
 	seedDeliverySettings(t, ctx, pool)
 	hourA := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
@@ -234,6 +235,7 @@ func TestBackfillRunsAdvancesOneFinishedHourAtATime(t *testing.T) {
 // while every regular step succeeds records the reconcile as healthy. The pass runs both deploy
 // backfills, the branch-and-event one and the created_at one, each recording its progress row.
 func TestBackfillRunsKeepsItsFailuresOutOfTheHealthState(t *testing.T) {
+	t.Parallel()
 	pool, ctx := deliveryTestPool(t)
 	seedDeliverySettings(t, ctx, pool)
 	github := newFakeGitHub(t)
@@ -285,6 +287,7 @@ func TestBackfillRunsKeepsItsFailuresOutOfTheHealthState(t *testing.T) {
 // TestBackfillRunsStartsFromTheBackfillWindow: with no progress row the step begins at
 // now - BackfillWindow, records began_at = now, and walks backfillWindowsPerPass hours.
 func TestBackfillRunsStartsFromTheBackfillWindow(t *testing.T) {
+	t.Parallel()
 	pool, ctx := deliveryTestPool(t)
 	seedDeliverySettings(t, ctx, pool)
 	fake, github := newBackfillFake(t, nil, 10)
@@ -304,6 +307,7 @@ func TestBackfillRunsStartsFromTheBackfillWindow(t *testing.T) {
 
 // TestBackfillRunsWalksAtMostTwentyFourWindowsAPass: thirty hours of runs take two passes.
 func TestBackfillRunsWalksAtMostTwentyFourWindowsAPass(t *testing.T) {
+	t.Parallel()
 	pool, ctx := deliveryTestPool(t)
 	seedDeliverySettings(t, ctx, pool)
 	start := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
@@ -331,6 +335,7 @@ func TestBackfillRunsWalksAtMostTwentyFourWindowsAPass(t *testing.T) {
 // TestBackfillProgressNeverMovesBackwards: a second task overlapping in a rolling deploy cannot
 // move the backfill's progress back.
 func TestBackfillProgressNeverMovesBackwards(t *testing.T) {
+	t.Parallel()
 	pool, ctx := deliveryTestPool(t)
 	step, scope := backfillStep(DeliveryRunKindDeploy), runsProgressScope("acme/widgets", backfillWorkflow)
 	at := time.Date(2026, 9, 10, 0, 0, 0, 0, time.UTC)
@@ -355,6 +360,7 @@ func TestBackfillProgressNeverMovesBackwards(t *testing.T) {
 // scope leaves it standing. Twenty rounds, each released from one barrier, so the two inserts meet
 // on the step's key.
 func TestStartBackfillProgressRacesToOneRow(t *testing.T) {
+	t.Parallel()
 	pool, ctx := deliveryTestPool(t)
 	step, scope := backfillStep(DeliveryRunKindDeploy), runsProgressScope("acme/widgets", backfillWorkflow)
 	base := time.Date(2026, 9, 10, 0, 0, 0, 0, time.UTC)
@@ -434,6 +440,7 @@ func TestStartBackfillProgressRacesToOneRow(t *testing.T) {
 // row mid-pass, so the pass's next advance updates nothing and inserts nothing, and the next pass
 // starts the backfill afresh with a new began_at.
 func TestBackfillProgressIsNotRecreatedAfterASettingsChange(t *testing.T) {
+	t.Parallel()
 	pool, ctx := deliveryTestPool(t)
 	seedDeliverySettings(t, ctx, pool)
 	step, scope := backfillStep(DeliveryRunKindDeploy), runsProgressScope("acme/widgets", backfillWorkflow)
@@ -466,6 +473,7 @@ func TestBackfillProgressIsNotRecreatedAfterASettingsChange(t *testing.T) {
 // TestBackfillRunsListsJobsOnlyForRunsWithoutStoredJobs: of hour A's three runs two already have
 // job rows, so the backfill lists jobs for the third alone, and the two keep their rows.
 func TestBackfillRunsListsJobsOnlyForRunsWithoutStoredJobs(t *testing.T) {
+	t.Parallel()
 	pool, ctx := deliveryTestPool(t)
 	seedDeliverySettings(t, ctx, pool)
 	hourA := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
@@ -506,6 +514,7 @@ func TestBackfillRunsListsJobsOnlyForRunsWithoutStoredJobs(t *testing.T) {
 // TestBackfillRunsLeavesTheRegularStepAlone: with the backfill finished, the regular runs/deploy
 // step lists from its own progress minus the overlap and lists every concluded run's jobs.
 func TestBackfillRunsLeavesTheRegularStepAlone(t *testing.T) {
+	t.Parallel()
 	pool, ctx := deliveryTestPool(t)
 	seedDeliverySettings(t, ctx, pool)
 	now := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
@@ -558,6 +567,7 @@ func TestBackfillRunsLeavesTheRegularStepAlone(t *testing.T) {
 // step, and stores GitHub's created_at on a row that had none: here a re-run's, whose started_at
 // is the re-run's start, 40 minutes after its creation.
 func TestCreatedAtBackfillFillsDeployRunsAfterTheRunsBackfillFinished(t *testing.T) {
+	t.Parallel()
 	pool, ctx := deliveryTestPool(t)
 	seedDeliverySettings(t, ctx, pool)
 	hourA := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)

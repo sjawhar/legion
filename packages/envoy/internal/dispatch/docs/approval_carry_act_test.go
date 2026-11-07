@@ -38,8 +38,8 @@ const actAnswerSpec = "Context\n\n" +
 // (approval_carry_approved_test.go), and not the 20 ms a test that only seeds can afford: a
 // settlement firing while one of these tests holds its joined transaction takes the document's
 // rows in the other order and the two deadlock, which `-race` is slow enough to hit. The seeding
-// below schedules one settlement itself and waits up to three seconds for it, so a second costs
-// the seed nothing.
+// below settles the document at once (SettleNow) rather than waiting that second out, so the
+// window costs the seed nothing.
 func seededActDocument(t *testing.T) (*store.Store, *Service, string) {
 	t.Helper()
 	database := storetest.Open(t)
@@ -47,8 +47,12 @@ func seededActDocument(t *testing.T) (*store.Store, *Service, string) {
 	service := New(Deps{Store: database, Events: events.NewBroker(), Settle: time.Second})
 	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
 	seedServiceText(t, service, artifactID, actAnswerSpec)
-	service.ScheduleSettlement(artifactID)
-	waitFor(t, 3*time.Second, "settlement to index both blocks", func() bool {
+	service.SettleNow(artifactID)
+	// 30 s rather than 3: this waits for an event - the settlement indexing both blocks - and on
+	// CI's four cores, with every package of the module running beside it, three seconds was not
+	// enough once (run 42039747360). Waiting longer for an event costs a healthy run nothing:
+	// the wait returns in milliseconds on an idle server.
+	waitFor(t, 30*time.Second, "settlement to index both blocks", func() bool {
 		var rows int
 		if err := database.Pool.QueryRow(context.Background(), `
 			select count(*) from asks where block_artifact_id = $1 and block_id = any($2::text[])
@@ -108,6 +112,7 @@ func nameVersion(t *testing.T, service *Service, artifactID string) {
 // answer beside an agent's narrow one carries nothing either: the carry counts every block that
 // changed since the approval, and one of them was decided by a credential that may not approve.
 func TestAnActWithoutApproveCarriesNoApproval(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name     string
 		scopes   []string
@@ -118,6 +123,7 @@ func TestAnActWithoutApproveCarriesNoApproval(t *testing.T) {
 		{name: "an act holding approve", scopes: []string{model.ScopePerson, model.ScopeApprove}, reviews: 2, approved: 1},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			database, service, artifactID := seededActDocument(t)
 			approveStoredVersion(t, database, artifactID, 1, "alice")
 			act := &model.ActorAct{Session: "session-agent", TokenID: "token-1", TokenName: "architect", Scopes: test.scopes}
@@ -134,6 +140,7 @@ func TestAnActWithoutApproveCarriesNoApproval(t *testing.T) {
 	}
 
 	t.Run("a narrow agent's answer beside the person's own", func(t *testing.T) {
+		t.Parallel()
 		database, service, artifactID := seededActDocument(t)
 		approveStoredVersion(t, database, artifactID, 1, "alice")
 		narrow := &model.ActorAct{Session: "session-agent", TokenID: "token-1", TokenName: "planner", Scopes: []string{model.ScopePerson}}
@@ -154,6 +161,7 @@ func TestAnActWithoutApproveCarriesNoApproval(t *testing.T) {
 // token, so a token narrowed, revoked or deleted after the answer changes nothing: the approval
 // its answer carried still carries at every version written after it.
 func TestTheActsScopesAreTheSnapshotTakenWhenTheAnswerWasMade(t *testing.T) {
+	t.Parallel()
 	database, service, artifactID := seededActDocument(t)
 	approveStoredVersion(t, database, artifactID, 1, "alice")
 	// The token row as it stands now: narrowed to the person scope and revoked. The act below
@@ -191,6 +199,7 @@ func TestTheActsScopesAreTheSnapshotTakenWhenTheAnswerWasMade(t *testing.T) {
 // person's own: the approval carries. The answer is built as the stored JSON a release wrote, not
 // as a Go value with a nil field, so what is proved is the decode and not the literal.
 func TestAnAnswerStoredBeforeActsExistedStillCarriesTheApproval(t *testing.T) {
+	t.Parallel()
 	database, service, artifactID := seededActDocument(t)
 	approveStoredVersion(t, database, artifactID, 1, "alice")
 

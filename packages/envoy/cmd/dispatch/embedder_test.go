@@ -75,6 +75,7 @@ func azureEmbedderFor(t *testing.T, overrides map[string]string) embed.Embedder 
 // Meaning search's place is checked whole at boot: each shape newEmbedder could not build, or a
 // setting it would silently ignore, refuses, naming the setting and never the key.
 func TestResolveBootConfigRefusesEveryEmbedderShapeItCannotUse(t *testing.T) {
+	t.Parallel()
 	missing := filepath.Join(t.TempDir(), "missing")
 	blank := writeFile(t, "blank-key", " \n")
 	endpoint := func(value string) map[string]string {
@@ -178,6 +179,9 @@ func TestResolveBootConfigRefusesEveryEmbedderShapeItCannotUse(t *testing.T) {
 
 // A deployment that sets nothing new boots Bedrock exactly as before: with no AWS region, meaning
 // search is off with the warning it always logged, never a refusal; with one, the Bedrock client.
+// Serial: it sets process-wide variables, the AWS_* ones the Bedrock client reads its region
+// from, and swaps process-wide state, the default slog logger it reads the warning out of
+// (capturedLog); t.Setenv panics under t.Parallel.
 func TestNewEmbedderBuildsBedrockWhenNothingNewIsSet(t *testing.T) {
 	boot := resolveWith(t, nil)
 	if boot.Embedder != (embedderConfig{Place: embed.PlaceBedrock}) {
@@ -215,6 +219,8 @@ func TestNewEmbedderBuildsBedrockWhenNothingNewIsSet(t *testing.T) {
 
 // Either Azure credential builds the Azure client, named by the endpoint's host and the
 // deployment, and logs one line naming the place and the identity, never the key.
+// Serial: it swaps process-wide state, the default slog logger it reads the one boot line out
+// of (capturedLog), which the whole process shares.
 func TestNewEmbedderBuildsAzureFromEitherCredential(t *testing.T) {
 	for credential, env := range map[string]map[string]string{
 		"key":     azureEmbedEnvironment(nil),
@@ -247,6 +253,8 @@ func TestNewEmbedderBuildsAzureFromEitherCredential(t *testing.T) {
 // The dev embedder embeds by hashing words, so a deployment that set it would answer meaning
 // search with vectors that mean nothing and never know: it is read only by a local harness,
 // which is what DISPATCH_DEV_SIGNIN=1 marks, and it reads no setting of a model service.
+// Serial: it swaps process-wide state, the default slog logger it reads the dev embedder's
+// warning out of (capturedLog), which the whole process shares.
 func TestTheDevEmbedderNeedsDevSignIn(t *testing.T) {
 	refusedWith(t, map[string]string{"DISPATCH_DEV_EMBEDDER": "1"},
 		"DISPATCH_DEV_EMBEDDER is read only with DISPATCH_DEV_SIGNIN=1")

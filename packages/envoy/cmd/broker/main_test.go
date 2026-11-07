@@ -28,6 +28,11 @@ import (
 	"github.com/sjawhar/envoy/internal/cmdtest"
 )
 
+// TestMain hands the package's tests to storetest, which clones each of them a database off the
+// one migrated template and drops each with its test. The template is the migration set's and
+// stays for the next test process.
+func TestMain(m *testing.M) { os.Exit(storetest.Main(m)) }
+
 // testSecretsPrefix and testSecretsKMSKeyARN are the name prefix every agent secret sits under
 // and the key every one of them is encrypted with, as productionEnv configures every broker
 // these tests start (BROKER_SECRETS_PREFIX, BROKER_SECRETS_KMS_KEY_ARN). A fake secrets file a
@@ -79,6 +84,7 @@ func productionEnv(t *testing.T) []string {
 }
 
 func TestPortZeroPublicURLRefusedInProduction(t *testing.T) {
+	t.Parallel()
 	err := refusePortZeroPublicURLInProduction("http://127.0.0.1:0", "")
 	if err == nil {
 		t.Fatal("BROKER_PUBLIC_URL port 0 with no BROKER_FAKE_SECRETS_FILE: want an error, got nil")
@@ -90,12 +96,14 @@ func TestPortZeroPublicURLRefusedInProduction(t *testing.T) {
 }
 
 func TestPortZeroPublicURLIsFineForALocalRun(t *testing.T) {
+	t.Parallel()
 	if err := refusePortZeroPublicURLInProduction("http://127.0.0.1:0", "/dev/fake-secrets.json"); err != nil {
 		t.Fatalf("BROKER_PUBLIC_URL port 0 with BROKER_FAKE_SECRETS_FILE set: want nil, got %v", err)
 	}
 }
 
 func TestNonZeroPortPublicURLIsFineInProduction(t *testing.T) {
+	t.Parallel()
 	if err := refusePortZeroPublicURLInProduction("https://broker.invalid", ""); err != nil {
 		t.Fatalf("a real BROKER_PUBLIC_URL: want nil, got %v", err)
 	}
@@ -106,6 +114,7 @@ func TestNonZeroPortPublicURLIsFineInProduction(t *testing.T) {
 // config holds the config's ServicesByAccount, keyed by account so one service may have several,
 // without which no pod is ever a service's.
 func TestTheRequestMachineCarriesTheServicesByAccount(t *testing.T) {
+	t.Parallel()
 	secretFile := signInClientSecretFile(t)
 	cfg, err := config.Load(func(name string) string {
 		return map[string]string{
@@ -155,6 +164,7 @@ func TestTheRequestMachineCarriesTheServicesByAccount(t *testing.T) {
 // Listen would still refuse eventually, but only after already printing that line and binding a
 // real socket.
 func TestMainRefusesPortZeroPublicURLInProduction(t *testing.T) {
+	t.Parallel()
 	cmd := exec.Command(buildBroker(t))
 	cmd.Env = append(append(os.Environ(), productionEnv(t)...),
 		"BROKER_DATABASE_URL=postgres://nonexistent-host-this-test-must-never-reach/db",
@@ -196,16 +206,11 @@ func noAWSEnv(t *testing.T) []string {
 	}
 }
 
-// buildBroker builds cmd/broker into a temporary directory and returns its path.
+// buildBroker builds cmd/broker and returns its path. cmdtest.Build builds it once per test
+// process and keeps it, so the eleven tests that drive the binary share one compile.
 func buildBroker(t *testing.T) string {
 	t.Helper()
-	binPath := filepath.Join(t.TempDir(), "broker")
-	build := exec.Command("go", "build", "-o", binPath, ".")
-	build.Env = append(os.Environ(), "GOTOOLCHAIN=go1.27.3")
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("go build ./cmd/broker: %v\n%s", err, out)
-	}
-	return binPath
+	return cmdtest.Build(t, "broker")
 }
 
 // runRefusedBroker runs the broker binary with env and returns its output, failing t unless it
@@ -230,6 +235,7 @@ func runRefusedBroker(t *testing.T, binPath string, env ...string) string {
 // which encrypts and verifies nothing: it refuses at startup naming the host, before it reaches
 // for AWS or the database.
 func TestMainRefusesAnIAMURLThatDoesNotVerifyItsHost(t *testing.T) {
+	t.Parallel()
 	out := runRefusedBroker(t, buildBroker(t),
 		"BROKER_DATABASE_URL=postgres://agent_secrets_broker@"+rdsTestHost+":5432/agent_secrets?sslmode=require",
 		"BROKER_PUBLIC_URL=https://secrets.internal.example",
@@ -253,6 +259,7 @@ func signInLine(method string) *regexp.Regexp {
 // would fail on the unresolvable host instead. Before the refusal it logs that it signs in by
 // RDS IAM token, and never by password.
 func TestMainMintsTokensBeforeOpeningTheDatabase(t *testing.T) {
+	t.Parallel()
 	out := runRefusedBroker(t, buildBroker(t),
 		"BROKER_DATABASE_URL=postgres://agent_secrets_broker@"+rdsTestHost+":5432/agent_secrets?sslmode=verify-full&sslrootcert=../../docker/rds-global-bundle.pem",
 		"BROKER_PUBLIC_URL=https://secrets.internal.example",
@@ -271,6 +278,7 @@ func TestMainMintsTokensBeforeOpeningTheDatabase(t *testing.T) {
 // boots. A broker that took it for IAM would refuse for the missing AWS region. Its boot log says
 // it signs in by password, the one a passfile supplies from outside the URL, and never by token.
 func TestMainSignsInToALocalPasswordlessURLAsGiven(t *testing.T) {
+	t.Parallel()
 	databaseURL := storetest.URL(t)
 	parsed, err := url.Parse(databaseURL)
 	if err != nil {
@@ -554,6 +562,7 @@ var addrLogPattern = regexp.MustCompile(`addr=(\S+)`)
 // registers, and asserts the binary serves it: the policy loader main builds carries the
 // configured services.
 func TestMainLogsRealBoundAddress(t *testing.T) {
+	t.Parallel()
 	databaseURL := storetest.URL(t)
 
 	fakeSecretsFile := filepath.Join(t.TempDir(), "fake-secrets.json")
@@ -613,6 +622,7 @@ func TestMainLogsRealBoundAddress(t *testing.T) {
 // GCP store selected: the file's kms_key_id names the agent-secrets key as that store configures
 // it (BROKER_SECRETS_KMS_KEY_NAME), and its names sit under the GCP prefix.
 func TestFakeSecretsFileServesUnderTheGCPStore(t *testing.T) {
+	t.Parallel()
 	const (
 		prefix = "projects/000000000000/secrets/agent-secrets-"
 		key    = "projects/example-project/locations/global/keyRings/agent-secrets/cryptoKeys/agent-secrets"

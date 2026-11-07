@@ -7,6 +7,7 @@ import (
 )
 
 func TestApprovalAskSummaryRoundTripsTheSharedQuestion(t *testing.T) {
+	t.Parallel()
 	documents := []model.AskApprovalDocument{{ArtifactID: "artifact-1", Name: "spec.md", Version: 2, RequestedVersion: 2}}
 	ask := model.Ask{
 		ID:       "approval-1",

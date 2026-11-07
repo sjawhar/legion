@@ -13,6 +13,7 @@ import (
 // reads, in quotes and footnote definitions included, is the list-spacing-in-containers and
 // footnote-placement corpus documents', which the fixtures compare with the engine's reading.
 func TestBrowserListSpacingRefusesWhatItCannotRead(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name string
 		// refused holds a shape only the browser editor and this parser read alike; readable, when
@@ -296,6 +297,7 @@ func TestCorpusErrorsOfItemSpreadReadOtherwiseAreRefused(t *testing.T) {
 // reason: a reader that lifted it for another reason would still pass. The spread branch stands for
 // the reader that reads one of them instead.
 func TestAListInADefinitionInATypedBlockIsReadSpreadAsTheBrowserReadsItOrRefused(t *testing.T) {
+	t.Parallel()
 	for _, markdown := range []string{
 		":::callout{}\n[^f]: - a\n\n    - b\n:::\n\nText[^f].\n",
 		":::callout{}\n[^f]:\n    - x\n      \n      note\n:::\n\nText[^f].\n",

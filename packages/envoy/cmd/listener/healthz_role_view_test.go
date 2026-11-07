@@ -9,7 +9,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
@@ -34,7 +33,7 @@ func healthzRoleViewRig(t *testing.T, consumer string) (func() (int, map[string]
 		t.Fatalf("open session registry: %v", err)
 	}
 	t.Cleanup(sessions.StopWatch)
-	readyCtx, readyCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	readyCtx, readyCancel := context.WithTimeout(context.Background(), listenerWait)
 	defer readyCancel()
 	if err := registry.WaitForCacheReady(readyCtx); err != nil {
 		t.Fatalf("wait for the registry's caches: %v", err)
@@ -80,6 +79,7 @@ func breakRoleClaimView(t *testing.T, registry *store.Registry) {
 // repairs itself. The answer keeps the fields the healthy one carries, so a reader of the session
 // counts or the durable's backlog loses none of them while the view fills.
 func TestHealthzReportsARoleClaimViewThatCompletesNoScanDegraded(t *testing.T) {
+	t.Parallel()
 	get, registry, _ := healthzRoleViewRig(t, "listener-healthz-role-view")
 	breakRoleClaimView(t, registry)
 
@@ -103,6 +103,7 @@ func TestHealthzReportsARoleClaimViewThatCompletesNoScanDegraded(t *testing.T) {
 // so reporting that fault as the view's degraded 200 would leave a listener that receives nothing
 // in service. The view is therefore reported last, after every check that answers 503.
 func TestHealthzStillReportsALostDurableWhileTheRoleClaimViewIsIncomplete(t *testing.T) {
+	t.Parallel()
 	const consumer = "listener-healthz-role-view-durable"
 	get, registry, client := healthzRoleViewRig(t, consumer)
 	breakRoleClaimView(t, registry)

@@ -54,6 +54,7 @@ import (
 // broker's log line is read last, so that against a broker without the fix the test fails on the
 // refusal the pods met rather than on a missing line.
 func TestABrokerOutageLongerThanALease(t *testing.T) {
+	t.Parallel()
 	databaseURL := storetest.URL(t)
 	issuer := oidctest.New(t)
 	podKey := issuer.PublishKey(t, "signing-key")

@@ -10,6 +10,15 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
+// eventWait is how long a test here waits FOR AN EVENT on the real clock: a pass running, a lock
+// being taken, a stopped gate returning. It is where the test gives up, never a measurement - the
+// test still fails when the event never comes, and on an idle machine the wait returns in
+// milliseconds - so it allows for a loaded runner: every package of this module now runs at once,
+// four CI cores to some 3,800 parallel tests, under the race detector besides
+// (dispatch://INFRA-1075). A test whose SUBJECT is a span - a tick's interval, a lease's period -
+// keeps its own number, and the tests of those run on a fake clock (testing/synctest).
+const eventWait = 30 * time.Second
+
 // fixJitter makes every jittered wait draw what draw answers for its bound, until the test ends.
 func fixJitter(t *testing.T, draw func(n time.Duration) time.Duration) {
 	t.Helper()

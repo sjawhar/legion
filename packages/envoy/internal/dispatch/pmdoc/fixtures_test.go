@@ -98,6 +98,7 @@ func loadSpliceFixtures(t *testing.T) []spliceFixture {
 }
 
 func TestFixturesAreWithinSchema(t *testing.T) {
+	t.Parallel()
 	fixtures := loadFixtures(t)
 	wantNames := []string{
 		"adjacent-lists", "ask-answer-holding-a-backslash-escape", "ask-answered", "ask-opening-with-a-list", "ask",
@@ -189,6 +190,7 @@ func TestFixturesAreWithinSchema(t *testing.T) {
 }
 
 func TestSpliceFixturesHaveRequiredCoverage(t *testing.T) {
+	t.Parallel()
 	fixtures := loadSpliceFixtures(t)
 	wantNames := []string{
 		"paragraph-inline", "paragraph-multiblock", "paragraph-list", "list-item-code",

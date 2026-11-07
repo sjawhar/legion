@@ -17,7 +17,7 @@ func lockOrderServiceFor(t *testing.T, database *store.Store) *Service {
 	t.Helper()
 	service := New(Deps{Store: database, Settle: time.Hour})
 	t.Cleanup(func() {
-		stop, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		stop, cancel := context.WithTimeout(context.Background(), roomWait(t))
 		defer cancel()
 		_ = service.Shutdown(stop)
 	})
@@ -35,7 +35,7 @@ func lockOrderService(t *testing.T) (*store.Store, *Service, string) {
 // the waiting operation's result if it returns first.
 func waitForLockWait(t *testing.T, ctx context.Context, database *store.Store, like string, returned <-chan error) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(roomWait(t))
 	for time.Now().Before(deadline) {
 		select {
 		case err := <-returned:
@@ -62,6 +62,7 @@ func lockWaits(t *testing.T, ctx context.Context, database *store.Store, like st
 }
 
 func TestConditionalEditDoesNotInvertTheRoomLockOrder(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 	database, service, id := lockOrderService(t)
@@ -118,7 +119,7 @@ func TestConditionalEditDoesNotInvertTheRoomLockOrder(t *testing.T) {
 		}
 	case err := <-secondDone:
 		t.Fatalf("second edit returned before first transaction released its lock: %v", err)
-	case <-time.After(15 * time.Second):
+	case <-time.After(roomWait(t)):
 		t.Fatal("lock-order inversion: a conditional edit holds the document mutex while waiting for the advisory lock another writer holds")
 	}
 
@@ -134,7 +135,7 @@ func TestConditionalEditDoesNotInvertTheRoomLockOrder(t *testing.T) {
 		if err != nil {
 			t.Fatalf("second edit once the first transaction ended: %v", err)
 		}
-	case <-time.After(15 * time.Second):
+	case <-time.After(roomWait(t)):
 		t.Fatal("second edit did not finish once the first transaction ended")
 	}
 }
@@ -160,8 +161,9 @@ func lockOrderDocument(t *testing.T) (*store.Store, *Service, string) {
 	return database, lockOrderServiceFor(t, database), id
 }
 
-// awaitUnblocked runs op and fails if it has not returned within the window a blocked writer
-// would exceed. subject names the writer in the lock-order-inversion message.
+// awaitUnblocked runs op and fails if it has not returned within roomWait. A writer the owner
+// lock blocks never returns at all - the lock is held for the test's whole run - so the wait is
+// generous rather than tight; subject names the writer in the lock-order-inversion message.
 func awaitUnblocked(t *testing.T, subject string, op func() error) {
 	t.Helper()
 	done := make(chan error, 1)
@@ -171,7 +173,7 @@ func awaitUnblocked(t *testing.T, subject string, op func() error) {
 		if err != nil {
 			t.Fatalf("run %s while the owner row is held: %v", subject, err)
 		}
-	case <-time.After(15 * time.Second):
+	case <-time.After(roomWait(t)):
 		t.Fatalf("lock-order inversion: %s is blocked by the document's owner lock", subject)
 	}
 }
@@ -186,6 +188,7 @@ func awaitUnblocked(t *testing.T, subject string, op func() error) {
 // serialises the writers that take it, including the event sequence allocation, and does not
 // block a foreign key.
 func TestDurableAppendIsNotBlockedByTheOwnerLock(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 	database, service, id := lockOrderDocument(t)
@@ -214,6 +217,7 @@ func TestDurableAppendIsNotBlockedByTheOwnerLock(t *testing.T) {
 }
 
 func TestSnapshotIsNotBlockedByTheOwnerLock(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 	database, service, id := lockOrderDocument(t)
@@ -239,6 +243,7 @@ func TestSnapshotIsNotBlockedByTheOwnerLock(t *testing.T) {
 // loser is failRoom - it evicts the room and drops the in-flight update rather than returning
 // an error to anyone.
 func TestLiveUpdateIsNotBlockedByTheOwnerLock(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 	database, service, id := lockOrderDocument(t)

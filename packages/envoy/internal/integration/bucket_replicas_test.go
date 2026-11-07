@@ -21,6 +21,7 @@ import (
 // listener's spent-proof bucket (bus.DPoPProofBucket), has its opener in cmd/listener and is
 // covered by that package's own tests.
 func TestEveryBucketIsCreatedAtThreeCopiesOnAThreeCopyDeployment(t *testing.T) {
+	t.Parallel()
 	const replicas = 3
 	cluster := testnats.StartCluster(t, 3)
 	conn := testnats.Connect(t, cluster.URL())

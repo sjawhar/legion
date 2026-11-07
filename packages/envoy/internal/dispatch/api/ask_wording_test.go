@@ -19,6 +19,7 @@ import (
 // back as the one every unreadable ask block gets. They are bounded together because an
 // ask.answered event carries them all at once.
 func TestAnAsksWordingIsBoundedWhereverItIsWritten(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "ASKB", "Ask wording bounds", "A spec")
 
@@ -72,6 +73,7 @@ func TestAnAsksWordingIsBoundedWhereverItIsWritten(t *testing.T) {
 // review's reason is held before the open approval request is looked for, so the refusal is the
 // same whether one is open or not, and nothing is written either way.
 func TestAnAnswerAResolutionAndAReviewAreBoundedByTheirField(t *testing.T) {
+	t.Parallel()
 	var documentService *docs.Service
 	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})

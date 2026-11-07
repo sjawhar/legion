@@ -3,6 +3,7 @@ package delivery
 import "testing"
 
 func TestSessionTitleFallsBackToID(t *testing.T) {
+	t.Parallel()
 	titles := map[string]string{"titled": "Titled session"}
 	if got := SessionTitle(titles, "titled"); got != "Titled session" {
 		t.Errorf("SessionTitle(titled) = %q, want the stored title", got)
@@ -13,6 +14,7 @@ func TestSessionTitleFallsBackToID(t *testing.T) {
 }
 
 func TestParentAgentsDisambiguatesATitleEqualToItsSessionID(t *testing.T) {
+	t.Parallel()
 	const session = "planner-session"
 	agents := NewParentAgents(
 		[]SessionGroup{{ID: "11111111-1111-1111-1111-111111111111", Name: session, Sessions: []string{"other"}}},
@@ -24,6 +26,7 @@ func TestParentAgentsDisambiguatesATitleEqualToItsSessionID(t *testing.T) {
 }
 
 func TestParentAgentsValue(t *testing.T) {
+	t.Parallel()
 	planners := SessionGroup{ID: "11111111-1111-1111-1111-111111111111", Name: "planner", Sessions: []string{"s1", "s2"}}
 	agents := NewParentAgents([]SessionGroup{planners}, map[string]string{
 		"s1": "Planner",

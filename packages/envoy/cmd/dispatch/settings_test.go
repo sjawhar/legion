@@ -137,6 +137,7 @@ func environmentReads(roots ...string) (reads, storetestImporters []string, err 
 // other reference to the process environment under cmd/dispatch or internal/dispatch is a reader
 // the table, `envoy-dispatch settings` and the generated configuration reference do not list.
 func TestNoReaderBypassesTheSettingsTable(t *testing.T) {
+	t.Parallel()
 	reads, storetestImporters, err := environmentReads(".", filepath.Join("..", "..", "internal", "dispatch"))
 	if err != nil {
 		t.Fatal(err)
@@ -152,6 +153,7 @@ func TestNoReaderBypassesTheSettingsTable(t *testing.T) {
 // The guard sees a read however the file imports its package: under another name, or with no
 // name at all, where the read is a bare Getenv.
 func TestTheGuardSeesAReadUnderAnyImportName(t *testing.T) {
+	t.Parallel()
 	for name, probe := range map[string]string{
 		"an aliased import":       "package auth\n\nimport environment \"os\"\n\nfunc acceptProbe() string { return environment.Getenv(\"DISPATCH_ACCEPT_PROBE\") }\n",
 		"a dot import":            "package auth\n\nimport . \"os\"\n\nfunc acceptProbe() string { return Getenv(\"DISPATCH_ACCEPT_PROBE\") }\n",
@@ -171,6 +173,7 @@ func TestTheGuardSeesAReadUnderAnyImportName(t *testing.T) {
 }
 
 func TestSettingsTableNamesEachVariableOnce(t *testing.T) {
+	t.Parallel()
 	name := regexp.MustCompile(`^[A-Z][A-Z0-9]*(_[A-Z0-9]+)*$`)
 	seen := map[string]bool{}
 	for _, row := range settings {
@@ -208,6 +211,7 @@ func TestSettingsTableNamesEachVariableOnce(t *testing.T) {
 // `envoy-dispatch settings` is what the docs site's configuration reference is generated from, so
 // it carries every row whole: the _FILE form by name, and null where a row has no default.
 func TestSettingsSubcommandPrintsEveryRow(t *testing.T) {
+	t.Parallel()
 	var stdout, stderr bytes.Buffer
 	if code := runSubcommand(context.Background(), []string{"settings"}, envGetter(nil), &stdout, &stderr); code != 0 {
 		t.Fatalf("envoy-dispatch settings: exit %d, stderr %q", code, stderr.String())
@@ -242,6 +246,7 @@ func TestSettingsSubcommandPrintsEveryRow(t *testing.T) {
 }
 
 func TestSettingValuesRefuseAVariableTheTableDoesNotList(t *testing.T) {
+	t.Parallel()
 	defer func() {
 		if recovered := recover(); recovered == nil || !strings.Contains(recovered.(string), "DISPATCH_NOT_A_SETTING") {
 			t.Fatalf("recovered %v, want a panic naming DISPATCH_NOT_A_SETTING", recovered)
@@ -493,6 +498,10 @@ func errorCode(response *httptest.ResponseRecorder) string {
 // Every setting reaches its reader through the table, as it resolved before the table existed:
 // each case hands its variable to the reader main hands it to, through the settings read alone,
 // never the process environment, so a reader that reads around the table fails its case.
+// Serial: it swaps process-wide state, the default slog logger. Its DISPATCH_AGENT_TOKEN case
+// (sharedAgentTokenListReachesTheAPI) reads the line the server logged for a request that
+// authenticated with a previous value, and logtest.SetDefault points that logger at the case's
+// own buffer, which the whole process shares.
 func TestEverySettingReachesItsReader(t *testing.T) {
 	appJSON := func(t *testing.T) string {
 		return filepath.Dir(writeFile(t, "app.json", `{"clientId":"Iv1.file"}`))
@@ -2165,6 +2174,7 @@ func sharedAgentTokenListReachesTheAPI(t *testing.T) {
 // unreachable: what is wrong is Dispatch's own credential, which the operator fixes in Dispatch's
 // deployment, not in the broker's.
 func TestACredentialPageWithAnUnreadableAccountTokenDoesNotBlameTheBroker(t *testing.T) {
+	t.Parallel()
 	for name, tokenFile := range map[string]string{
 		"a path that does not exist": filepath.Join(t.TempDir(), "missing"),
 		"an empty file":              writeFile(t, "account-token", "\n"),

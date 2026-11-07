@@ -331,6 +331,7 @@ func syntheticWalkTrees(t *testing.T) []namedTree {
 // walk visits what referenceWalk visits, with the same paths and ranges, and stops where it stops;
 // Size agrees with referenceNodeSize.
 func TestWalkMatchesTheReferenceWalk(t *testing.T) {
+	t.Parallel()
 	for _, named := range walkTestTrees(t) {
 		want, wantPanicked := recordWalk(referenceWalk, named.tree, 0)
 		got, gotPanicked := recordWalk(walk, named.tree, 0)
@@ -618,6 +619,7 @@ func middleThird(value string) (from, to int) {
 // document under comment marks. It runs only when PMDOC_WALK_CORPUS names a directory of markdown
 // files, and logs counts and file names alone, never a spec's text.
 func TestWalkMatchesTheReferenceWalkOnACorpus(t *testing.T) {
+	t.Parallel()
 	dir := os.Getenv("PMDOC_WALK_CORPUS")
 	if dir == "" {
 		t.Skip("PMDOC_WALK_CORPUS unset; set it to a directory of .md files to run this")

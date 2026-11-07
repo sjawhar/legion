@@ -347,8 +347,7 @@ type throughputRig struct {
 
 func newThroughputRig(t *testing.T, rtt time.Duration) *throughputRig {
 	t.Helper()
-	server, url := testnats.Start(t)
-	_ = server
+	url := testnats.URL(t)
 	proxied := testnats.StartProxy(t, url, testnats.ProxyLatency(rtt)).URL()
 	client, err := bus.ConnectOwningStream([]string{proxied})
 	if err != nil {
@@ -416,6 +415,18 @@ func (r *throughputRig) roleArrivals() []int64 {
 // destination, so each destination takes them one round trip after another, and log the drain
 // time: from the outbox's start until every event is marked published. They hold no rate floor;
 // the drain time is the reading.
+//
+// Its loads, its latencies, its sizes and its floor are main's. This pull request cut them to
+// save the package's seconds - one latency rather than two, one busy case, one burst, a backlog
+// of 60 rather than 2*batchSize and a burst of 40 rather than batchSize - and run 42087780580
+// then read 24.0 events/s against the floor of 25, because the floor is a rate over the whole
+// run and a third of the events amortises the same start-up over a third of the window. What a
+// load test measures is a property of how much it loads, so the sizes are back as main has them
+// and dispatch://INFRA-985 owns every number here (dispatch://INFRA-1075).
+//
+// Serial: it measures the process. It holds the outbox to a rate and to an arrival order under a
+// fixed round trip, and every parallel test's CPU and Postgres work counts against both
+// (docs/testing.md).
 func TestOutboxThroughputUnderRemoteLatency(t *testing.T) {
 	const (
 		backlogIssues = 20
@@ -581,11 +592,38 @@ func logDestinations(t *testing.T, name string, seeded []model.Event, stream []i
 // the returned func stops it.
 func runOutbox(t *testing.T, database *store.Store, client *bus.Client, broker *events.Broker) func() {
 	t.Helper()
+	return runOutboxThrough(t, database, client, client, broker)
+}
+
+// runOutboxThrough is runOutbox publishing through publisher, which wraps client so a test can
+// count or stall the sends; the role holders are still resolved on client's connection, as
+// production resolves them on the publisher's own.
+func runOutboxThrough(t *testing.T, database *store.Store, client *bus.Client, publisher Publisher, broker *events.Broker) func() {
+	t.Helper()
+	_, stop := runningOutbox(t, database, client, publisher, broker)
+	return stop
+}
+
+// runningOutbox is runOutboxThrough with the Outbox itself, for a test that reads its state - an
+// outbox that gave the publisher hold up is one that stopped publishing (Publishing).
+func runningOutbox(t *testing.T, database *store.Store, client *bus.Client, publisher Publisher, broker *events.Broker) (*Outbox, func()) {
+	t.Helper()
 	pool, err := database.Pool.Outbox()
 	if err != nil {
 		t.Fatalf("open the outbox's pool: %v", err)
 	}
 	holders := roles.NewBuckets(client, roles.Windows{})
-	return runDeps(t, Deps{Store: &store.Store{Pool: pool}, Publisher: client, Broker: broker, Listen: database.Pool.Listener,
-		RoleClaims: holders, Sessions: holders}, 10*time.Second)
+	outbox := New(Deps{Store: &store.Store{Pool: pool}, Publisher: publisher, Broker: broker, Listen: database.Pool.Listener,
+		RoleClaims: holders, Sessions: holders})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { outbox.Run(ctx); close(done) }()
+	return outbox, func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(eventWait):
+			t.Fatal("outbox did not stop")
+		}
+	}
 }

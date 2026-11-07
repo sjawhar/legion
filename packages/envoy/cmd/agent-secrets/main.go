@@ -727,12 +727,17 @@ func minDuration(a, b time.Duration) time.Duration {
 	return b
 }
 
-// nextBackoff advances the backoff the poll loops of this package keep: two seconds, doubling
-// to a ten-second cap. The renewer's own step is leasetime.NextBackoff, which the broker's
-// lease bound walks it by; these polls are nobody's lease, and a change made to move that
-// floor is not a change to how often `agent-secrets request --wait` asks.
-func nextBackoff(cur time.Duration) time.Duration {
-	return min(2*cur, 10*time.Second)
+// retryCap is how far the backoff the poll loops of this package keep grows. It is this
+// package's own ten seconds and not leasetime's: those polls are nobody's lease, and a change
+// made to move the broker's lease floor is not a change to how often `agent-secrets request
+// --wait` asks.
+const retryCap = 10 * time.Second
+
+// nextBackoff advances the backoff a poll loop of this package keeps: two seconds, doubling to
+// limit. The renewer's own step is leasetime's, which the broker's lease bound walks it by
+// (renewLoop).
+func nextBackoff(cur, limit time.Duration) time.Duration {
+	return min(2*cur, limit)
 }
 
 // ---------------------------------------------------------------------------
@@ -796,14 +801,26 @@ func cmdKeygen(args []string, stdout, stderr io.Writer) int {
 // that cannot succeed; every other refusal, POD_IDENTITY_MISMATCH and POD_TOKEN_EXPIRED among
 // them, retries.
 func cmdRenew(args []string, stdout, stderr io.Writer) int {
-	flagArgs, positional := splitArgs(args, map[string]bool{"pod-token-file": true})
+	flagArgs, positional := splitArgs(args, map[string]bool{"pod-token-file": true, "retry-cap": true})
 	flags := newFlagSet("renew", stderr)
 	podTokenFile := flags.String("pod-token-file", "", "a pod's projected service-account token file, read again before every renewal")
+	// --retry-cap is the longest wait between two failed renewals. Its default is the schedule
+	// internal/broker/leasetime models and internal/broker/config refuses a too-short lease
+	// against, so a deployed renewer keeps that schedule; a test that drives a real broker
+	// outage passes a shorter one rather than waiting the production cap out
+	// (dispatch://INFRA-1075).
+	retryWait := flags.Duration("retry-cap", leasetime.RenewBackoffMax, "the longest wait between two failed renewals; the renewer backs off from 2s up to it")
 	if err := flags.Parse(flagArgs); err != nil {
 		return exitUsage(err)
 	}
 	if len(positional) > 0 {
 		fmt.Fprintln(stderr, "agent-secrets renew: no arguments are accepted")
+		return exitUsageError
+	}
+	// A zero or negative cap would make the backoff zero, so a renewer that cannot reach the
+	// broker would retry without pause: the flag exists to shorten the wait, never to remove it.
+	if *retryWait <= 0 {
+		fmt.Fprintln(stderr, "agent-secrets renew: --retry-cap must be positive")
 		return exitUsageError
 	}
 	base, enrollmentID, signer, err := sessionContext()
@@ -825,7 +842,7 @@ func cmdRenew(args []string, stdout, stderr io.Writer) int {
 			return exitUsageError
 		}
 	}
-	return renewLoop(ctx, newClient(base), signer, enrollmentID, *podTokenFile, stderr, time.After)
+	return renewLoop(ctx, newClient(base), signer, enrollmentID, *podTokenFile, stderr, time.After, *retryWait)
 }
 
 // tokenUnreadable is the ERROR a pod's renewer prints when it cannot read its token: it sends
@@ -838,9 +855,14 @@ func tokenUnreadable(enrollmentID string, err error) string {
 
 // renewLoop renews enrollmentID until ctx ends or the broker refuses it for good. podTokenFile
 // is a pod's projected token file, read again before every renewal because the kubelet rotates
-// it in place, and "" is every other session's renewal, which carries no body.
-func renewLoop(ctx context.Context, c *client, signer Signer, enrollmentID, podTokenFile string, stderr io.Writer, after func(time.Duration) <-chan time.Time) int {
-	backoff := leasetime.RenewBackoffInitial
+// it in place, and "" is every other session's renewal, which carries no body. retryLimit is the
+// longest wait between two failed renewals, which --retry-cap carries.
+func renewLoop(ctx context.Context, c *client, signer Signer, enrollmentID, podTokenFile string, stderr io.Writer, after func(time.Duration) <-chan time.Time, retryLimit time.Duration) int {
+	// The renewer walks leasetime's own schedule, with the cap --retry-cap carries in place of
+	// leasetime.RenewBackoffMax, which is that flag's default.
+	schedule := leasetime.Production()
+	schedule.BackoffMax = retryLimit
+	backoff := schedule.BackoffInitial
 	for {
 		var token string
 		var tokenErr error
@@ -875,10 +897,10 @@ func renewLoop(ctx context.Context, c *client, signer Signer, enrollmentID, podT
 				return 0
 			case <-after(backoff):
 			}
-			backoff = leasetime.NextBackoff(backoff)
+			backoff = schedule.NextBackoff(backoff)
 			continue
 		}
-		backoff = leasetime.RenewBackoffInitial
+		backoff = schedule.BackoffInitial
 		lease := time.Until(expires)
 		if lease <= 0 {
 			lease = time.Second
@@ -1193,7 +1215,7 @@ func cmdExec(args []string, stdout, stderr io.Writer) int {
 				return 1
 			}
 			state, grantID, detail = status.State, status.GrantID, status.Detail
-			backoff = nextBackoff(backoff)
+			backoff = nextBackoff(backoff, retryCap)
 		}
 	}
 	switch state {

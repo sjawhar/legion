@@ -70,7 +70,7 @@ func (p *recPub) setErr(err error) {
 func waitCacheChecks(t *testing.T, s *Store, owner, repo, number, sha string, n int) {
 	t.Helper()
 	key := Key(owner, repo, number, sha)
-	deadline := time.After(5 * time.Second)
+	deadline := time.After(eventWait)
 	for {
 		for _, st := range s.List() {
 			if Key(st.Owner, st.Repo, st.Number, st.SHA) == key && len(st.Checks) == n {
@@ -88,7 +88,7 @@ func waitCacheChecks(t *testing.T, s *Store, owner, repo, number, sha string, n 
 func waitCacheSuites(t *testing.T, s *Store, owner, repo, number, sha string, n int) {
 	t.Helper()
 	key := Key(owner, repo, number, sha)
-	deadline := time.After(5 * time.Second)
+	deadline := time.After(eventWait)
 	for {
 		for _, st := range s.List() {
 			if Key(st.Owner, st.Repo, st.Number, st.SHA) == key && len(st.Suites) == n {
@@ -106,7 +106,7 @@ func waitCacheSuites(t *testing.T, s *Store, owner, repo, number, sha string, n 
 func waitCacheStateMissing(t *testing.T, s *Store, owner, repo, number, sha string) {
 	t.Helper()
 	key := Key(owner, repo, number, sha)
-	deadline := time.After(5 * time.Second)
+	deadline := time.After(eventWait)
 	for {
 		found := false
 		for _, st := range s.List() {
@@ -145,7 +145,7 @@ func setLastEventAt(t *testing.T, store *Store, owner, repo, number, sha string,
 	if _, err := store.watcher.KV().Update(key, raw, entry.Revision()); err != nil {
 		t.Fatalf("set last event at: %v", err)
 	}
-	deadline := time.After(5 * time.Second)
+	deadline := time.After(eventWait)
 	for {
 		for _, cached := range store.List() {
 			if Key(cached.Owner, cached.Repo, cached.Number, cached.SHA) == key &&
@@ -182,7 +182,7 @@ func setClaim(t *testing.T, store *Store, owner, repo, number, sha string, claim
 	if _, err := store.watcher.KV().Update(key, raw, entry.Revision()); err != nil {
 		t.Fatalf("set claim: %v", err)
 	}
-	deadline := time.After(5 * time.Second)
+	deadline := time.After(eventWait)
 	for {
 		for _, cached := range store.List() {
 			if Key(cached.Owner, cached.Repo, cached.Number, cached.SHA) != key {
@@ -819,7 +819,7 @@ func TestSummaryTickConcurrentExactlyOnce(t *testing.T) {
 	}()
 	select {
 	case <-entered:
-	case <-time.After(5 * time.Second):
+	case <-time.After(eventWait):
 		t.Fatal("first replica never reached publish")
 	}
 
@@ -830,7 +830,7 @@ func TestSummaryTickConcurrentExactlyOnce(t *testing.T) {
 	}()
 	select {
 	case <-secondDone:
-	case <-time.After(5 * time.Second):
+	case <-time.After(eventWait):
 		close(release)
 		<-firstDone
 		t.Fatal("second replica reached publish instead of observing a durable claim")
@@ -902,7 +902,7 @@ func TestSummaryTickRefusesReclaimedClaimWhoseSnapshotWasReplaced(t *testing.T) 
 	}()
 	select {
 	case <-aReady:
-	case <-time.After(5 * time.Second):
+	case <-time.After(eventWait):
 		t.Fatal("replica A never reached claim verification")
 	}
 
@@ -920,7 +920,7 @@ func TestSummaryTickRefusesReclaimedClaimWhoseSnapshotWasReplaced(t *testing.T) 
 	if err := recordCheck(replicaB, owner, repo, number, sha, "build", "900", "https://example.test/900", "completed", "failure", "2026-09-07T03:01:00Z"); err != nil {
 		t.Fatalf("record red in-place build update: %v", err)
 	}
-	deadline := time.After(5 * time.Second)
+	deadline := time.After(eventWait)
 	for {
 		for _, state := range replicaB.List() {
 			if Key(state.Owner, state.Repo, state.Number, state.SHA) == key && state.Checks["build"].Conclusion == "failure" {
@@ -942,7 +942,7 @@ replicaBReady:
 	}()
 	select {
 	case <-bPublished:
-	case <-time.After(5 * time.Second):
+	case <-time.After(eventWait):
 		t.Fatal("replica B never published its red settlement")
 	}
 	if got := pub.count(); got != 1 {
@@ -959,13 +959,13 @@ replicaBReady:
 	releaseAOnce.Do(func() { close(releaseA) })
 	select {
 	case <-aDone:
-	case <-time.After(5 * time.Second):
+	case <-time.After(eventWait):
 		t.Fatal("replica A did not resume")
 	}
 	releaseBOnce.Do(func() { close(releaseB) })
 	select {
 	case <-bDone:
-	case <-time.After(5 * time.Second):
+	case <-time.After(eventWait):
 		t.Fatal("replica B did not finish")
 	}
 
@@ -1030,7 +1030,7 @@ func TestSummaryTickSkipsClaimRearmedBeforePublish(t *testing.T) {
 	}()
 	select {
 	case <-claimUpdated:
-	case <-time.After(5 * time.Second):
+	case <-time.After(eventWait):
 		t.Fatal("summary tick never acquired its settlement claim")
 	}
 	if err := recordCheck(store, owner, repo, number, sha, "build", "807", "https://example.test/807", "completed", "failure", "2026-09-07T03:01:00Z"); err != nil {
@@ -1039,7 +1039,7 @@ func TestSummaryTickSkipsClaimRearmedBeforePublish(t *testing.T) {
 	close(releaseClaim)
 	select {
 	case <-tickDone:
-	case <-time.After(5 * time.Second):
+	case <-time.After(eventWait):
 		t.Fatal("summary tick did not resume")
 	}
 	useKV(t, store, originalKV.Legacy())

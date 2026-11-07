@@ -68,8 +68,8 @@ func (p *pausePoint) wait(t *testing.T, what string) deliveryHubNote {
 	select {
 	case <-p.reached:
 		return p.note
-	case <-time.After(10 * time.Second):
-		t.Fatalf("the hub made no note %s within 10s", what)
+	case <-time.After(eventFeedWait):
+		t.Fatalf("the hub made no note %s within %s", what, eventFeedWait)
 		return deliveryHubNote{}
 	}
 }
@@ -92,7 +92,15 @@ func (r *hubRig) recomputesSince(mark int) int {
 // sjawhar/legion#2686 forced with delays), then after it, with the merge past that position. Each
 // mark is for something committed before the reads that follow, so the one recompute's delta holds
 // both merges and no second recompute follows.
+//
+// Real time, at viewQuiet: each mark and read is a Postgres statement the hub makes, which no
+// synctest bubble can hold.
 func TestAMarkMadeBeforeAReadTakesItsPositionIsThatReadsToAnswer(t *testing.T) {
+	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
+	// on is proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the
+	// instance (internal/dispatch/events, horizon.go). Keeping only the tests that hold a
+	// lock on purpose out of the parallel set left five of these timing out on events_start;
+	// the whole family is out of it (dispatch://INFRA-1075).
 	holds := []struct {
 		name  string
 		match func(deliveryHubNote) bool
@@ -107,7 +115,7 @@ func TestAMarkMadeBeforeAReadTakesItsPositionIsThatReadsToAnswer(t *testing.T) {
 			seedHubSettings(t, rig.database)
 			conn := newFakeLiveConn()
 			rig.hub.Subscribe(conn, subscribeFrame("t", presetView(deliveryLiveTimeline, 7, "")))
-			held := conn.snapshot(t, 5*time.Second, "t").Body
+			held := conn.snapshot(t, eventFeedWait, "t").Body
 			rig.settle(t)
 
 			start := rig.mark()
@@ -125,7 +133,7 @@ func TestAMarkMadeBeforeAReadTakesItsPositionIsThatReadsToAnswer(t *testing.T) {
 			}
 			point.proceed()
 
-			delta := conn.delta(t, 5*time.Second, "t")
+			delta := conn.delta(t, eventFeedWait, "t")
 			if got := slices.Sorted(slices.Values(liveUpsertIDs(t, delta, "prs"))); !slices.Equal(got, []string{"acme/widgets#1", "acme/widgets#2"}) {
 				t.Fatalf("the recompute's delta upserts %v, want both merges", got)
 			}
@@ -148,12 +156,17 @@ func TestAMarkMadeBeforeAReadTakesItsPositionIsThatReadsToAnswer(t *testing.T) {
 // merges a pull request there, past the read's position: the read never saw it, so the view is
 // marked again and a second recompute sends it.
 func TestAChangeAfterAReadsPositionRecomputesTheViewAgain(t *testing.T) {
+	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
+	// on is proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the
+	// instance (internal/dispatch/events, horizon.go). Keeping only the tests that hold a
+	// lock on purpose out of the parallel set left five of these timing out on events_start;
+	// the whole family is out of it (dispatch://INFRA-1075).
 	var pause *notePause
 	rig := newHubRig(t, func(hub *deliveryHub) { pause = pauseNotes(hub) })
 	seedHubSettings(t, rig.database)
 	conn := newFakeLiveConn()
 	rig.hub.Subscribe(conn, subscribeFrame("t", presetView(deliveryLiveTimeline, 7, "")))
-	held := conn.snapshot(t, 5*time.Second, "t").Body
+	held := conn.snapshot(t, eventFeedWait, "t").Body
 	rig.settle(t)
 
 	start := rig.mark()
@@ -168,14 +181,14 @@ func TestAChangeAfterAReadsPositionRecomputesTheViewAgain(t *testing.T) {
 	rig.hub.catchUpNow()
 	point.proceed()
 
-	first := conn.delta(t, 5*time.Second, "t")
+	first := conn.delta(t, eventFeedWait, "t")
 	if got := liveUpsertIDs(t, first, "prs"); !slices.Equal(got, []string{"acme/widgets#1"}) {
 		t.Fatalf("the first recompute's delta upserts %v, want only the merge its read held", got)
 	}
 	// The first answer is its read's, from before the write made while the read was held, so it
 	// lands on no GET made now; the second answer is checked against one.
 	held = applyLiveDelta(t, deliveryLiveTimeline, held, first)
-	again := conn.delta(t, 5*time.Second, "t")
+	again := conn.delta(t, eventFeedWait, "t")
 	if got := liveUpsertIDs(t, again, "prs"); !slices.Equal(got, []string{"acme/widgets#2"}) {
 		t.Fatalf("the second recompute's delta upserts %v, want the merge after the read", got)
 	}
@@ -191,12 +204,17 @@ func TestAChangeAfterAReadsPositionRecomputesTheViewAgain(t *testing.T) {
 // nothing; the reset's own mark, which the read cannot take over since its position may name the
 // old log, recomputes the view again and sends the merge.
 func TestAChangeLogResetDuringAReadKeepsTheViewDirty(t *testing.T) {
+	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
+	// on is proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the
+	// instance (internal/dispatch/events, horizon.go). Keeping only the tests that hold a
+	// lock on purpose out of the parallel set left five of these timing out on events_start;
+	// the whole family is out of it (dispatch://INFRA-1075).
 	var pause *notePause
 	rig := newHubRig(t, func(hub *deliveryHub) { pause = pauseNotes(hub) })
 	seedHubSettings(t, rig.database)
 	conn := newFakeLiveConn()
 	rig.hub.Subscribe(conn, subscribeFrame("t", presetView(deliveryLiveTimeline, 7, "")))
-	held := conn.snapshot(t, 5*time.Second, "t").Body
+	held := conn.snapshot(t, eventFeedWait, "t").Body
 	rig.settle(t)
 
 	start := rig.mark()
@@ -218,12 +236,12 @@ func TestAChangeLogResetDuringAReadKeepsTheViewDirty(t *testing.T) {
 	}
 	read.proceed()
 
-	first := conn.delta(t, 5*time.Second, "t")
+	first := conn.delta(t, eventFeedWait, "t")
 	if got := liveUpsertIDs(t, first, "prs"); !slices.Equal(got, []string{"acme/widgets#1"}) {
 		t.Fatalf("the first recompute's delta upserts %v, want only the merge its read held", got)
 	}
 	held = applyLiveDelta(t, deliveryLiveTimeline, held, first)
-	again := conn.delta(t, 5*time.Second, "t")
+	again := conn.delta(t, eventFeedWait, "t")
 	if got := liveUpsertIDs(t, again, "prs"); !slices.Equal(got, []string{"acme/widgets#2"}) {
 		t.Fatalf("the recompute after the reset's delta upserts %v, want the merge after the read", got)
 	}
@@ -239,13 +257,18 @@ func TestAChangeLogResetDuringAReadKeepsTheViewDirty(t *testing.T) {
 // names it under its old title, so the recompute marks the view again and the next one sends the
 // new title.
 func TestAnIssueTitleChangeDuringTheReadThatFirstNamesItRecomputesAgain(t *testing.T) {
+	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
+	// on is proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the
+	// instance (internal/dispatch/events, horizon.go). Keeping only the tests that hold a
+	// lock on purpose out of the parallel set left five of these timing out on events_start;
+	// the whole family is out of it (dispatch://INFRA-1075).
 	var pause *notePause
 	rig := newHubRig(t, func(hub *deliveryHub) { pause = pauseNotes(hub) })
 	seedHubSettings(t, rig.database)
 	issue := createHubIssue(t, rig.handler, map[string]any{"title": "Ship widgets"})
 	conn := newFakeLiveConn()
 	rig.hub.Subscribe(conn, subscribeFrame("t", presetView(deliveryLiveTimeline, 7, "")))
-	held := conn.snapshot(t, 5*time.Second, "t").Body
+	held := conn.snapshot(t, eventFeedWait, "t").Body
 	rig.settle(t)
 
 	start := rig.mark()
@@ -256,12 +279,12 @@ func TestAnIssueTitleChangeDuringTheReadThatFirstNamesItRecomputesAgain(t *testi
 	rig.waitForEventCursor(t, eventHead(t, rig.database), "the retitle while the read is held")
 	point.proceed()
 
-	first := conn.delta(t, 5*time.Second, "t")
+	first := conn.delta(t, eventFeedWait, "t")
 	if got := liveMapValues(t, first, "issue_titles"); got[issue] != "Ship widgets" {
 		t.Fatalf("the first recompute's issue_titles = %v, want %s under the title its read saw", got, issue)
 	}
 	held = applyLiveDelta(t, deliveryLiveTimeline, held, first)
-	again := conn.delta(t, 5*time.Second, "t")
+	again := conn.delta(t, eventFeedWait, "t")
 	if got := liveMapValues(t, again, "issue_titles"); got[issue] != "Ship the widgets" {
 		t.Fatalf("the second recompute's issue_titles = %v, want %s retitled", got, issue)
 	}
@@ -276,13 +299,18 @@ func TestAnIssueTitleChangeDuringTheReadThatFirstNamesItRecomputesAgain(t *testi
 // the read is held. The read shows the session by its id, so the recompute marks the view again
 // and the next one sends the title.
 func TestASessionTitleChangeDuringTheReadThatFirstNamesItRecomputesAgain(t *testing.T) {
+	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
+	// on is proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the
+	// instance (internal/dispatch/events, horizon.go). Keeping only the tests that hold a
+	// lock on purpose out of the parallel set left five of these timing out on events_start;
+	// the whole family is out of it (dispatch://INFRA-1075).
 	var pause *notePause
 	rig := newHubRig(t, func(hub *deliveryHub) { pause = pauseNotes(hub) })
 	seedHubSettings(t, rig.database)
 	createHubIssue(t, rig.handler, map[string]any{"title": "Hold the project"})
 	conn := newFakeLiveConn()
 	rig.hub.Subscribe(conn, subscribeFrame("t", presetView(deliveryLiveTimeline, 7, "")))
-	held := conn.snapshot(t, 5*time.Second, "t").Body
+	held := conn.snapshot(t, eventFeedWait, "t").Body
 	rig.settle(t)
 
 	const session = "ses_hub_reader"
@@ -297,12 +325,12 @@ func TestASessionTitleChangeDuringTheReadThatFirstNamesItRecomputesAgain(t *test
 	rig.waitForEventCursor(t, eventHead(t, rig.database), "the session's titled event while the read is held")
 	point.proceed()
 
-	first := conn.delta(t, 5*time.Second, "t")
+	first := conn.delta(t, eventFeedWait, "t")
 	if got := liveMapValues(t, first, "session_titles"); got[session] != session {
 		t.Fatalf("the first recompute's session_titles = %v, want %s shown by its id", got, session)
 	}
 	held = applyLiveDelta(t, deliveryLiveTimeline, held, first)
-	again := conn.delta(t, 5*time.Second, "t")
+	again := conn.delta(t, eventFeedWait, "t")
 	if got := liveMapValues(t, again, "session_titles"); got[session] != "Hub reader" {
 		t.Fatalf("the second recompute's session_titles = %v, want %s titled", got, session)
 	}

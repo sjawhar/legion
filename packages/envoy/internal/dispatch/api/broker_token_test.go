@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -93,6 +94,30 @@ func machineLoginToken(jkt string) brokertoken.Introspection {
 type brokerCaller struct {
 	caller *brokertokentest.Caller
 	jkt    string
+}
+
+// brokerClock is the clock the verifier's answer cache and address buckets read (Options.Now).
+// A test that has to read past an answer's remembered life moves it rather than sleeping
+// AffirmativeCacheTTL out; a proof's own window is checked against the real clock, which this
+// does not touch. It is read from the request goroutine and moved from the test's, so both go
+// through the mutex.
+type brokerClock struct {
+	mu sync.Mutex
+	at time.Time
+}
+
+func newBrokerClock() *brokerClock { return &brokerClock{at: time.Now()} }
+
+func (c *brokerClock) now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.at
+}
+
+func (c *brokerClock) advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.at = c.at.Add(d)
 }
 
 // newBrokerCaller mints a caller's key and the transport that proves it.
@@ -222,6 +247,7 @@ type refusalAnswer struct {
 // whoami reports the session the token proved, the person it acts for and the project it may
 // write.
 func TestALiveBrokerTokenWithASoundProofIsAccepted(t *testing.T) {
+	t.Parallel()
 	rig := newBrokerTokenRig(t)
 	caller := newBrokerCaller(t)
 	const token = "a-token-the-broker-issued"
@@ -249,6 +275,7 @@ func TestALiveBrokerTokenWithASoundProofIsAccepted(t *testing.T) {
 // TestAPersonScopedBrokerTokenCarriesNoProject: a dev box session's token names no single
 // project, so the caller carries none at all rather than an empty one.
 func TestAPersonScopedBrokerTokenCarriesNoProject(t *testing.T) {
+	t.Parallel()
 	rig := newBrokerTokenRig(t)
 	caller := newBrokerCaller(t)
 	const token = "a-dev-box-session-token"
@@ -275,6 +302,7 @@ func TestAPersonScopedBrokerTokenCarriesNoProject(t *testing.T) {
 // person and project the token named. The project the writes go into is made by a person: a
 // token scoped to one project may not create another (project_scope.go).
 func TestABrokerTokenWritesAsTheSessionItProves(t *testing.T) {
+	t.Parallel()
 	rig := newBrokerTokenRig(t)
 	caller := newBrokerCaller(t)
 	const token = "a-token-that-writes"
@@ -357,6 +385,7 @@ func withPerson(request *http.Request, login string) *http.Request {
 // name a writer that is not the credential's, and the refusal names the session the token carries
 // so the caller can see what it should have sent.
 func TestABrokerTokenRefusesABodyActorNamingAnotherSession(t *testing.T) {
+	t.Parallel()
 	rig := newBrokerTokenRig(t)
 	caller := newBrokerCaller(t)
 	const token = "a-token-whose-body-lies"
@@ -385,6 +414,7 @@ func TestABrokerTokenRefusesABodyActorNamingAnotherSession(t *testing.T) {
 // TestABrokerTokenProvedByAnotherKeyIsRefused: a sound proof signed by a key the token is not
 // bound to is what a stolen token looks like, and it gets its own code.
 func TestABrokerTokenProvedByAnotherKeyIsRefused(t *testing.T) {
+	t.Parallel()
 	rig := newBrokerTokenRig(t)
 	owner, thief := newBrokerCaller(t), newBrokerCaller(t)
 	const token = "a-token-bound-to-its-owners-key"
@@ -403,7 +433,9 @@ func TestABrokerTokenProvedByAnotherKeyIsRefused(t *testing.T) {
 // already spent, and a broker that answers nothing are three different things to a caller, and
 // only the last is a 503 — a caller told its token was refused would discard a live one.
 func TestBrokerTokenRefusalsEachHaveTheirOwnCode(t *testing.T) {
+	t.Parallel()
 	t.Run("not live", func(t *testing.T) {
+		t.Parallel()
 		rig := newBrokerTokenRig(t)
 		caller := newBrokerCaller(t)
 		const token = "a-token-the-broker-revoked"
@@ -419,6 +451,7 @@ func TestBrokerTokenRefusalsEachHaveTheirOwnCode(t *testing.T) {
 		}
 	})
 	t.Run("a spent proof", func(t *testing.T) {
+		t.Parallel()
 		rig := newBrokerTokenRig(t)
 		caller := newBrokerCaller(t)
 		const token = "a-token-whose-proof-is-captured"
@@ -437,6 +470,7 @@ func TestBrokerTokenRefusalsEachHaveTheirOwnCode(t *testing.T) {
 		}
 	})
 	t.Run("the broker unreachable", func(t *testing.T) {
+		t.Parallel()
 		rig := newBrokerTokenRig(t)
 		caller := newBrokerCaller(t)
 		const token = "a-token-nobody-can-be-asked-about"
@@ -456,6 +490,7 @@ func TestBrokerTokenRefusalsEachHaveTheirOwnCode(t *testing.T) {
 // records every write under the session its credential proved, so such a token is refused by
 // name: whoami will not say who it is, and a write will not take the session its body names.
 func TestAMachineLoginsOwnTokenIsRefusedAndNeverFilledInFromTheBody(t *testing.T) {
+	t.Parallel()
 	rig := newBrokerTokenRig(t)
 	caller := newBrokerCaller(t)
 	const token = "a-machine-logins-own-access-token"
@@ -494,6 +529,7 @@ func TestAMachineLoginsOwnTokenIsRefusedAndNeverFilledInFromTheBody(t *testing.T
 // — such a presentation is the unknown personal token it has always been, and the broker is never
 // asked about it.
 func TestABrokerTokenUnderTheBearerSchemeIsRefusedAsItAlwaysWas(t *testing.T) {
+	t.Parallel()
 	rig := newBrokerTokenRig(t)
 	caller := newBrokerCaller(t)
 	const token = "a-token-presented-the-wrong-way"
@@ -513,6 +549,7 @@ func TestABrokerTokenUnderTheBearerSchemeIsRefusedAsItAlwaysWas(t *testing.T) {
 // has no such credential kind, and the answer is what any Authorization header that is not a
 // bearer has always been here.
 func TestADPoPPresentationWithoutABrokerIsRefusedAsItAlwaysWas(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	caller := newBrokerCaller(t)
 	presented := caller.presenting(t, http.MethodGet, "/api/v1/whoami", "a-token-nobody-here-decides", nil)
@@ -529,6 +566,7 @@ func TestADPoPPresentationWithoutABrokerIsRefusedAsItAlwaysWas(t *testing.T) {
 // caller resolve exactly as they did, on a server that decides broker tokens too — the personal
 // token's write still has to name its own session, since that credential proves none.
 func TestTheOtherCredentialsAreUnaffectedByTheBrokerBranch(t *testing.T) {
+	t.Parallel()
 	rig := newBrokerTokenRig(t)
 
 	person := rig.serve(withPerson(brokerRequest(t, http.MethodGet, "/api/v1/whoami", nil, "", ""), brokerTestPerson))
@@ -575,7 +613,9 @@ func TestTheOtherCredentialsAreUnaffectedByTheBrokerBranch(t *testing.T) {
 // the connection it authenticated asks only whether the token is still live — which is what
 // whileCallerResolves calls on every heartbeat (callerStillResolves), driven here directly.
 func TestABrokerTokensReresolutionIsNotProofCheckedAgain(t *testing.T) {
-	rig := newBrokerTokenRig(t)
+	t.Parallel()
+	clock := newBrokerClock()
+	rig := newBrokerTokenRig(t, func(o *brokertoken.Options) { o.Now = clock.now })
 	caller := newBrokerCaller(t)
 	const token = "a-token-holding-a-socket-open"
 	rig.broker.Says(token, liveNamedToken(caller.jkt))
@@ -601,9 +641,11 @@ func TestABrokerTokensReresolutionIsNotProofCheckedAgain(t *testing.T) {
 	}
 
 	// Once the broker stops holding the token live, the re-resolution refuses and the connection
-	// closes. The affirmative answer is remembered for a few seconds, so this reads past it.
+	// closes. The affirmative answer is remembered for AffirmativeCacheTTL, which the cache reads
+	// off this test's own clock: moving it past that life is what the next re-resolution reads,
+	// rather than five seconds of wall time.
 	rig.broker.Says(token, brokertoken.Introspection{Active: false})
-	time.Sleep(brokertoken.AffirmativeCacheTTL + 50*time.Millisecond)
+	clock.advance(brokertoken.AffirmativeCacheTTL + time.Millisecond)
 	if err := served.callerStillResolves(admitted); err == nil {
 		t.Fatal("a revoked token kept resolving on an open connection")
 	}
@@ -614,6 +656,7 @@ func TestABrokerTokensReresolutionIsNotProofCheckedAgain(t *testing.T) {
 // so a client reads the wait without parsing a sentence. The bucket here holds one request, so
 // the second presentation of a token the broker has not been asked about meets it.
 func TestTheRateRefusalCarriesTheWaitInItsHeader(t *testing.T) {
+	t.Parallel()
 	rig := newBrokerTokenRig(t, func(o *brokertoken.Options) {
 		o.AddressLimit = ratelimit.Limit{Every: time.Minute, Burst: 1}
 	})
@@ -642,6 +685,7 @@ func TestTheRateRefusalCarriesTheWaitInItsHeader(t *testing.T) {
 // session's credential like any other — whoami names the session and the service, and a read
 // answers — and only its writes are refused (the test below).
 func TestAServiceOnlyBrokerTokenReadsAndIsNamedByWhoami(t *testing.T) {
+	t.Parallel()
 	rig := newBrokerTokenRig(t)
 	caller := newBrokerCaller(t)
 	const token = "a-token-naming-no-person"
@@ -678,6 +722,7 @@ func TestAServiceOnlyBrokerTokenReadsAndIsNamedByWhoami(t *testing.T) {
 // the rows below are one of each. Each refusal names the command that makes the write possible,
 // and nothing lands.
 func TestAServiceOnlyBrokerTokenIsRefusedEveryWrite(t *testing.T) {
+	t.Parallel()
 	rig := newBrokerTokenRig(t)
 	caller := newBrokerCaller(t)
 	const token = "a-token-that-may-not-write"
@@ -741,6 +786,7 @@ func TestAServiceOnlyBrokerTokenIsRefusedEveryWrite(t *testing.T) {
 // was — the broker holds it live and the proof check is what turns it down — so no write
 // refusal is ever reached, there being no caller to refuse, and a write under it lands nothing.
 func TestAServiceOnlyBrokerTokenWithNoProofIsRefused(t *testing.T) {
+	t.Parallel()
 	rig := newBrokerTokenRig(t)
 	caller := newBrokerCaller(t)
 	const token = "a-token-sent-without-its-proof"

@@ -26,6 +26,7 @@ import (
 // row. A regression of the skip on the route path (subscribeHandler through
 // store.Registry.UpsertWithin) fails this test, where it was only logged.
 func TestHeartbeatKVWritesPerHeartbeat(t *testing.T) {
+	t.Parallel()
 	const (
 		sessionCount = 20
 		heartbeats   = 5

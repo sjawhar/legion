@@ -249,6 +249,7 @@ func TestADeletedBlockTakesItsWindowRow(t *testing.T) {
 // parent, the parent between its children, and no block at all between top-level blocks or past
 // the last one. A block ending where a mention starts does not hold it.
 func TestInnermostBlocksPicksTheTightestRangeHoldingEachStart(t *testing.T) {
+	t.Parallel()
 	blocks := []model.ArtifactBlock{{ID: "a", From: 0, To: 100}, {ID: "b", From: 10, To: 20}, {ID: "c", From: 30, To: 40}, {ID: "d", From: 120, To: 130}}
 	got := innermostBlocks(blocks, []int{5, 15, 20, 25, 35, 50, 110, 125, 200})
 	want := []int{0, 1, 0, 0, 2, 0, -1, 3, -1}
@@ -262,6 +263,7 @@ func TestInnermostBlocksPicksTheTightestRangeHoldingEachStart(t *testing.T) {
 // no node, nor is one longer than text.MaxBlockIDBytes, which no key of the index can hold; those
 // are counted, with the longest one's bytes. An id at the bound is a node.
 func TestUniqueBlocksKeepsTheFirstHolderOfEachID(t *testing.T) {
+	t.Parallel()
 	atBound := strings.Repeat("é", text.MaxBlockIDBytes/2)
 	got, long, longest := uniqueBlocks([]model.ArtifactBlock{
 		{ID: "a", From: 0, To: 10},

@@ -15,6 +15,7 @@ import (
 // byte, over every fixture, every corpus file, a generated document of 400 KB holding every kind
 // of block and, where DISPATCH_RENDER_CORPUS names a directory, every real document in it.
 func TestValidDocumentRenderWithLayoutIsTheValidatingRender(t *testing.T) {
+	t.Parallel()
 	docs := map[string]*Node{"generated": generatedDocument(t, 400<<10)}
 	for _, fx := range loadFixtures(t) {
 		doc, err := FromJSON(fx.PMJSON)

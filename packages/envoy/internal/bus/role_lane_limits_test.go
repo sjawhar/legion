@@ -13,6 +13,7 @@ import (
 // buffer it may grow to is still bounded. A subscription SubscribeCore makes keeps nats.go's
 // defaults.
 func TestRoleLaneSubscriptionCarriesTheLanesPendingLimits(t *testing.T) {
+	t.Parallel()
 	uri := testnats.URL(t)
 	lane, _, err := ConnectRoleLane([]string{uri}, "example-machine", func(*nats.Msg) {})
 	if err != nil {

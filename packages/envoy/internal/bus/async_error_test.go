@@ -1,5 +1,8 @@
 package bus
 
+// Every test here captures the default slog handler (captureLogs, stream_config_test.go), a
+// process-wide swap, so none of them is parallel (dispatch://INFRA-1075).
+
 import (
 	"bufio"
 	"cmp"
@@ -105,7 +108,7 @@ func TestAHandshakeTheServerClosedIsAFailedReconnectAttempt(t *testing.T) {
 		}
 		return out
 	}
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(busWait)
 	for len(lines()) == 0 {
 		if time.Now().After(deadline) {
 			t.Fatal("the client never reported the handshake the server closed")

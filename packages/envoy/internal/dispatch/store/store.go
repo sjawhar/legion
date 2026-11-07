@@ -20,6 +20,12 @@ import (
 // Store is the shared Dispatch database handle.
 type Store struct {
 	Pool *Pool
+	// Locking is the discipline Migrate applies each migration under: how long it waits for a
+	// lock, how many attempts it makes of one whose wait outlasts that, and how long it holds
+	// nothing between them. The zero value is production's (pgmigrate.DefaultLocking); the tests
+	// of the runner itself set their own short, so that proving the bound, the retry and the
+	// give-up costs a fraction of a second rather than three five-second waits.
+	Locking pgmigrate.Locking
 }
 
 // Every file in migrations, so pgmigrate.Load judges each one; pgmigratetest.CheckEmbedsEveryFile
@@ -38,11 +44,25 @@ var migrationFiles embed.FS
 // override them, deliberately and per pool (Pool.separate).
 const poolSizeParam = "pool_max_conns"
 
+// Option configures the pool Open makes.
+type Option func(*pgxpool.Config)
+
+// WithMaxConns bounds the shared pool at conns rather than at sharedPoolSize. It is for the test
+// harness, which holds one store per test database in one process
+// (internal/dispatch/store/storetest) and would otherwise ask the one Postgres its packages share
+// for sharedPoolSize connections per store, more than that server's own limit allows at once.
+// Nothing a deployment sets reaches it: how many connections Dispatch holds is a property of
+// Dispatch, picked in code (Open, sharedPoolSize).
+func WithMaxConns(conns int32) Option {
+	return func(config *pgxpool.Config) { config.MaxConns = conns }
+}
+
 // Open connects to databaseURL and verifies the database is reachable. The pool's size is
-// sharedPoolSize: how many connections Dispatch may hold is a property of Dispatch, not of the
-// string that names its database. Every connection it opens scans timestamptz in UTC
-// (scanTimestampsInUTC), as do the pools Pool.separate copies from its configuration.
-func Open(ctx context.Context, databaseURL string) (*Store, error) {
+// sharedPoolSize unless an option replaces it: how many connections Dispatch may hold is a
+// property of Dispatch, not of the string that names its database. Every connection it opens
+// scans timestamptz in UTC (scanTimestampsInUTC), as do the pools Pool.separate copies from its
+// configuration.
+func Open(ctx context.Context, databaseURL string, options ...Option) (*Store, error) {
 	declared, err := declaresPoolSize(databaseURL)
 	if err != nil {
 		return nil, err
@@ -58,6 +78,9 @@ func Open(ctx context.Context, databaseURL string) (*Store, error) {
 	}
 	config.MaxConns = sharedPoolSize
 	config.AfterConnect = scanTimestampsInUTC
+	for _, option := range options {
+		option(config)
+	}
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
 		return nil, fmt.Errorf("open Postgres pool: %w", err)
@@ -122,9 +145,21 @@ func declaresPoolSize(databaseURL string) (bool, error) {
 // Migrate applies the embedded migrations in version order, each committed with its version
 // record in one transaction. It refuses a set pgmigrate.Load refuses before it touches the
 // database, so a set it cannot apply as written applies nothing, and it bounds every lock wait a
-// migration makes by pgmigrate.LockTimeout.
+// migration makes by s.Locking's timeout, pgmigrate.LockTimeout unless a caller set its own.
 func (s *Store) Migrate(ctx context.Context) error {
 	return s.migrate(ctx, migrationFiles)
+}
+
+// MigrationsFingerprint is pgmigrate.Fingerprint of the set Migrate applies, and the error
+// Migrate would refuse that set with. The test harness names the template database every test's
+// database is cloned from after it (internal/dispatch/store/storetest), so the test processes of
+// one run share one migrated template; nothing in production reads it.
+func MigrationsFingerprint() (string, error) {
+	migrations, err := pgmigrate.Load(migrationFiles, "migrations")
+	if err != nil {
+		return "", fmt.Errorf("migrations refused, none applied: %w", err)
+	}
+	return pgmigrate.Fingerprint(migrations), nil
 }
 
 func (s *Store) migrate(ctx context.Context, fsys fs.FS) error {
@@ -205,11 +240,11 @@ func (s *Store) createVersionTable(ctx context.Context, widen bool) error {
 }
 
 // applyMigration applies one migration in a transaction of its own, trying it again while its lock
-// wait outlasts its lock_timeout, up to pgmigrate.LockTimeoutAttempts times, holding nothing between
-// attempts (pgmigrate.RetryLockTimeouts). A migration that times out on every attempt fails the
-// runner, and boot with it.
+// wait outlasts its lock_timeout, up to s.Locking's attempts, holding nothing between
+// attempts (pgmigrate.Locking.RetryLockTimeouts). A migration that times out on every attempt
+// fails the runner, and boot with it.
 func (s *Store) applyMigration(ctx context.Context, migration pgmigrate.Migration) error {
-	return pgmigrate.RetryLockTimeouts(ctx, migration.Name, func(ctx context.Context) error {
+	return s.Locking.RetryLockTimeouts(ctx, migration.Name, func(ctx context.Context) error {
 		return s.applyMigrationOnce(ctx, migration)
 	})
 }
@@ -237,7 +272,7 @@ func (s *Store) applyMigrationOnce(ctx context.Context, migration pgmigrate.Migr
 	if applied {
 		return tx.Commit(ctx)
 	}
-	if err := pgmigrate.Exec(ctx, tx, migration, s.Pool.Config().BeforeConnect); err != nil {
+	if err := s.Locking.Exec(ctx, tx, migration, s.Pool.Config().BeforeConnect); err != nil {
 		return fmt.Errorf("execute migration: %w", err)
 	}
 	if _, err := tx.Exec(ctx, "insert into schema_migrations (version) values ($1::bigint)", migration.Version); err != nil {

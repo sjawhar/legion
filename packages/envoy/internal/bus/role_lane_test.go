@@ -1,5 +1,8 @@
 package bus_test
 
+// Every test here sets NATS_NKEY_SEED with t.Setenv, which panics the process beside t.Parallel,
+// so none of them is parallel (dispatch://INFRA-1075).
+
 import (
 	"os"
 	"testing"
@@ -35,7 +38,7 @@ func requireRoleMessage(t *testing.T, uri string, received <-chan string) {
 		if got != topic {
 			t.Fatalf("the role lane received %s, want %s", got, topic)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(busWait):
 		t.Fatal("the role lane received nothing")
 	}
 }

@@ -15,8 +15,16 @@ import (
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
-	"github.com/sjawhar/envoy/internal/testnats"
 )
+
+// eventWait is how long a test here waits FOR AN EVENT: an intake fetching a pull request, a
+// reservation being answered, a hub listening, a stop returning. It is where the test gives up,
+// never a measurement - the test still fails when the event never comes, and on an idle machine
+// the wait returns in milliseconds - so it allows for a loaded runner: every package of this
+// module now runs at once, four CI cores to some 3,800 parallel tests, under the race detector
+// besides (dispatch://INFRA-1075). A test whose SUBJECT is a span - a call budget's window, an
+// intake's stop against Dispatch's 30 s shutdown - keeps its own number.
+const eventWait = 30 * time.Second
 
 // TestBothIntakesKeepTheirSubscriptions starts the two intakes as cmd/dispatch does (StartIntakes,
 // beside a client of its own that owns the stream and publishes) and holds that each connects under
@@ -24,10 +32,11 @@ import (
 // keeps one JetStream subscription, so two intakes binding through one client leave whichever bound
 // first with its durable unbound: its messages stay pending and its handler never runs.
 func TestBothIntakesKeepTheirSubscriptions(t *testing.T) {
+	t.Parallel()
 	pool, ctx := deliveryTestPool(t)
 	seedDeliverySettings(t, ctx, pool)
 	seedRunningDeployRun(t, ctx, pool)
-	natsURL := testnats.URL(t)
+	natsURL := deliveryTestNATS(t)
 	publisher := intakeTestClient(t)
 	fake := newJobsFake(t)
 
@@ -133,7 +142,7 @@ func TestAMessageInItsHandlerAtShutdownIsAcknowledged(t *testing.T) {
 	logs := captureLogs(t)
 	pool, ctx := deliveryTestPool(t)
 	seedDeliverySettings(t, ctx, pool)
-	natsURL := testnats.URL(t)
+	natsURL := deliveryTestNATS(t)
 	publisher := intakeTestClient(t)
 	fake := newFakeGitHub(t)
 	entered, held := make(chan struct{}), make(chan struct{})
@@ -221,7 +230,7 @@ func TestAHandlerTheStopGivesUpIsRedeliveredAtOnce(t *testing.T) {
 	t.Cleanup(func() { intakeStopBudget = budget })
 	pool, ctx := deliveryTestPool(t)
 	seedDeliverySettings(t, ctx, pool)
-	natsURL := testnats.URL(t)
+	natsURL := deliveryTestNATS(t)
 	publisher := intakeTestClient(t)
 	fake := newFakeGitHub(t)
 	held := holdPullRequestOneUntilAbandoned(fake)
@@ -266,6 +275,7 @@ func TestAHandlerTheStopGivesUpIsRedeliveredAtOnce(t *testing.T) {
 // TestIntakesWithoutTheAppConnectNothing: with no GitHub App neither intake reads anything, so
 // StartIntakes opens no connection and its stop returns at once.
 func TestIntakesWithoutTheAppConnectNothing(t *testing.T) {
+	t.Parallel()
 	stop, err := StartIntakes(t.Context(), func(string) (*bus.Client, error) {
 		t.Error("connected a client for intakes that have no GitHub App")
 		return nil, errors.New("no connection here")
@@ -280,7 +290,7 @@ func TestIntakesWithoutTheAppConnectNothing(t *testing.T) {
 	}()
 	select {
 	case <-stopped:
-	case <-time.After(5 * time.Second):
+	case <-time.After(eventWait):
 		t.Fatal("stopping intakes with no GitHub App did not return")
 	}
 }
@@ -288,11 +298,12 @@ func TestIntakesWithoutTheAppConnectNothing(t *testing.T) {
 // TestIntakesWhoseSecondConnectFailsStartNeither: the job intake's connect failing returns its
 // error with neither intake started and the intake's client closed, so no durable is bound.
 func TestIntakesWhoseSecondConnectFailsStartNeither(t *testing.T) {
+	t.Parallel()
 	// A real pool rather than none: StartIntakes opens the lease pool its intakes reconcile
 	// their durables under before it connects anything.
 	pool, _ := deliveryTestPool(t)
 	publisher := intakeTestClient(t)
-	natsURL := testnats.URL(t)
+	natsURL := deliveryTestNATS(t)
 	var first *bus.Client
 	refused := errors.New("refused")
 	_, err := StartIntakes(t.Context(), func(string) (*bus.Client, error) {

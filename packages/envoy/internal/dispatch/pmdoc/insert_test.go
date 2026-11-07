@@ -7,6 +7,7 @@ import (
 )
 
 func TestBlockInsertAtParagraphAnchorFollowsEnclosingParagraph(t *testing.T) {
+	t.Parallel()
 	doc, err := Parse("Before anchor after.\n\nNext.\n")
 	if err != nil {
 		t.Fatal(err)
@@ -31,6 +32,7 @@ func TestBlockInsertAtParagraphAnchorFollowsEnclosingParagraph(t *testing.T) {
 }
 
 func TestBlockInsertAtTableCellAnchorFollowsEnclosingTable(t *testing.T) {
+	t.Parallel()
 	doc, err := Parse("| Key | Value |\n| --- | --- |\n| A10 | old |\n\nNext.\n")
 	if err != nil {
 		t.Fatal(err)
@@ -55,6 +57,7 @@ func TestBlockInsertAtTableCellAnchorFollowsEnclosingTable(t *testing.T) {
 }
 
 func TestTableRowInsertAfterCellAnchorExtendsContainingTable(t *testing.T) {
+	t.Parallel()
 	doc, err := Parse("| Key | Value |\n| --- | --- |\n| A10 | old |\n")
 	if err != nil {
 		t.Fatal(err)
@@ -78,6 +81,7 @@ func TestTableRowInsertAfterCellAnchorExtendsContainingTable(t *testing.T) {
 }
 
 func TestTableRowInsertBeforeCellAnchorExtendsContainingTable(t *testing.T) {
+	t.Parallel()
 	doc, err := Parse("| Key | Value |\n| --- | --- |\n| A10 | old |\n| A12 | later |\n")
 	if err != nil {
 		t.Fatal(err)
@@ -97,6 +101,7 @@ func TestTableRowInsertBeforeCellAnchorExtendsContainingTable(t *testing.T) {
 }
 
 func TestTableRowInsertRejectsRowsWiderThanContainingTable(t *testing.T) {
+	t.Parallel()
 	doc, err := Parse("| Key | Value |\n| --- | --- |\n| A10 | old |\n")
 	if err != nil {
 		t.Fatal(err)
@@ -118,6 +123,7 @@ func TestTableRowInsertRejectsRowsWiderThanContainingTable(t *testing.T) {
 // after an even run of backslashes ends a cell on either path, and a line opening a block that
 // interrupts a paragraph is no table row to either.
 func TestTableRowInsertAnswersAsTheDocumentWrite(t *testing.T) {
+	t.Parallel()
 	const table = "| Key | Value |\n| --- | --- |\n| A10 | old |\n"
 	for _, test := range []struct {
 		row string
@@ -217,6 +223,7 @@ func TestTableRowInsertAnswersAsTheDocumentWrite(t *testing.T) {
 }
 
 func TestTableRowInsertPadsRowsToContainingTableWidth(t *testing.T) {
+	t.Parallel()
 	doc, err := Parse("| Key | Value |\n| --- | --- |\n| A10 | old |\n")
 	if err != nil {
 		t.Fatal(err)

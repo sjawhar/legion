@@ -20,6 +20,7 @@ import (
 // block), a typed block's id is the one its markdown names, and a repeat live carries is kept for
 // its first holder alone.
 func TestAnUploadKeepsTheIDsOfTheBlocksItLeavesUnchanged(t *testing.T) {
+	t.Parallel()
 	spec, _, _ := docstest.LoadSpec(rand.New(rand.NewPCG(715, 1)), "LOAD-1", 25_000)
 
 	oneToken := func(t *testing.T, old, replacement string, wantTypes []string) {

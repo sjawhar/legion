@@ -76,6 +76,7 @@ func repoName(repo *string) string {
 // exactly issueRepoCap links below the root is still answered, so the refusal is the cap's own
 // boundary and not a fixture that fails for every issue.
 func TestIssueRepositoryRefusesAChainPastTheDepthCap(t *testing.T) {
+	t.Parallel()
 	database := newIssueRepoChain(t, issueRepoCap+2)
 	ctx := context.Background()
 
@@ -105,6 +106,7 @@ func TestIssueRepositoryRefusesAChainPastTheDepthCap(t *testing.T) {
 // than answering with the project's default. The same issue resolves before the loop is closed,
 // so the refusal is the loop's.
 func TestIssueRepositoryRefusesALoopedParentChain(t *testing.T) {
+	t.Parallel()
 	database := newIssueRepoChain(t, 2)
 	ctx := context.Background()
 
@@ -261,6 +263,7 @@ func issueRepoSetAnswer(t *testing.T, database *store.Store, key string) string 
 // project that maps no default, and a key no issue has. The spread check below says the ground
 // still holds all four answers, so an agreement on "none" everywhere cannot pass for one.
 func TestIssueRepositoryAnswersWhatMainsLateralDid(t *testing.T) {
+	t.Parallel()
 	database := newIssueRepoGround(t)
 	seen := map[string]bool{}
 	for _, ground := range []struct{ key, is string }{

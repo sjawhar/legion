@@ -75,6 +75,7 @@ func assertUnreadableRoleClaimAnswer(t *testing.T, recorder *httptest.ResponseRe
 }
 
 func TestARoleLookupAnswersAnUnreadableClaimRecordAsAServerError(t *testing.T) {
+	t.Parallel()
 	const role = "reviewer"
 	for _, tc := range unreadableRoleClaims {
 		t.Run(tc.name, func(t *testing.T) {
@@ -92,6 +93,7 @@ func TestARoleLookupAnswersAnUnreadableClaimRecordAsAServerError(t *testing.T) {
 // holder_lapsed) reports one, and an unreadable claim establishes nothing about the holder, so a
 // consumer of the lane is told nothing it would act on.
 func TestARolePublishAnswersAnUnreadableClaimRecordAsAServerError(t *testing.T) {
+	t.Parallel()
 	const role = "reviewer"
 	topic := contracts.RoleTopicPrefix + role
 	for _, tc := range unreadableRoleClaims {

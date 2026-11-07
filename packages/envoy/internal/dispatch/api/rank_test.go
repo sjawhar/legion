@@ -18,6 +18,7 @@ type rankedIssue struct {
 }
 
 func TestPatchIssueRankPlacesCardBetweenProjectNeighbors(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	for _, project := range []string{"TEST", "OTHER"} {
 		if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
@@ -94,6 +95,7 @@ func TestPatchIssueRankPlacesCardBetweenProjectNeighbors(t *testing.T) {
 }
 
 func TestPatchIssueRankAllocatesDistinctRanksForSequentialMovesIntoSameGap(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key": "TEST", "name": "Test project",
@@ -143,6 +145,10 @@ func TestPatchIssueRankAllocatesDistinctRanksForSequentialMovesIntoSameGap(t *te
 }
 
 func TestPatchIssueRankSerializesConcurrentMovesIntoSameGap(t *testing.T) {
+	// No t.Parallel: this test holds a transaction, a row lock or an advisory lock open on
+	// purpose. The event log's safe horizon is proven from pg_snapshot_xmin, the oldest
+	// transaction id running anywhere on the instance (internal/dispatch/events,
+	// horizon.go), so a hold here stalls every parallel test reading that feed.
 	handler, database := newTestHandlerWithStore(t)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key": "TEST", "name": "Test project",
@@ -208,6 +214,10 @@ func TestPatchIssueRankSerializesConcurrentMovesIntoSameGap(t *testing.T) {
 }
 
 func TestCreateIssueWaitsForProjectRankAllocationLock(t *testing.T) {
+	// No t.Parallel: this test holds a transaction, a row lock or an advisory lock open on
+	// purpose. The event log's safe horizon is proven from pg_snapshot_xmin, the oldest
+	// transaction id running anywhere on the instance (internal/dispatch/events,
+	// horizon.go), so a hold here stalls every parallel test reading that feed.
 	handler, database := newTestHandlerWithStore(t)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key": "TEST", "name": "Test project",
@@ -242,6 +252,7 @@ func TestCreateIssueWaitsForProjectRankAllocationLock(t *testing.T) {
 }
 
 func TestListIssuesOrdersStatusColumnsThenRank(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key": "TEST", "name": "Test project",
@@ -304,6 +315,7 @@ func TestListIssuesOrdersStatusColumnsThenRank(t *testing.T) {
 // (the shape the pre-existing append rule always produced) -- against ranks that already carry
 // a lowercase digit, asserting the project's list order after each move.
 func TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 
 	// This test's whole point is a database whose default collation disagrees with byte order

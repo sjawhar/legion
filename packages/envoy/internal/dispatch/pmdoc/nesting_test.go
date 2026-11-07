@@ -33,6 +33,7 @@ const (
 // (TestParseForWriteRefusesA33rdNestedTypedBlock), so they nest here inside quotes. The same parser
 // handles a whole upload and the fragments written by edits and accepted suggestions.
 func TestParseRefusesMarkdownNestedPastTheBound(t *testing.T) {
+	t.Parallel()
 	parsers := blockMarkdownReaders()
 	onOneLine := func(open string) func(int) string {
 		return func(levels int) string { return strings.Repeat(open, levels) + "a" }
@@ -94,6 +95,7 @@ func TestParseRefusesMarkdownNestedPastTheBound(t *testing.T) {
 // that a container's parser is offered but does not open - `-x`, `1x`, a link, an emoji shortcode
 // - reads as a paragraph there.
 func TestParseReadsWhatOpensNoBlockPastTheBound(t *testing.T) {
+	t.Parallel()
 	deepest := strings.Repeat("> ", expectedMaxNesting)
 	for _, test := range []struct {
 		markdown string
@@ -125,6 +127,7 @@ func TestParseReadsWhatOpensNoBlockPastTheBound(t *testing.T) {
 // with it, naming the list's line, rather than opened without the item: goldmark's list parser
 // panics on an itemless list at the list's next line. A list with room for its item reads.
 func TestParseRefusesAListWithNoRoomForItsItem(t *testing.T) {
+	t.Parallel()
 	quotes := func(depth int) string { return strings.Repeat("> ", depth) }
 	for _, test := range []struct {
 		name string
@@ -155,6 +158,7 @@ func TestParseRefusesAListWithNoRoomForItsItem(t *testing.T) {
 // An unsupported directive opens a leaf, which the block bound does not count: in the deepest quote
 // the bound allows it is refused for what it is, as it is anywhere else.
 func TestParseRefusesAnUnsupportedDirectiveInTheDeepestQuoteForWhatItIs(t *testing.T) {
+	t.Parallel()
 	deepest := strings.Repeat("> ", expectedMaxNesting)
 	for _, test := range []struct{ directive, reason string }{
 		{directive: ":::bogus", reason: malformedDirectiveReason},
@@ -174,6 +178,7 @@ func TestParseRefusesAnUnsupportedDirectiveInTheDeepestQuoteForWhatItIs(t *testi
 // through a parser whose definition parser holds the block bound. Definitions nested past it are
 // refused there, as every other reader refuses them, rather than read as the paragraph's text.
 func TestInlineReadBackRefusesDefinitionsNestedPastTheBound(t *testing.T) {
+	t.Parallel()
 	definitions := func(depth int) string { return "a\n\n" + strings.Repeat("[^a]: ", depth) + "x" }
 	if _, _, err := parseInlineWithDefinitions(definitions(expectedMaxNesting), []string{"a"}, inlineMarkdown); err != nil {
 		t.Fatalf("a run before %d nested definitions: %v, want it read", expectedMaxNesting, err)
@@ -210,6 +215,7 @@ func blockMarkdownReaders() []callerReader {
 // refuses as it makes the image, is refused for the same line as any other run: the first one past
 // the bound, wherever goldmark meets it first.
 func TestParseRefusesInlineMarksNestedPastTheBound(t *testing.T) {
+	t.Parallel()
 	// Two `*` either side open one mark.
 	nested := func(marks int) string { return strings.Repeat("**", marks) + "x" + strings.Repeat("**", marks) }
 	imageInLink := func(marks int) string { return "[![" + nested(marks) + "](u)](v)" }
@@ -271,6 +277,7 @@ func TestInlineMarksNestNoDeeperThanTheBoundUnderASmallStack(t *testing.T) {
 // The nesting an ordinary document reaches - emphasis, strikethrough and a code span inside
 // strong, and marks inside a link - is far below the bound, and reads and writes back unchanged.
 func TestOrdinaryNestedInlineMarksReadAndRenderUnchanged(t *testing.T) {
+	t.Parallel()
 	for _, markdown := range []string{
 		"**strong *and emphasis*, ~~struck~~ and `code`**\n",
 		"[**a *b***](https://example.com)\n",
@@ -334,6 +341,7 @@ func TestParseRefusesAMebibyteOfQuotesInBoundedTime(t *testing.T) {
 // the schema allows, the document token is JSON encoding/json still reads, which it is not past
 // 10,000 nested arrays and objects.
 func TestTreesDeeperThanTheBoundAreOutsideTheSchema(t *testing.T) {
+	t.Parallel()
 	// Both halves count a tree's depth as its text's level, the unit MaxTreeDepth bounds and
 	// docstest.WriteDeepChain writes: the document is level 0, the blockquotes levels 1 through
 	// textLevel-2, and the paragraph level textLevel-1.
@@ -461,6 +469,7 @@ func TestLiveTreeWalksStopAtTheDepthBoundUnderASmallStack(t *testing.T) {
 // v1.51.1 ygo's own YText writers panic on a value past its 100 levels, so only an update can put
 // one there.
 func TestAttributesNestedPastTheBoundAreOutsideTheSchema(t *testing.T) {
+	t.Parallel()
 	check := func(t *testing.T, what string, nesting, bound int, err error) {
 		t.Helper()
 		if nesting <= bound && err != nil {
@@ -527,6 +536,7 @@ func liveLinkedText(t *testing.T, nested any) *crdt.Doc {
 // From v1.51.1 ygo panics on a value past its own bound, which a mark at 100 levels inside its
 // attributes map was, and an element attribute past it is one ygo writes but no peer can read back.
 func TestEveryWriterKeepsAttributeValuesWithinYgosDepth(t *testing.T) {
+	t.Parallel()
 	heading := func(text *Node, attrs Attrs) *Node {
 		return &Node{Type: "doc", Children: []*Node{{Type: "heading", Attrs: attrs, Children: []*Node{text}}}}
 	}

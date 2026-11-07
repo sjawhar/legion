@@ -33,6 +33,7 @@ func waitUntil(t *testing.T, timeout time.Duration, desc string, fn func() bool)
 }
 
 func TestE2E_InterestReaperCleanup(t *testing.T) {
+	t.Parallel()
 	env := setupTestEnv(t)
 	if _, err := env.registry.Upsert(store.Interest{SessionID: "ses_stale", MachineID: "test-machine", Dir: "/stale"}, []string{"notifications.slack.*.*.mention"}); err != nil {
 		t.Fatalf("upsert stale interest: %v", err)

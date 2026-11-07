@@ -49,6 +49,7 @@ func uploadDocument(t *testing.T, handler http.Handler, owner, name, content str
 // each with its greatest version - a picture's and a document's with several versions too - and
 // whether it is the issue's spec, which a reference to a block of the spec names.
 func TestIssueSummaryCarriesTheIssueAndEveryDocumentsLatestVersion(t *testing.T) {
+	t.Parallel()
 	handler, _, _ := newTestServer(t, testServerOptions{files: filestest.NewMemory()})
 	issue := createInteractionIssue(t, handler, "TEST", "Summarised", "A spec")
 	uploadImage(t, handler, issue.Key, "diagram.png", "first pixels")
@@ -130,6 +131,7 @@ func TestIssueSummaryCarriesTheIssueAndEveryDocumentsLatestVersion(t *testing.T)
 // A project document's summary resolves its reference as the project document read does - by
 // slug, else by unambiguous filename - and answers its project, name, kind and latest version.
 func TestProjectDocumentSummaryResolvesAsTheDocumentReadDoes(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	createReferenceAPIProject(t, handler, "CORE")
 	owner := "/api/v1/projects/CORE"

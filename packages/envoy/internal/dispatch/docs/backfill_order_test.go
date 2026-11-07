@@ -22,6 +22,7 @@ import (
 // room holds the paragraph, the store does not, and the paragraph repeats the first block's id, so
 // the document needs the repair that makes the backfill write at all.
 func TestStoredOrderBackfillStampOverAnUnstoredEdit(t *testing.T) {
+	t.Parallel()
 	service, artifactID, entered, release := heldAppendService(t)
 	first, _ := liveTree(t, service, artifactID).Children[0].Attrs[pmdoc.BlockIDAttr].(string)
 	if first == "" {
@@ -55,6 +56,7 @@ func TestStoredOrderBackfillStampOverAnUnstoredEdit(t *testing.T) {
 // backfill's service serves this browser, as any service may: nothing keeps a browser off the
 // rooms it stamps.
 func TestStoredOrderBackfillDoesNotStoreTheRoomsCommittedEditTwice(t *testing.T) {
+	t.Parallel()
 	service, artifactID := storedOrderService(t)
 	appends, ok := service.persistence.(*PgVersioned)
 	if !ok {

@@ -44,6 +44,7 @@ func TestEnsureBlockIDsRemintsDuplicateAfterFirstOccurrence(t *testing.T) {
 }
 
 func TestBlockIDForRangeUsesTheLowestContainingBlock(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		tree *Node
@@ -193,6 +194,7 @@ func TestParseForWriteParsesADocumentWithoutRepeatsAsParseDoes(t *testing.T) {
 // accept or an upload beside it is not the one repeating anything. Only an id the stored document
 // would carry on more blocks than the live one does is refused, and the refusal names it.
 func TestRepeatedBlockIDJudgesOnlyWhatTheWriteAdds(t *testing.T) {
+	t.Parallel()
 	parse := func(markdown string, ids ...string) *Node {
 		t.Helper()
 		tree, err := Parse(markdown)

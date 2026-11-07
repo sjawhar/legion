@@ -109,6 +109,7 @@ func reply(status int, body any) *http.Response {
 // In a pod this row runs -run-filtered: the package's contract rows need SO_PEERPIDFD, which
 // gVisor does not answer, and fail PEER_UNIDENTIFIED. CI's envoy-go job runs the whole package.
 func TestRenewLoopOutlivesAnOutageOnlyAboveTheLeaseBound(t *testing.T) {
+	t.Parallel()
 	model := leasetime.Production().Scale(outageUnit)
 	sweep := 5 * outageUnit
 	// minMargin is how far from the boundary each lease below has to be: the row decides the

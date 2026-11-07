@@ -69,6 +69,7 @@ func errorText(err error) string {
 // close otherwise under the flanking rules alone, under both readers that report it and with or
 // without footnote definitions after the run.
 func TestFlankingDivergenceIsReportedOnlyWhereTheRulesDiffer(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		markdown string
 		diverged bool
@@ -97,6 +98,7 @@ func TestFlankingDivergenceIsReportedOnlyWhereTheRulesDiffer(t *testing.T) {
 // source holding `~` is read back under storedMarkdown, which pairs `~` runs of either length and
 // reads no `*` run as opening or closing beside a `~`.
 func TestRenderReadsBackUnderEveryReaderASkipCouldMiss(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		doc  *Node

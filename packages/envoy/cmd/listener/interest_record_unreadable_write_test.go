@@ -24,6 +24,7 @@ import (
 // topics the subscribe names (200) and the registry logs that at WARN naming the session, and POST
 // /v1/interests/unsubscribe answers 200 and leaves it as it is.
 func TestTheInterestWriteRoutesAnswerOverAnUnreadableInterestRecord(t *testing.T) {
+	t.Parallel()
 	const unreadableRecord = "not a json interest record"
 	client, err := bus.ConnectOwningStream([]string{testnats.URL(t)}, bus.WithReplicas(1))
 	if err != nil {

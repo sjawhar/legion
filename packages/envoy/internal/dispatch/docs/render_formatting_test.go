@@ -49,6 +49,7 @@ var formattingWords = strings.Fields("one two three alpha beta gamma")
 // exactly the formatting the room committed, under writes of both kinds: the room's own local
 // transactions, which it never cleans up after, and its browsers' updates, which it does.
 func TestRenderReuseAReplicaReplaysTheRoomsFormattingExactly(t *testing.T) {
+	t.Parallel()
 	// The storm below runs four seeds by 160 steps, and two by 60 under the race detector or
 	// -short, where each round costs several times as much. The read sits in the test rather
 	// than in the helper it passes the sizes to, since that is what makes this test the one
@@ -71,6 +72,9 @@ func TestRenderReuseAReplicaReplaysTheRoomsFormattingExactly(t *testing.T) {
 // they leave are the room's own and the replica must keep every one - which is why such a replica
 // is caught at that third write, by the markers it tombstones and the room does not.
 func testAReplicaKeepsARunTheRoomLeftPlain(t *testing.T) {
+	// This case drives a service, a database and a document of its own, so it runs beside the
+	// storm below.
+	t.Parallel()
 	service, artifactID, sh, live, replica := newFormattingRoom(t)
 
 	// The run's tail loses its italics: the marker that ends them stands in the gap the later
@@ -128,8 +132,14 @@ func testAReplicaKeepsARunTheRoomLeftPlain(t *testing.T) {
 // must stand exactly where the room stands: the same state vector and delete set, and the same
 // delta for every text node of the fragment.
 func testAReplicaReplaysInterleavedFormatting(t *testing.T, seeds []uint64, steps int) {
+	t.Parallel()
 	for _, seed := range seeds {
-		t.Run(fmt.Sprintf("seed %d", seed), func(t *testing.T) { formattingRound(t, seed, steps) })
+		t.Run(fmt.Sprintf("seed %d", seed), func(t *testing.T) {
+			// Each seed drives a service and a document of its own, so the rounds run beside
+			// one another.
+			t.Parallel()
+			formattingRound(t, seed, steps)
+		})
 	}
 }
 

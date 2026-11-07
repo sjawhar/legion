@@ -29,6 +29,7 @@ func answered(status int, retryAfter string) error {
 // keep the 15 s retry rather than starting the backoff, until a success (reset) ends that; only
 // then does a 4xx back off again.
 func TestAfterALostAnswerAnsweredRefusalsKeepTheFixedRetry(t *testing.T) {
+	t.Parallel()
 	lost := &url.Error{Op: "Post", URL: "https://broker.internal.example/v1/oauth/token", Err: io.ErrUnexpectedEOF}
 	s := (&Broker{}).newRetrySchedule()
 	if wait := s.next(lost); wait != defaultRefreshRetry {
@@ -49,6 +50,7 @@ func TestAfterALostAnswerAnsweredRefusalsKeepTheFixedRetry(t *testing.T) {
 // dropped (a concurrent LAUNCHER_INVALID) returns errNoOutcome, which the schedule does not read
 // as a settled refresh: after a lost answer, the 4xx that follows still waits the fixed retry.
 func TestARefreshWithNoCredentialSettlesNothing(t *testing.T) {
+	t.Parallel()
 	if err := (&Broker{}).refresh(context.Background()); !errors.Is(err, errNoOutcome) {
 		t.Fatalf("a refresh holding no credential = %v; want errNoOutcome", err)
 	}
@@ -68,6 +70,7 @@ func TestARefreshWithNoCredentialSettlesNothing(t *testing.T) {
 // TestARetryAfterIsCappedAtAMinute: a 429's Retry-After is honoured up to 60 s; a longer one waits
 // 60 s, so no hop's large value stops the refresh.
 func TestARetryAfterIsCappedAtAMinute(t *testing.T) {
+	t.Parallel()
 	s := (&Broker{}).newRetrySchedule()
 	for retryAfter, want := range map[string]time.Duration{"45": 45 * time.Second, "60": time.Minute, "61": time.Minute, "86400": time.Minute} {
 		if wait := s.next(answered(429, retryAfter)); wait != want {
@@ -80,6 +83,7 @@ func TestARetryAfterIsCappedAtAMinute(t *testing.T) {
 // would copy the presented one in) is an error answer: the held login and the machine file keep
 // the presented token, and the refresh is retried on the fixed retry.
 func TestATokenAnswerWithoutARefreshTokenIsNotSaved(t *testing.T) {
+	t.Parallel()
 	f := newFakeBroker(t)
 	b := loggedInBroker(t, f, "ada@example.com")
 	held := b.cred.Load()
@@ -105,6 +109,7 @@ func TestATokenAnswerWithoutARefreshTokenIsNotSaved(t *testing.T) {
 // LAUNCHER_INVALID dropped is retired at the broker once a new login is installed, as one the new
 // login replaces is, so no old copy of its file can still refresh it.
 func TestAReLoginAfterALauncherRefusalRetiresTheDroppedCredential(t *testing.T) {
+	t.Parallel()
 	f := newFakeBroker(t)
 	b := loggedInBroker(t, f, "ada@example.com")
 	dropped := b.cred.Load().id

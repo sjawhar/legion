@@ -3,6 +3,7 @@ package pmdoc
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,34 +18,50 @@ import (
 // null: a table cell with no alignment holds "none", since that editor gives an absent alignment
 // the default, left, and writes it back when the cell is edited, and a code block with no
 // language and an image with no title hold "", that editor's own default.
+// One run of gen/decode.ts reads every fixture's bytes: the Go side writes them all first, since
+// starting bun and building the headless engine costs about a second and a fixture's own decode a
+// few milliseconds (decodeAllWithYProsemirror).
 func TestUpdateFromEmptyEqualsAuthoredByBrowser(t *testing.T) {
-	for _, fx := range loadFixtures(t) {
+	t.Parallel()
+	fixtures := loadFixtures(t)
+	type authored struct {
+		want    *Node
+		read    *Node
+		readErr error
+	}
+	written := make([]authored, len(fixtures))
+	updates := make([][]byte, len(fixtures))
+	for index, fx := range fixtures {
+		want, err := FromJSON(fx.PMJSON)
+		if err != nil {
+			t.Fatalf("%s: %v", fx.Name, err)
+		}
+		doc := crdt.New(crdt.WithClientID(1))
+		frag := doc.GetXmlFragment("prosemirror")
+		doc.Transact(func(txn *crdt.Transaction) {
+			err = Update(txn, frag, want)
+		})
+		if err != nil {
+			t.Fatalf("%s: %v", fx.Name, err)
+		}
+		read, readErr := Read(frag)
+		written[index] = authored{want: want, read: read, readErr: readErr}
+		updates[index] = crdt.EncodeStateAsUpdateV1(doc, nil)
+	}
+	decoded := decodeAllWithYProsemirror(t, updates)
+
+	for index, fx := range fixtures {
 		t.Run(fx.Name, func(t *testing.T) {
-			want, err := FromJSON(fx.PMJSON)
-			if err != nil {
-				t.Fatal(err)
+			t.Parallel()
+			authored := written[index]
+			if authored.readErr != nil {
+				t.Fatal(authored.readErr)
 			}
-
-			doc := crdt.New(crdt.WithClientID(1))
-			frag := doc.GetXmlFragment("prosemirror")
-			doc.Transact(func(txn *crdt.Transaction) {
-				err = Update(txn, frag, want)
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-
-			got, err := Read(frag)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !got.Equal(want) {
+			if !authored.read.Equal(authored.want) {
 				t.Fatal("Read after Update differs from want")
 			}
-
-			pm := decodeWithYProsemirror(t, crdt.EncodeStateAsUpdateV1(doc, nil))
-			if live := asTheLiveDocumentHoldsIt(want); !pm.Equal(live) {
-				actual, _ := pm.JSON()
+			if live := asTheLiveDocumentHoldsIt(authored.want); !decoded[index].Equal(live) {
+				actual, _ := decoded[index].JSON()
 				expected, _ := live.JSON()
 				t.Fatalf("y-prosemirror decodes Go-authored bytes differently\n got: %s\nwant: %s", actual, expected)
 			}
@@ -83,6 +100,7 @@ func asTheLiveDocumentHoldsIt(doc *Node) *Node {
 }
 
 func TestUpdateIsNoOpForEqualTree(t *testing.T) {
+	t.Parallel()
 	for _, fx := range loadFixtures(t) {
 		t.Run(fx.Name, func(t *testing.T) {
 			doc := crdt.New()
@@ -111,6 +129,7 @@ func TestUpdateIsNoOpForEqualTree(t *testing.T) {
 }
 
 func TestUpdateEditsOnlyTheChangedRun(t *testing.T) {
+	t.Parallel()
 	fx := fixtureNamed(t, "marks")
 	doc := crdt.New()
 	if err := crdt.ApplyUpdateV1(doc, fx.YjsUpdateV1, nil); err != nil {
@@ -186,14 +205,41 @@ func hasMark(node *Node, markType string) bool {
 	return false
 }
 
+// decodeWithYProsemirror is the node the browser editor holds for one Go-authored update.
 func decodeWithYProsemirror(t *testing.T, update []byte) *Node {
 	t.Helper()
-	output := genResult(t, "decode.ts", base64.StdEncoding.EncodeToString(update))
-	t.Log("y-prosemirror decoded with decode.ts")
+	return decodeAllWithYProsemirror(t, [][]byte{update})[0]
+}
 
-	decoded, err := FromJSON(output)
-	if err != nil {
-		t.Fatalf("decode.ts output: %v\n%s", err, output)
+// decodeAllWithYProsemirror is the node the browser editor holds for each update, decoded by one
+// run of gen/decode.ts over all of them (genLines).
+func decodeAllWithYProsemirror(t *testing.T, updates [][]byte) []*Node {
+	t.Helper()
+	lines := make([]string, len(updates))
+	for index, update := range updates {
+		line, err := json.Marshal(map[string]any{"id": index, "update": base64.StdEncoding.EncodeToString(update)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		lines[index] = string(line)
+	}
+	read := genLines(t, "decode.ts", lines)
+	if len(read) != len(updates) {
+		t.Fatalf("decode.ts answered %d of %d updates", len(read), len(updates))
+	}
+	decoded := make([]*Node, len(read))
+	for index, line := range read {
+		var answer struct {
+			PM json.RawMessage `json:"pm"`
+		}
+		if err := json.Unmarshal([]byte(line), &answer); err != nil {
+			t.Fatalf("decode.ts output line %d: %v\n%s", index, err, line)
+		}
+		node, err := FromJSON(answer.PM)
+		if err != nil {
+			t.Fatalf("decode.ts output line %d: %v\n%s", index, err, answer.PM)
+		}
+		decoded[index] = node
 	}
 	return decoded
 }
@@ -207,12 +253,7 @@ func decodeWithYProsemirror(t *testing.T, update []byte) *Node {
 // test's own check of the result is what fails on it.
 func genResult(t *testing.T, script string, args ...string) []byte {
 	t.Helper()
-	if _, err := exec.LookPath("bun"); err != nil {
-		if os.Getenv("CI") == "" {
-			t.Skipf("bun is not on PATH; %s is required in CI", script)
-		}
-		t.Fatalf("bun is required in CI: %v", err)
-	}
+	requireBun(t, script)
 	out := filepath.Join(t.TempDir(), "result")
 	cmd := genScript(script, append(args, out)...)
 	var stderr bytes.Buffer
@@ -231,6 +272,51 @@ func genResult(t *testing.T, script string, args ...string) []byte {
 	return result
 }
 
+// genLines runs gen/<script> over lines, one JSON record a line, handing it an input file, an
+// output file and args, and returns the lines it wrote. A gen script that reads a file of records
+// answers every one of them in one run (decode.ts, differential.ts): starting bun and building the
+// headless engine costs about a second, far more than any one record's own work, so a test over
+// many inputs starts one process rather than one per input.
+func genLines(t *testing.T, script string, lines []string, args ...string) []string {
+	t.Helper()
+	requireBun(t, script)
+	dir := t.TempDir()
+	in, out := filepath.Join(dir, "in.jsonl"), filepath.Join(dir, "out.jsonl")
+	if err := os.WriteFile(in, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := genScript(script, append([]string{in, out}, args...)...)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	stdout, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("%s: %v\nstderr:\n%s", script, err, stderr.Bytes())
+	}
+	if len(stdout) > 0 {
+		t.Fatalf("%s printed %d bytes to stdout, which nothing reads: a gen script writes its result to the file it is given\nstderr:\n%s", script, len(stdout), stderr.Bytes())
+	}
+	raw, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("%s exited 0 without writing its result to the file it is given: %v\nstderr:\n%s", script, err, stderr.Bytes())
+	}
+	if text := strings.TrimRight(string(raw), "\n"); text != "" {
+		return strings.Split(text, "\n")
+	}
+	return nil
+}
+
+// requireBun fails a test that reads the browser editor's engine where bun is missing in CI, and
+// skips it where no CI runs it.
+func requireBun(t *testing.T, script string) {
+	t.Helper()
+	if _, err := exec.LookPath("bun"); err != nil {
+		if os.Getenv("CI") == "" {
+			t.Skipf("bun is not on PATH; %s is required in CI", script)
+		}
+		t.Fatalf("bun is required in CI: %v", err)
+	}
+}
+
 // genScript is the command that runs gen/<script> with args, as every test that reads the
 // browser editor's engine runs it.
 func genScript(script string, args ...string) *exec.Cmd {
@@ -247,6 +333,7 @@ func genScript(script string, args ...string) *exec.Cmd {
 // holds "none", and a code block with no language and an image with no title come back holding ""
 // unless the read gives "" back as null (liveNulls).
 func TestNullAttributesSurviveABrowserEdit(t *testing.T) {
+	t.Parallel()
 	written, err := Parse("| a | b | c |\n| --- | :---: | ---: |\n| d | e | f |\n\n```\ncode\n```\n\n![alt](src.png) tail\n")
 	if err != nil {
 		t.Fatal(err)
@@ -301,6 +388,7 @@ func firstNodeOfType(node *Node, nodeType string) *Node {
 }
 
 func TestUpdateAppliesMarksToInsertedTextAtRunBoundary(t *testing.T) {
+	t.Parallel()
 	seed, err := Parse("A **B**\n")
 	if err != nil {
 		t.Fatal(err)
@@ -340,6 +428,7 @@ func TestUpdateAppliesMarksToInsertedTextAtRunBoundary(t *testing.T) {
 }
 
 func TestUpdatePreservesMarksAcrossAstralEdit(t *testing.T) {
+	t.Parallel()
 	seed, err := Parse("😀 before **marked**\n")
 	if err != nil {
 		t.Fatal(err)
@@ -372,6 +461,7 @@ func TestUpdatePreservesMarksAcrossAstralEdit(t *testing.T) {
 // then the new one into a ygo document and reads back what it stores, through Read and through a
 // y-prosemirror decode of the whole state, as the document's readers see it.
 func TestUpdateRewritesEmojiThatShareHalfOfAPair(t *testing.T) {
+	t.Parallel()
 	for name, test := range map[string]struct{ was, now string }{
 		"a shared high surrogate": {was: "before \U0001F4CA after", now: "before \U0001F4CB after"},
 		"a shared low surrogate":  {was: "before \U0001F60A after", now: "before \U0001FA0A after"},
@@ -417,6 +507,7 @@ func TestUpdateRewritesEmojiThatShareHalfOfAPair(t *testing.T) {
 // (units16). It assumes that text is valid UTF-8, which ygo keeps true at both doors: an insert of
 // invalid UTF-8 panics, and an update carrying it is refused.
 func TestAYgoDocumentNeverHoldsInvalidUTF8Text(t *testing.T) {
+	t.Parallel()
 	writer := crdt.New()
 	text := writer.GetText("t")
 	func() {
@@ -443,6 +534,7 @@ func TestAYgoDocumentNeverHoldsInvalidUTF8Text(t *testing.T) {
 // A run carrying two comments is written as two Y attribute keys, read back as both, decoded by
 // y-prosemirror as both, and rewritten as nothing.
 func TestUpdateWritesEachOfTwoMarksOfOneTypeOnOneRun(t *testing.T) {
+	t.Parallel()
 	bob := Mark{Type: "proofComment", Attrs: Attrs{"id": "c1", "by": "user:bob"}}
 	alice := Mark{Type: "proofComment", Attrs: Attrs{"id": "c2", "by": "user:alice"}}
 	want := &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: []*Node{

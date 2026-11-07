@@ -12,6 +12,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/logtest"
 )
 
 // INFRA-258. A transaction that only locked rows - a claim's SELECT ... FOR UPDATE - is given a
@@ -19,6 +20,7 @@ import (
 // failed after such a commit made nothing, so its next attempt runs the request again rather than
 // being told KEY_COMMITTED for a write that never landed.
 func TestALockOnlyTransactionMarksNothing(t *testing.T) {
+	t.Parallel()
 	var rig *keyedRig
 	rig = newKeyedRig(t, func(run int32, w http.ResponseWriter, r *http.Request) {
 		tx, err := rig.database.Pool.Begin(r.Context())
@@ -57,6 +59,7 @@ func TestALockOnlyTransactionMarksNothing(t *testing.T) {
 // mark taken in a statement of its own before the COMMIT would stay, and every repeat would be told
 // KEY_COMMITTED for a write that never landed.
 func TestACommitThatFailsAfterTheMarkLeavesNoMark(t *testing.T) {
+	t.Parallel()
 	var rig *keyedRig
 	rig = newKeyedRig(t, func(run int32, w http.ResponseWriter, r *http.Request) {
 		tx, err := rig.database.Pool.Begin(r.Context())
@@ -110,6 +113,8 @@ func TestACommitThatFailsAfterTheMarkLeavesNoMark(t *testing.T) {
 // past IdempotencyKeyTTL and keeps one inside it, so a repeat of a day-old press is still answered
 // from its key and one past the window is a new write.
 func TestTheMaintenanceLoopKeepsAKeyForItsWholeWindow(t *testing.T) {
+	// No t.Parallel: this test reads what the process's own default logger was handed, which
+	// every other test running beside it would write into too.
 	rig := newKeyedRig(t, answerRun)
 	for _, key := range []string{"inside", "past"} {
 		if response := rig.send(t, "a", nil, "alice", key); response.Code != http.StatusCreated {
@@ -123,9 +128,7 @@ func TestTheMaintenanceLoopKeepsAKeyForItsWholeWindow(t *testing.T) {
 		t.Fatal(err)
 	}
 	logs := &storetest.LockedLog{}
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	logtest.SetDefault(t, slog.NewTextHandler(logs, nil))
 	ctx, stop := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
@@ -163,6 +166,7 @@ func TestTheMaintenanceLoopKeepsAKeyForItsWholeWindow(t *testing.T) {
 // A replay carries every header the first answer's handler set, not its Content-Type alone, so a
 // header a write answers with (a Location) reaches the client that asks again too.
 func TestAReplayCarriesTheFirstAnswersHeaders(t *testing.T) {
+	t.Parallel()
 	rig := newKeyedRig(t, func(run int32, w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Location", "/test/a/writes/1")
 		answerRun(run, w, r)
@@ -184,6 +188,7 @@ func TestAReplayCarriesTheFirstAnswersHeaders(t *testing.T) {
 // merged into it: only the members a write's answer carries beside the resource (its advice) are
 // ever kept from the first answer.
 func TestARecoveredReplayKeepsNothingOfARefusal(t *testing.T) {
+	t.Parallel()
 	stored := []byte(`{"code":"MESSAGE_TARGET_CHANGED","error":"the target moved","advice":{"kept":true}}`)
 	refused := http.StatusConflict
 	held := heldRequestKey{status: &refused, response: stored, kept: true}
@@ -209,6 +214,7 @@ func TestARecoveredReplayKeepsNothingOfARefusal(t *testing.T) {
 // request_keys holds its rows to their states: an answered key holds no lease, and nothing of an
 // answer is stored without its status.
 func TestARequestKeysRowIsOneOfItsStates(t *testing.T) {
+	t.Parallel()
 	rig := newKeyedRig(t, answerRun)
 	for name, statement := range map[string]string{
 		"an answer under a lease": `insert into request_keys (login, idempotency_key, request_digest, method, path, status)
@@ -229,6 +235,7 @@ func TestARequestKeysRowIsOneOfItsStates(t *testing.T) {
 // POST or PATCH route the server registers: a pattern spelled wrong would silently turn its rule
 // off.
 func TestEveryKeyedRouteTableNamesARoute(t *testing.T) {
+	t.Parallel()
 	registered := map[string]bool{}
 	for _, route := range (&server{}).routes() {
 		if keyedMethod(route.Method) {

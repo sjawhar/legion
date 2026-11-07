@@ -35,6 +35,7 @@ func equalYTextPTextByDelta(text *crdt.YXmlText, nodes []*Node) bool {
 }
 
 func TestEqualYTextPTextAnswersTheDeltaComparison(t *testing.T) {
+	t.Parallel()
 	// variants are the node runs each text is compared against: the run the document holds, and
 	// the ways a write changes one.
 	variants := func(nodes []*Node) [][]*Node {

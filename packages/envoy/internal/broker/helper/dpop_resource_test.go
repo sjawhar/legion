@@ -91,6 +91,7 @@ func (c *capturedRequests) RoundTrip(r *http.Request) (*http.Response, error) {
 // hashes another token does not; and a request presenting no token is still a token endpoint
 // request, whose proof carries no 'ath' and verifies as it did before.
 func TestTheDPoPTransportSignsAResourceRequestWithTheAccessTokenHash(t *testing.T) {
+	t.Parallel()
 	const (
 		resourceURL = "http://dispatch.example/api/v1/sessions?limit=1"
 		resourceHTU = "http://dispatch.example/api/v1/sessions"

@@ -101,6 +101,7 @@ func insertAtEnd(markdown string) map[string]any {
 // its rare words, the answer names the block, and the check is recorded against the document's
 // issue. An edit after it that adds no block - plain text, a reworded block - answers no check.
 func TestDecisionBlockCheckAnswersTheEditsNewBlock(t *testing.T) {
+	t.Parallel()
 	handler, database, _ := newTestServer(t, testServerOptions{})
 	createSuggestionProject(t, handler, "DBLK")
 	target := createSearchIssue(t, handler, "DBLK", "Dashboard ledger for zymurgy batches", "")
@@ -149,6 +150,7 @@ func TestDecisionBlockCheckAnswersTheEditsNewBlock(t *testing.T) {
 // An edit adding six decision blocks checks the first five, in document order, and answers the
 // sixth that its check was not made, recording that too.
 func TestDecisionBlockChecksPastFiveAreNotMade(t *testing.T) {
+	t.Parallel()
 	handler, database, _ := newTestServer(t, testServerOptions{})
 	createSuggestionProject(t, handler, "SIX")
 	createSearchIssue(t, handler, "SIX", "Dashboard ledger for zymurgy batches", "")
@@ -202,6 +204,7 @@ func TestDecisionBlockChecksPastFiveAreNotMade(t *testing.T) {
 // document completes while the first is still waiting on its decision block's check, here held
 // behind a lock on the term statistics every check reads.
 func TestDecisionBlockCheckDoesNotHoldTheConditionalEditGate(t *testing.T) {
+	t.Parallel()
 	handler, database, _ := newTestServer(t, testServerOptions{})
 	createSuggestionProject(t, handler, "GATE")
 	spec := "# Spec\n\nPlanning notes.\n"
@@ -226,7 +229,7 @@ func TestDecisionBlockCheckDoesNotHoldTheConditionalEditGate(t *testing.T) {
 	// once something waits on the lock. (Another waiter, the term statistics refresh the issue's
 	// own check started, may be the one seen: the commit is what the second edit needs.) The second
 	// edit is guarded by the paragraph it rewrites, which the first block's settlement leaves alone.
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(concurrentWait)
 	var second map[string]any
 	for {
 		var waiting int
@@ -272,6 +275,7 @@ func TestDecisionBlockCheckDoesNotHoldTheConditionalEditGate(t *testing.T) {
 // project with the document itself left out, though it holds the block's words, and is recorded
 // against that document.
 func TestDecisionBlockCheckOnAProjectDocumentLeavesTheDocumentOut(t *testing.T) {
+	t.Parallel()
 	handler, database, _ := newTestServer(t, testServerOptions{})
 	createSuggestionProject(t, handler, "PDBL")
 	target := createSearchIssue(t, handler, "PDBL", "Dashboard ledger for zymurgy batches", "")
@@ -317,6 +321,7 @@ func TestDecisionBlockCheckOnAProjectDocumentLeavesTheDocumentOut(t *testing.T) 
 // ask shares a word with every block and carries a long answer, so each check reads every ask's
 // state and its cursor stays open over several network reads, which is when the others collided.
 func TestDecisionBlockChecksEachReadTheirAskStatesAndRecord(t *testing.T) {
+	t.Parallel()
 	handler, database, _ := newTestServer(t, testServerOptions{})
 	createSuggestionProject(t, handler, "RACE")
 	const shared = " For the aerostat programme."

@@ -206,6 +206,13 @@ Each item below names a task and where its code is, then notes on it.
   Shared the way `internal/pgmigrate` is, since the broker's cross-pod secret-reread fan-out (`internal/broker/reread`) listens on the same kind of connection as Dispatch's delivery hub, event stream relay, events outbox and, under `DISPATCH_TEST_HOOKS` alone, test-hook fan-out (`internal/dispatch/api`, `test_hooks_fanout.go`) and its listener hub;
   each caller sets `Listener.Owner` (or `Hub.Owner`), the prefix of the one line the loop logs, and an unset `Owner` logs `dispatch`
 
+- **Test databases' shared rules**: `internal/dispatch/store/storetest/`, `internal/broker/store/storetest/`
+
+  Dispatch's harness migrates one template per test process and hands each test a `strategy file_copy` clone of it, dropped when that test ends (`Open`, `OpenFresh`, `Main`);
+  the broker's gives each test a migrated schema of its own on the one server, and a database of its own only where a schema cannot serve (`URL`, `Open`, `DatabaseURL`).
+  Nothing is handed from one test to the next, so no test can be given a database another test wrote in; what makes three forced checkpoints a test affordable is the server, a container deleted with the job running with `fsync`, `full_page_writes` and `synchronous_commit` off (docs/testing.md, "A database a Go test creates").
+  Each harness keeps its own exported surface, environment variable and migrations
+
 - **GitHub webhook redelivery**: `internal/dispatch/redeliver/`, `cmd/dispatch/redeliver.go`
 
   Dispatch's sweep of the App webhook's failed deliveries; `internal/dispatch/githubapp/githubapptest` fakes GitHub's delivery API
@@ -6012,7 +6019,7 @@ The Postgres-backed tests skip, rather than fail, when `BROKER_TEST_DATABASE_URL
 `cmd/broker/multiprocess_test.go` builds under the `multiprocess` tag alone and starts real `cmd/broker` binaries against one such database, driving them over real HTTP (`brokertest`'s client) and their own logs:
 one refresh token and one device code each raced against both processes, both migrating one empty database at once, a retag one process is told to reread being enforced by the other through the fan-out, that fan-out spending no rate-limit token on the pod it reaches, and a signalled process failing readiness while it serves a request out past the old ten-second shutdown budget.
 CI's `broker-multiprocess` job runs them
-— `go test -tags multiprocess -count=1 -timeout 20m ./cmd/broker` in `packages/envoy` — in a job of its own, since each row waits out tens of seconds and `envoy-go`'s unit step runs under go test's default ten-minute package deadline.
+— `go test -tags multiprocess -count=1 -timeout 20m ./cmd/broker` in `packages/envoy` — in a job of its own, since each row waits out tens of seconds, which the 20 minutes `envoy-go`'s unit step gives the whole module would be spent on.
 The job runs only when a file its `broker_multiprocess` filter in `.github/workflows/ci.yaml` names changes;
 see Critical conventions for what keeps that filter current.
 Every client-facing lane's own test mounts the real broker handlers (`api.Register` with real, Postgres-backed services) rather than a hand-rolled fake standing in for broker behavior

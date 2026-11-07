@@ -16,6 +16,7 @@ const asksAnchorArtifactIDVersion = 148
 // asks_anchor_artifact_id, where AsksOutsideAnchorArtifactIndex counts them for the boot log. A
 // non-canonical spelling of a real document id is left out the same way.
 func TestMigration0148BootsOverAnAskWhoseAnchorArtifactIDDoesNotCast(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store := openEmptyTestStore(t)
 	if err := store.migrate(ctx, migrationsThrough(t, asksAnchorArtifactIDVersion-1)); err != nil {

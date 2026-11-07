@@ -86,7 +86,7 @@ func (f *reconnectWaitFixture) awaitAnswer(t *testing.T, answer <-chan error) er
 	select {
 	case err := <-answer:
 		return err
-	case <-time.After(15 * time.Second):
+	case <-time.After(busWait):
 		t.Fatal("the publish never returned")
 		return nil
 	}
@@ -120,6 +120,7 @@ func (f *reconnectWaitFixture) requireNothingReceived(t *testing.T, what string,
 // the same reconnect: it must be received, so the cancelled case's silence is the cancel's doing
 // and not a publish that never reached the wait.
 func TestAPublishCancelledWhileWaitingForAReconnectSendsNothing(t *testing.T) {
+	t.Parallel()
 	f := newReconnectWaitFixture(t, "cancel-while-reconnecting")
 
 	// publishDuringReconnect starts the publish under ctx while the client is reconnecting, calls
@@ -134,7 +135,7 @@ func TestAPublishCancelledWhileWaitingForAReconnectSendsNothing(t *testing.T) {
 		case <-waiting:
 		case err := <-answer:
 			t.Fatalf("the publish answered %v without entering the reconnect wait", err)
-		case <-time.After(5 * time.Second):
+		case <-time.After(busWait):
 			t.Fatal("the publish never entered the reconnect wait")
 		}
 		release()
@@ -177,6 +178,7 @@ func TestAPublishCancelledWhileWaitingForAReconnectSendsNothing(t *testing.T) {
 // The control is the same publish with the same tick and no cancel: it must be received, so the
 // cancelled case's silence is the cancel's doing and not a publish that never got past the wait.
 func TestAPublishCancelledAsTheReconnectCompletesSendsNothing(t *testing.T) {
+	t.Parallel()
 	f := newReconnectWaitFixture(t, "cancel-as-reconnected")
 
 	// publishAsTheReconnectCompletes publishes under ctx while the client is reconnecting; the

@@ -14,6 +14,7 @@ import (
 // text carrying marks, which the markdown matcher reads through. Each pins the range the text
 // answers with through FindQuote, so they hold whatever the flattening does inside.
 func TestFlattenedTextAnswersQuoteRanges(t *testing.T) {
+	t.Parallel()
 	text := func(value string, marks ...Mark) *Node { return &Node{Type: "text", Text: value, Marks: marks} }
 	paragraph := func(children ...*Node) *Node { return &Node{Type: "paragraph", Children: children} }
 	document := func(blocks ...*Node) *Node { return &Node{Type: "doc", Children: blocks} }

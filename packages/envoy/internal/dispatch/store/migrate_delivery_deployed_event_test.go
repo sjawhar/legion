@@ -18,6 +18,7 @@ const deliveryDeployedEventVersion = 114
 // failed, one not merged, and one outside the deploy repository keep null and get their event when
 // a shipping run arrives.
 func TestMigrationStampsThePullRequestsAlreadyShipped(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store := openEmptyTestStore(t)
 	if err := store.migrate(ctx, migrationsThrough(t, deliveryDeployedEventVersion-1)); err != nil {

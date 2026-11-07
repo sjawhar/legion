@@ -25,6 +25,7 @@ import (
 // several times, so a clock started too early fails this test on every run rather than on a race
 // between its first beat and the exit.
 func TestABrokerThatDiesBeforeServingRecordsNoServingBeat(t *testing.T) {
+	t.Parallel()
 	databaseURL := storetest.URL(t)
 	const discoveryDelay = 3 * time.Second
 	issuer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

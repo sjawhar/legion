@@ -6,24 +6,25 @@ import (
 )
 
 // TestUnplaceableRetryWindowFitsTheBoundsItDependsOn pins the arithmetic the unplaceable retry
-// rests on. The window (defaultUnplaceableRetryWindow), its NAK delay (unplaceableRetryDelay),
-// the deferral slots' expiry (unplaceableDeferralExpiry), the durable's MaxDeliver,
-// MaxAckPending and AckWait (consumerMaxDeliver, consumerMaxAckPending, consumerAckWait,
-// durable.go) and the attempt cache's TTL (attemptCacheTTL, main.go) are seven constants in
-// three files, and changing any one of them alone silently breaks a property no delivery test
-// would report: a message simply stops arriving, or the durable's pending budget stops being
-// bounded, with no failure and no record anywhere.
+// rests on. The window (defaultUnplaceableRetryWindow), its NAK delay
+// (defaultUnplaceableRetryDelay), the deferral slots' expiry (unplaceableDeferralExpiry), the
+// durable's MaxDeliver, MaxAckPending and AckWait (consumerMaxDeliver, consumerMaxAckPending,
+// consumerAckWait, durable.go) and the attempt cache's TTL (attemptCacheTTL, main.go) are seven
+// constants in three files, and changing any one of them alone silently breaks a property no
+// delivery test would report: a message simply stops arriving, or the durable's pending budget
+// stops being bounded, with no failure and no record anywhere.
 func TestUnplaceableRetryWindowFitsTheBoundsItDependsOn(t *testing.T) {
-	// The window is spent as whole deferrals of unplaceableRetryDelay each, counted from the
-	// first delivery, so a message's deliveries are the deferrals the window buys plus the
+	t.Parallel()
+	// The window is spent as whole deferrals of defaultUnplaceableRetryDelay each, counted from
+	// the first delivery, so a message's deliveries are the deferrals the window buys plus the
 	// first delivery that asked for the first of them.
-	deliveries := int(defaultUnplaceableRetryWindow/unplaceableRetryDelay) + 1
+	deliveries := int(defaultUnplaceableRetryWindow/defaultUnplaceableRetryDelay) + 1
 	// The margin is the deliveries this handler does not ask for: one whose handler died
 	// before it finalized and whose AckWait therefore expired still counts against max_deliver.
 	margin := consumerMaxDeliver - unplaceableMaxDeliveries
 	if deliveries+margin > consumerMaxDeliver {
 		t.Fatalf("a %s window retried every %s is %d deliveries, %d with the margin, which is past the durable's MaxDeliver of %d: JetStream would stop redelivering silently - nothing here consumes its advisory - before this listener wrote its give-up record, which is the loss this bound exists to prevent",
-			defaultUnplaceableRetryWindow, unplaceableRetryDelay, deliveries, deliveries+margin, consumerMaxDeliver)
+			defaultUnplaceableRetryWindow, defaultUnplaceableRetryDelay, deliveries, deliveries+margin, consumerMaxDeliver)
 	}
 	if defaultUnplaceableRetryWindow >= attemptCacheTTL {
 		t.Fatalf("a %s retry window reaches the attempt cache's %s TTL: a message's own retries must never outlive the attempt entry whose clearing keeps each redelivery from being swallowed as a listener attempt-dedupe skip",
@@ -43,9 +44,9 @@ func TestUnplaceableRetryWindowFitsTheBoundsItDependsOn(t *testing.T) {
 	// NAK is lost on the wire, before a delivery of it can reach this listener and give its slot
 	// back. An expiry no longer than that would reclaim the slot of a message the durable is
 	// still legitimately holding, and the set would count fewer deferrals than this listener has.
-	if legitimatelyPending := unplaceableRetryDelay + consumerAckWait; unplaceableDeferralExpiry <= legitimatelyPending {
+	if legitimatelyPending := defaultUnplaceableRetryDelay + consumerAckWait; unplaceableDeferralExpiry <= legitimatelyPending {
 		t.Fatalf("a deferral slot expires after %s, no later than the %s a deferred message can legitimately stay pending (its %s NAK delay plus the durable's %s AckWait): a slot would be reclaimed while its message is still held, and the cap would stop bounding the durable's pending deferrals",
-			unplaceableDeferralExpiry, legitimatelyPending, unplaceableRetryDelay, consumerAckWait)
+			unplaceableDeferralExpiry, legitimatelyPending, defaultUnplaceableRetryDelay, consumerAckWait)
 	}
 }
 
@@ -59,6 +60,7 @@ func TestUnplaceableRetryWindowFitsTheBoundsItDependsOn(t *testing.T) {
 // and read again at the expiry, where a new message takes a slot and the orphans are gone. A
 // sequence whose own entry expired is taken afresh, with an expiry counted from the new take.
 func TestAnOrphanedDeferralSlotIsReclaimedAtItsExpiry(t *testing.T) {
+	t.Parallel()
 	start := time.Unix(1_800_000_000, 0)
 	clock := start
 	set := newUnplaceableDeferrals()

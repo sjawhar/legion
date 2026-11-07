@@ -34,6 +34,7 @@ import (
 // is the cheapest plan, and a bitmap scan answers in heap order, which loses exactly the order
 // these reads are pinned to.
 func TestMyRepliesQueriesReadTheirStatesIndex(t *testing.T) {
+	t.Parallel()
 	_, database := newTestHandlerWithStore(t)
 	ctx := context.Background()
 	tx, err := database.Pool.Begin(ctx)

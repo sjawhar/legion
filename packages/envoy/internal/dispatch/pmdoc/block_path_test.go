@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -76,6 +77,7 @@ func TestBlockPathOfPlacesBlocksInTablesAndContainers(t *testing.T) {
 // A live tree can hold a row wider than its header (the browser pads later); the column past
 // the header has an empty header, not a missing one.
 func TestBlockPathOfNamesAnEmptyHeaderWhereTheHeaderRowIsShort(t *testing.T) {
+	t.Parallel()
 	cell := func(kind, value string) *Node {
 		return &Node{Type: kind, Children: []*Node{{Type: "paragraph", Children: []*Node{{Type: "text", Text: value}}}}}
 	}
@@ -96,6 +98,7 @@ func TestBlockPathOfNamesAnEmptyHeaderWhereTheHeaderRowIsShort(t *testing.T) {
 // the column the cell is written in, while column stays the cell's child index, which
 // delete_column takes.
 func TestBlockPathOfNamesTheHeaderAboveTheColumnASpannedCellIsDrawnIn(t *testing.T) {
+	t.Parallel()
 	cell := func(kind, value string, colspan, rowspan int) *Node {
 		return &Node{Type: kind, Attrs: Attrs{"colspan": colspan, "rowspan": rowspan}, Children: []*Node{{Type: "paragraph", Children: []*Node{{Type: "text", Text: value}}}}}
 	}
@@ -146,6 +149,7 @@ func TestBlockPathOfNamesTheHeaderAboveTheColumnASpannedCellIsDrawnIn(t *testing
 // first, since the widest row raises the grid's width limit past 1,000. Laid out alone, the header
 // row stopped one column short of that, and its last column read as having no header.
 func TestBlockPathOfNamesTheHeaderTheRendererDrawsOverAWideTable(t *testing.T) {
+	t.Parallel()
 	cell := func(kind, value string, colspan int) *Node {
 		return &Node{Type: kind, Attrs: Attrs{"colspan": colspan, "rowspan": 1}, Children: []*Node{{Type: "paragraph", Children: []*Node{{Type: "text", Text: value}}}}}
 	}
@@ -181,8 +185,10 @@ func TestBlockPathOfNamesTheHeaderTheRendererDrawsOverAWideTable(t *testing.T) {
 // BlockPathsAndTableRows places every block in one walk exactly as BlockPathOf places it alone:
 // over the placement documents (placementDocuments). An id no block carries is in neither.
 func TestBlockPathsPlacesEveryBlockAsBlockPathOfDoes(t *testing.T) {
+	t.Parallel()
 	for name, doc := range placementDocuments(t) {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			paths, _, err := BlockPathsAndTableRows(doc)
 			if err != nil {
 				t.Fatal(err)
@@ -278,63 +284,71 @@ func placementDocuments(t *testing.T) map[string]*Node {
 // and cell is listed in child order with its opening words, one the live document has not stamped
 // yet with no id, since its indexes still address it.
 func TestTableRowsPlacesEveryRowAndCellAsBlockPathOfDoes(t *testing.T) {
-	tables := 0
-	for name, doc := range placementDocuments(t) {
-		listed, err := TableRows(doc)
-		if err != nil {
-			t.Fatalf("%s: %v", name, err)
-		}
-		// The cached read takes the rows from the walk that places blocks, which must list what
-		// TableRows lists alone.
-		_, rows, err := BlockPathsAndTableRows(doc)
-		if err != nil || !reflect.DeepEqual(rows, listed) {
-			t.Fatalf("%s: BlockPathsAndTableRows lists other rows than TableRows (err=%v)", name, err)
-		}
-		Walk(doc, func(node *Node) bool {
-			tableID, _ := node.Attrs[BlockIDAttr].(string)
-			if node.Type != "table" || tableID == "" {
-				return true
-			}
-			tables++
-			want := make([]TableRow, len(node.Children))
-			for rowIndex, row := range node.Children {
-				rowID, _ := row.Attrs[BlockIDAttr].(string)
-				if rowID != "" {
-					path, err := BlockPathOf(doc, rowID)
-					if err != nil || *path.Table.Row != rowIndex {
-						t.Fatalf("%s: BlockPathOf(row %q) = %#v err=%v, want row %d", name, rowID, path.Table, err, rowIndex)
-					}
+	t.Parallel()
+	var tables atomic.Int64
+	// Each document is a parallel subtest; the group holds them, so the count of the tables they
+	// found is read once every one has run.
+	t.Run("documents", func(t *testing.T) {
+		for name, doc := range placementDocuments(t) {
+			t.Run(name, func(t *testing.T) {
+				t.Parallel()
+				listed, err := TableRows(doc)
+				if err != nil {
+					t.Fatalf("%s: %v", name, err)
 				}
-				want[rowIndex] = TableRow{ID: rowID, Index: rowIndex, Cells: make([]TableCell, len(row.Children))}
-				for column, cell := range row.Children {
-					cellID, _ := cell.Attrs[BlockIDAttr].(string)
-					entry := TableCell{ID: cellID, Row: rowIndex, Column: column, Text: openingWords(oneLineText(cell))}
-					if cellID != "" {
-						place, err := BlockPathOf(doc, cellID)
-						if err != nil {
-							t.Fatalf("%s: BlockPathOf(cell %q): %v", name, cellID, err)
+				// The cached read takes the rows from the walk that places blocks, which must list
+				// what TableRows lists alone.
+				_, rows, err := BlockPathsAndTableRows(doc)
+				if err != nil || !reflect.DeepEqual(rows, listed) {
+					t.Fatalf("%s: BlockPathsAndTableRows lists other rows than TableRows (err=%v)", name, err)
+				}
+				Walk(doc, func(node *Node) bool {
+					tableID, _ := node.Attrs[BlockIDAttr].(string)
+					if node.Type != "table" || tableID == "" {
+						return true
+					}
+					tables.Add(1)
+					want := make([]TableRow, len(node.Children))
+					for rowIndex, row := range node.Children {
+						rowID, _ := row.Attrs[BlockIDAttr].(string)
+						if rowID != "" {
+							path, err := BlockPathOf(doc, rowID)
+							if err != nil || *path.Table.Row != rowIndex {
+								t.Fatalf("%s: BlockPathOf(row %q) = %#v err=%v, want row %d", name, rowID, path.Table, err, rowIndex)
+							}
 						}
-						entry.Row, entry.Column, entry.Header = *place.Table.Row, *place.Table.Column, openingWords(*place.Table.Header)
-					} else {
-						// BlockPathOf's own placement (tablePosition) of a cell no id reaches.
-						entry.Header = openingWords(*tablePosition(doc, node, tableID, []int{rowIndex, column}).Header)
+						want[rowIndex] = TableRow{ID: rowID, Index: rowIndex, Cells: make([]TableCell, len(row.Children))}
+						for column, cell := range row.Children {
+							cellID, _ := cell.Attrs[BlockIDAttr].(string)
+							entry := TableCell{ID: cellID, Row: rowIndex, Column: column, Text: openingWords(oneLineText(cell))}
+							if cellID != "" {
+								place, err := BlockPathOf(doc, cellID)
+								if err != nil {
+									t.Fatalf("%s: BlockPathOf(cell %q): %v", name, cellID, err)
+								}
+								entry.Row, entry.Column, entry.Header = *place.Table.Row, *place.Table.Column, openingWords(*place.Table.Header)
+							} else {
+								// BlockPathOf's own placement (tablePosition) of a cell no id reaches.
+								entry.Header = openingWords(*tablePosition(doc, node, tableID, []int{rowIndex, column}).Header)
+							}
+							want[rowIndex].Cells[column] = entry
+						}
 					}
-					want[rowIndex].Cells[column] = entry
+					if got := listed[tableID]; !reflect.DeepEqual(got, want) {
+						t.Fatalf("%s: TableRows[%q] = %#v, want BlockPathOf's %#v", name, tableID, got, want)
+					}
+					return true
+				})
+				for id := range listed {
+					if path, err := BlockPathOf(doc, id); err != nil || path.Type != "table" {
+						t.Fatalf("%s: TableRows lists %q, which no table carries (%v)", name, id, err)
+					}
 				}
-			}
-			if got := listed[tableID]; !reflect.DeepEqual(got, want) {
-				t.Fatalf("%s: TableRows[%q] = %#v, want BlockPathOf's %#v", name, tableID, got, want)
-			}
-			return true
-		})
-		for id := range listed {
-			if path, err := BlockPathOf(doc, id); err != nil || path.Type != "table" {
-				t.Fatalf("%s: TableRows lists %q, which no table carries (%v)", name, id, err)
-			}
+			})
 		}
-	}
-	if tables < 3 {
-		t.Fatalf("the placement documents hold %d tables with a block id, want the spanned and the wide ones at least", tables)
+	})
+	if tables.Load() < 3 {
+		t.Fatalf("the placement documents hold %d tables with a block id, want the spanned and the wide ones at least", tables.Load())
 	}
 }
 
@@ -343,6 +357,7 @@ func TestTableRowsPlacesEveryRowAndCellAsBlockPathOfDoes(t *testing.T) {
 // control: the markdown the table is written as places that cell at another column, so a column
 // read from the markdown would delete a different one.
 func TestTableRowsColumnIsTheIndexDeleteTableColumnTakes(t *testing.T) {
+	t.Parallel()
 	cell := func(kind, value string, colspan, rowspan int) *Node {
 		return &Node{Type: kind, Attrs: Attrs{"colspan": colspan, "rowspan": rowspan}, Children: []*Node{{Type: "paragraph", Children: []*Node{{Type: "text", Text: value}}}}}
 	}
@@ -390,6 +405,7 @@ func TestTableRowsColumnIsTheIndexDeleteTableColumnTakes(t *testing.T) {
 // listing skips - one with no block id, or a second table under an earlier one's id - still spends
 // what the renderer spends on it.
 func TestTablesShareOneSpanBudgetInDocumentOrder(t *testing.T) {
+	t.Parallel()
 	cell := func(kind, value string, colspan, rowspan int) *Node {
 		return &Node{Type: kind, Attrs: Attrs{"colspan": colspan, "rowspan": rowspan}, Children: []*Node{{Type: "paragraph", Children: []*Node{{Type: "text", Text: value}}}}}
 	}
@@ -465,6 +481,7 @@ func TestTablesShareOneSpanBudgetInDocumentOrder(t *testing.T) {
 // the pmdoc fixtures where laying it out through the anchored row alone put it: the grid of the
 // rows above a cell and the header row alone (prefixColumnHeader, the layout BlockPathOf used).
 func TestBlockPathOfHeadersOfTheFixturesAreThoseOfTheRowsAboveThem(t *testing.T) {
+	t.Parallel()
 	checked := 0
 	for _, fx := range loadFixtures(t) {
 		doc, err := FromJSON(fx.PMJSON)

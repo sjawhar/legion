@@ -31,6 +31,17 @@ import (
 // DISPATCH_TEST_SPEC_CORPUS names a directory, every *.md in it is one more document. Those may be
 // private specs: the test logs only their size, sha256 and anchor count, and a difference on one
 // names only lengths and sha256s.
+//
+// Serial, and its sources run one after another: each source is a document of hundreds of
+// kilobytes written through a chain of room loads, and under the race detector, which shadows
+// about four bytes a byte, two of them at once took the race job to 14.8 GiB of a 16 GiB runner
+// against race_memory.py's bound of 8 GiB (run 42376523384). This test is where that memory is,
+// so this test is where it is held: the plain lane loses one test's overlap and the race lane
+// stays inside its bound (dispatch://INFRA-1075, dispatch://INFRA-1085).
+//
+// Each source still has a comment-id range of its own (equivalenceDocument.comments), its own
+// issues and artifacts (flowIDsFor), and the sides record each room's update classes apart
+// (installClassRecorder), so nothing but the two services and their pools is shared.
 func TestAMarginWriteMatchesTheWholeDocumentWrite(t *testing.T) {
 	sources := []equivalenceSource{
 		{name: "generated-390KiB", markdown: generatedSpec(390 << 10)},
@@ -42,13 +53,11 @@ func TestAMarginWriteMatchesTheWholeDocumentWrite(t *testing.T) {
 		newEquivalenceSide(t, "whole-document write", false, wholeDocumentWrite),
 	}
 	flows := equivalenceFlows()
-	number := 0
-	for _, source := range sources {
+	for ordinal, source := range sources {
 		t.Run(source.name, func(t *testing.T) {
-			document := prepareEquivalenceDocument(t, source)
-			for _, flow := range flows {
-				number++
-				ids := flowIDsFor(number)
+			document := prepareEquivalenceDocument(t, source, ordinal)
+			for index, flow := range flows {
+				ids := flowIDsFor(ordinal*len(flows) + index + 1)
 				t.Run(flow.name, func(t *testing.T) {
 					compareFlow(t, sides, document, flow, ids)
 				})

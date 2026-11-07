@@ -13,6 +13,8 @@ import (
 // TestEnrollHelperRetriesADrainingHelper: `enroll --helper` against a helper that answers
 // DRAINING (an install is about to restart it) retries, as register does, and enrolls with the
 // restarted helper rather than exiting 1.
+// Serial: it sets process-wide variables, AGENT_SECRETS_HELPER_SOCK and AGENT_SECRETS_KEY_DIR,
+// which the enroll form reads for itself; t.Setenv panics under t.Parallel.
 func TestEnrollHelperRetriesADrainingHelper(t *testing.T) {
 	sock, calls := drainingHelper(t, 2)
 	dir := filepath.Join(t.TempDir(), "keys")
@@ -29,6 +31,8 @@ func TestEnrollHelperRetriesADrainingHelper(t *testing.T) {
 
 // TestEnrollHelperStopsRetryingDrainingAtItsWait: a helper still draining once the wait budget
 // has passed (none here) is reported with its DRAINING code, exit 1, after that one call.
+// Serial: it sets process-wide variables, AGENT_SECRETS_HELPER_SOCK and AGENT_SECRETS_KEY_DIR,
+// and assigns the package-level enrollDrainWait the enroll form reads its retry budget from.
 func TestEnrollHelperStopsRetryingDrainingAtItsWait(t *testing.T) {
 	sock, calls := drainingHelper(t, 1<<30)
 	t.Setenv("AGENT_SECRETS_HELPER_SOCK", sock)

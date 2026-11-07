@@ -21,6 +21,7 @@ func testWindow() TimeWindow {
 }
 
 func TestIsPopulationPR(t *testing.T) {
+	t.Parallel()
 	settings := testSettings()
 	window := testWindow()
 	inWindow := time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC)
@@ -122,6 +123,7 @@ func TestIsPopulationPR(t *testing.T) {
 }
 
 func TestIsRework(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		title string
 		want  bool
@@ -144,6 +146,7 @@ func TestIsRework(t *testing.T) {
 }
 
 func TestRevertKind(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		title string
 		want  string

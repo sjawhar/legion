@@ -18,6 +18,7 @@ import (
 // for a room nothing is closing or repairing, however many documents were repaired, evicted, or
 // closed with their issue without ever loading.
 func TestCloseGatesDoNotOutliveTheirRooms(t *testing.T) {
+	t.Parallel()
 	service, first := newTestService(t)
 	service.settle = time.Hour
 	ctx := context.Background()
@@ -58,6 +59,7 @@ func TestCloseGatesDoNotOutliveTheirRooms(t *testing.T) {
 // for the close: the close waits for repairs already committing, and a settlement writing a repair
 // holds the document's lock, which a failed room's close compacts under (roomServer).
 func TestARepairRefusesRatherThanWaitsForACloseUnderWay(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	generation := owedStamp(t, service, artifactID)
@@ -80,7 +82,7 @@ func TestARepairRefusesRatherThanWaitsForACloseUnderWay(t *testing.T) {
 	}()
 	select {
 	case <-settled:
-	case <-time.After(10 * time.Second):
+	case <-time.After(roomWait(t)):
 		release()
 		t.Fatal("the settlement waited for the close under way instead of refusing its repair")
 	}
@@ -98,6 +100,7 @@ func TestARepairRefusesRatherThanWaitsForACloseUnderWay(t *testing.T) {
 // A repair holds the exact document Server.Apply found. Once its room has retired that document,
 // holdOpen refuses and releases the gate it acquired for the check.
 func TestHoldOpenRefusesRoomThatNoLongerHoldsItsDocument(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	owedStamp(t, service, artifactID)
@@ -155,7 +158,7 @@ func TestACancelledEvictionLeavesTheFailedRoomForItsOwnEviction(t *testing.T) {
 		recoverRoom()
 		<-applied
 		service.evictWG.Wait()
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), roomWait(t))
 		defer cancel()
 		if err := server.Shutdown(ctx); err != nil {
 			t.Errorf("shutdown: %v", err)
@@ -190,7 +193,7 @@ func TestACancelledEvictionLeavesTheFailedRoomForItsOwnEviction(t *testing.T) {
 	recoverRoom()
 	select {
 	case <-done:
-	case <-time.After(5 * time.Second):
+	case <-time.After(roomWait(t)):
 		t.Fatal("the failed room's eviction did not finish")
 	}
 	if server.GetDoc("room") != nil || service.roomFailed("room") {

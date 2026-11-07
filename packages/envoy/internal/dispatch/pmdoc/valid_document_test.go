@@ -9,6 +9,7 @@ import (
 // The zero ValidDocument holds no tree: each of its methods refuses it, without panicking, with
 // the error its exported counterpart gives a nil tree.
 func TestAZeroValidDocumentRefusesAsItsExportedCounterpartsRefuseANilTree(t *testing.T) {
+	t.Parallel()
 	var zero ValidDocument
 	if zero.Node() != nil {
 		t.Fatalf("zero ValidDocument's tree = %v, want nil", zero.Node())

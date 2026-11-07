@@ -151,7 +151,7 @@ func startListenerDelivery(t *testing.T, d *listenerDeps) {
 		t.Fatalf("start the session relays: %v", err)
 	}
 	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), listenerWait)
 		defer cancel()
 		relays.stop(ctx)
 	})
@@ -300,7 +300,7 @@ func (s *rigSession) awaitFrame(t *testing.T) string {
 	select {
 	case frame := <-s.standIn.frames:
 		return string(frame.msg.Data)
-	case <-time.After(15 * time.Second):
+	case <-time.After(listenerWait):
 		t.Fatalf("no frame reached %s's own consumer", s.id)
 		return ""
 	}
@@ -428,7 +428,7 @@ type rigBroadcast struct {
 // work cancelled by its own t.Context() rather than finished.
 func (rig *dispatchRig) awaitBroadcastDeliveries(t *testing.T, broadcastID string) {
 	t.Helper()
-	deadline := time.Now().Add(15 * time.Second)
+	deadline := time.Now().Add(listenerWait)
 	for {
 		read := rig.asHuman(t, http.MethodGet, "/api/v1/broadcasts/"+broadcastID, nil)
 		if read.Code != http.StatusOK {
@@ -484,6 +484,7 @@ func (rig *dispatchRig) mention(t *testing.T, issueKey, sessionID, body string) 
 // about the one session by id, against a route that reads the session store, and the frame
 // arrives at the agent's own endpoint.
 func TestDispatchMentionResolvesASessionTheCacheHasNotRefilled(t *testing.T) {
+	t.Parallel()
 	rig := newDispatchRig(t)
 	planner := rig.registerSession(t, "ses_planner", "Planner")
 	key := rig.issueKey(t, "A mention while the cache refills")
@@ -505,6 +506,7 @@ func TestDispatchMentionResolvesASessionTheCacheHasNotRefilled(t *testing.T) {
 // Now each selected session is read by id against the session store, so both are recipients and
 // both frames arrive.
 func TestDispatchBroadcastResolvesSessionsTheCacheHasNotRefilled(t *testing.T) {
+	t.Parallel()
 	rig := newDispatchRig(t)
 	planner := rig.registerSession(t, "ses_planner", "Planner")
 	tester := rig.registerSession(t, "ses_tester", "Tester")
@@ -545,6 +547,7 @@ func TestDispatchBroadcastResolvesSessionsTheCacheHasNotRefilled(t *testing.T) {
 // under its idempotency key, where no retry of the human's could ever reach them — and the
 // mention's attempt would have recorded that same wording.
 func TestDispatchRefusesABroadcastWhenASessionReadDoesNotAnswer(t *testing.T) {
+	t.Parallel()
 	rig := newDispatchRig(t)
 	planner := rig.registerSession(t, "ses_planner", "Planner")
 	tester := rig.registerSession(t, "ses_tester", "Tester")
@@ -590,6 +593,7 @@ func TestDispatchRefusesABroadcastWhenASessionReadDoesNotAnswer(t *testing.T) {
 // taken over. Both sides are here: the cache that has not refilled keeps its holder's claim, and
 // the session that genuinely ended loses it.
 func TestDispatchRefusesAClaimTakeoverWhileTheCacheRefills(t *testing.T) {
+	t.Parallel()
 	rig := newDispatchRig(t)
 	holder := rig.registerSession(t, "ses_holder", "Implementer")
 	contender := rig.registerSession(t, "ses_contender", "Second agent")

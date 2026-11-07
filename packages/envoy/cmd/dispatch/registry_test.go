@@ -14,6 +14,7 @@ import (
 // process with a key set of its own, so its row keeps heartbeating and the wait does not end on
 // its own before the signal.
 func TestAProcessStoppedWhileWaitingForAdmissionExitsCleanly(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	peer := startDispatchProcessWith(t, database.Pool.Config().ConnString(), dispatchOptions{SigningKey: "the-live-peers-key"})
 	peer.waitHealthy(t)

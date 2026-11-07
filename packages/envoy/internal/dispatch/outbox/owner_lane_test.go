@@ -39,6 +39,7 @@ func (r *roleRig) laterEvent(t *testing.T, key string, actor model.Actor) model.
 // this covers two owners in one, which only a per-owner release reaches. Both issues' events are
 // committed before the outbox runs, so its first batch reads both owners.
 func TestAnOwnerOfTheSilentHoldersBatchIsReleasedBeforeTheBatchEnds(t *testing.T) {
+	t.Parallel()
 	const (
 		silentRole, silentHolder = "silent-reviewer", "ses_never_answers"
 		liveRole, liveHolder     = "live-reviewer", "ses_answers"
@@ -60,12 +61,12 @@ func TestAnOwnerOfTheSilentHoldersBatchIsReleasedBeforeTheBatchEnds(t *testing.T
 
 	select {
 	case <-silent.arrived:
-	case <-time.After(10 * time.Second):
+	case <-time.After(eventWait):
 		t.Fatal("the silent holder never received its forward")
 	}
 	select {
 	case <-live.arrived:
-	case <-time.After(10 * time.Second):
+	case <-time.After(eventWait):
 		t.Fatal("the answering holder never received its issue's first forward")
 	}
 
@@ -80,7 +81,7 @@ func TestAnOwnerOfTheSilentHoldersBatchIsReleasedBeforeTheBatchEnds(t *testing.T
 			t.Fatalf("the answering holder received its issue's later forward %s after its commit, want within %s: "+
 				"the owner was held in flight until its batch ended", waited.Round(time.Millisecond), within)
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(eventWait):
 		t.Fatal("the answering holder never received its issue's later forward")
 	}
 }
@@ -89,6 +90,7 @@ func TestAnOwnerOfTheSilentHoldersBatchIsReleasedBeforeTheBatchEnds(t *testing.T
 // a holder that never answers, the batch keeps that owner in flight, so no batch beside it reads
 // the owner's second event and the holder receives the first forward alone.
 func TestAnOwnersSecondEventDoesNotOvertakeItsFirstWhileItsHolderIsSilent(t *testing.T) {
+	t.Parallel()
 	const silentRole, silentHolder = "silent-reviewer", "ses_never_answers"
 	alice := model.Actor{Kind: "user", ID: "alice"}
 	rig := newRoleRig(t)
@@ -104,7 +106,7 @@ func TestAnOwnersSecondEventDoesNotOvertakeItsFirstWhileItsHolderIsSilent(t *tes
 	var forward contracts.Envelope
 	select {
 	case forward = <-silent.arrived:
-	case <-time.After(10 * time.Second):
+	case <-time.After(eventWait):
 		t.Fatal("the silent holder never received its forward")
 	}
 	if forward.SourceEventID != fmt.Sprint(first.ID) {
@@ -145,7 +147,11 @@ func backOffIn(t *testing.T, database *store.Store, id int64, attempts int, wait
 // out (batchResult.excluded). Both issues are routed to a holder that never answers, so neither
 // owner is settled before its batch ends and neither release wakes the scan; with the second
 // event unread, the scan's retry timer is armed to the two back-offs alone, minutes out.
+//
+// Real time, at roleReceiptTimeout: the forwards it waits out are requests to a live NATS server
+// over TCP, which no synctest bubble can hold.
 func TestAnEventCommittedWhileItsOwnerIsInFlightIsReadWhenThatOwnerIsBack(t *testing.T) {
+	t.Parallel()
 	const (
 		silentRole, silentHolder = "silent-reviewer", "ses_never_answers"
 		// The attempt count both events carry: their next back-off is retry.Delay(7), 64 s, so a
@@ -174,7 +180,7 @@ func TestAnEventCommittedWhileItsOwnerIsInFlightIsReadWhenThatOwnerIsBack(t *tes
 
 	select {
 	case <-silent.arrived:
-	case <-time.After(10 * time.Second):
+	case <-time.After(eventWait):
 		t.Fatal("the silent holder never received the first issue's forward")
 	}
 	// The first issue is in flight on its receipt wait. The second issue falls due, which wakes
@@ -229,6 +235,9 @@ func (p *answeringTopics) WindowUntil(deadline func() time.Time) bus.Sender {
 // batch, so the send its later event was owed is never made: that owner is left for the batch's
 // end, where the connection decides what its sends came to, rather than settled now and settled
 // again there.
+//
+// Serial: it swaps process-wide state, the default logger it counts the failure's line in
+// (docs/testing.md).
 func TestAnOwnerLeftForTheBatchsEndLogsItsFailureOnce(t *testing.T) {
 	var logged lockedBuffer
 	logtest.SetDefault(t, slog.NewTextHandler(&logged, nil))

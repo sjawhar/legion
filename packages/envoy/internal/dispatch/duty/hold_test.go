@@ -204,7 +204,7 @@ func TestHoldReleaseFreesAtOnceAndNotifiesTheName(t *testing.T) {
 		t.Fatalf("Expiry after Release: held %v, error %v; want no row", held, err)
 	}
 
-	waiting, cancel := context.WithTimeout(ctx, 5*time.Second)
+	waiting, cancel := context.WithTimeout(ctx, eventWait)
 	defer cancel()
 	notice, err := listener.WaitForNotification(waiting)
 	if err != nil {

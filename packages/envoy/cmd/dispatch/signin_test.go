@@ -18,6 +18,10 @@ import (
 // accepts the connection and never answers delays the start by the bound, not by each token's own
 // timeout, and the start goes on, every token left in its row for the next boot and the counts
 // logged without a token.
+//
+// Serial: it swaps process-wide state, the default slog logger. It reads what the boot logged,
+// and logtest.SetDefault below points that logger, which the whole process shares, at this
+// test's own buffer; beside a parallel test each would take the other's lines.
 func TestRetirePlainRefreshTokensAtBootStopsAtItsBound(t *testing.T) {
 	ctx := context.Background()
 	pool := signInPool(t, "dispatch-client", "client-secret")
@@ -66,6 +70,9 @@ func TestRetirePlainRefreshTokensAtBootStopsAtItsBound(t *testing.T) {
 
 // The boot's retirement against a sign-in pool that cannot be discovered fails every token
 // without a revocation sent, leaves each in its row for the next boot, and the start goes on.
+//
+// Serial: it swaps process-wide state, the default slog logger. It reads what the boot logged,
+// through the logger the whole process shares (logtest.SetDefault below).
 func TestRetirePlainRefreshTokensAgainstAnUndiscoveredPoolKeepsEveryToken(t *testing.T) {
 	ctx := context.Background()
 	pool := signInPool(t, "dispatch-client", "client-secret")
@@ -102,6 +109,7 @@ func TestRetirePlainRefreshTokensAgainstAnUndiscoveredPoolKeepsEveryToken(t *tes
 // a page route (/auth/whoami) and by the API (/api/v1/whoami), never 401 or 500; once the issuer
 // answers, the same cookie is served 200 by both after one refresh.
 func TestASignInIssuerOutageAnswersThePageAndTheAPI503AndKeepsTheCookie(t *testing.T) {
+	t.Parallel()
 	pool := signInPool(t, "dispatch-client", "client-secret")
 	boot := resolveWith(t, map[string]string{"DISPATCH_SIGNIN_ISSUER": pool.URL(), "DISPATCH_SIGNIN_GROUP": "dispatch-members"})
 	people := peopleStore(t)

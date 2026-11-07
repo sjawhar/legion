@@ -133,6 +133,10 @@ func createClosedIssue(t *testing.T, handler http.Handler) model.Issue {
 // upload sent again, its file the same and its boundary its own, since a repeat is judged by its
 // body once it has arrived (TestARepeatFoundInFlightIsJudgedOnceItsBodyHasArrived).
 func TestAnEarlyAnswerToAnUploadReachesAClientThatSendsItsWholeBodyFirst(t *testing.T) {
+	// No t.Parallel: this test holds a transaction, a row lock or an advisory lock open on
+	// purpose. The event log's safe horizon is proven from pg_snapshot_xmin, the oldest
+	// transaction id running anywhere on the instance (internal/dispatch/events,
+	// horizon.go), so a hold here stalls every parallel test reading that feed.
 	held := &heldFileStore{Memory: filestest.NewMemory(), reached: make(chan struct{})}
 	handler, _, _ := newTestServer(t, testServerOptions{files: held})
 	release, releaseOnce := heldUntilReleased(t)
@@ -149,14 +153,14 @@ func TestAnEarlyAnswerToAnUploadReachesAClientThatSendsItsWholeBodyFirst(t *test
 	go func() { first <- sendUpload(t, handler, running.Key, "running-upload", file) }()
 	select {
 	case <-held.reached:
-	case <-time.After(10 * time.Second):
+	case <-time.After(concurrentWait):
 		t.Fatal("the first upload never reached the file store")
 	}
 	t.Cleanup(func() {
 		releaseOnce()
 		select {
 		case <-first:
-		case <-time.After(10 * time.Second):
+		case <-time.After(concurrentWait):
 			t.Error("the first upload never answered once released")
 		}
 	})
@@ -240,6 +244,7 @@ func (b repeatedByte) Read(p []byte) (int, error) {
 // judged. A client that asked to be told to continue before sending its body is answered with none
 // of it read.
 func TestAnEarlyAnswerDrainsTheBodyUpToTheRoutesLimit(t *testing.T) {
+	t.Parallel()
 	handler, database, _ := newTestServer(t, testServerOptions{files: filestest.NewMemory()})
 	open := createArtifactIssue(t, handler)
 	closed := createClosedIssue(t, handler)
@@ -381,6 +386,7 @@ type keyedAnswered struct {
 // to ask again, 409 KEY_IN_FLIGHT, since the repeat's body was read and not kept: that ask runs the
 // request.
 func TestARepeatFoundInFlightIsJudgedOnceItsBodyHasArrived(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name        string
 		key         string
@@ -447,7 +453,7 @@ func TestARepeatFoundInFlightIsJudgedOnceItsBodyHasArrived(t *testing.T) {
 			}()
 			select {
 			case <-first.running:
-			case <-time.After(10 * time.Second):
+			case <-time.After(concurrentWait):
 				t.Fatal("the first request never ran")
 			}
 			header := http.Header{}
@@ -457,7 +463,7 @@ func TestARepeatFoundInFlightIsJudgedOnceItsBodyHasArrived(t *testing.T) {
 			repeat := sendPartOfBody(t, server.Listener.Addr().String(), path, header, len(judged.repeat), []byte(judged.repeat[:5]))
 			select {
 			case <-found:
-			case <-time.After(10 * time.Second):
+			case <-time.After(concurrentWait):
 				t.Fatal("the repeat never found its key in flight")
 			}
 			finishFirst := func() keyedAnswered {
@@ -469,7 +475,7 @@ func TestARepeatFoundInFlightIsJudgedOnceItsBodyHasArrived(t *testing.T) {
 						t.Fatalf("the first request: %v", answered.err)
 					}
 					return answered
-				case <-time.After(10 * time.Second):
+				case <-time.After(concurrentWait):
 					t.Fatal("the first request never answered once released")
 				}
 				return keyedAnswered{}
@@ -526,6 +532,7 @@ func TestARepeatFoundInFlightIsJudgedOnceItsBodyHasArrived(t *testing.T) {
 // soon as its answer is out, and a body that stalls just past the limit is answered 413 within the
 // deadline and closed after it, as a 4 MiB body, of which net/http reads nothing more, always was.
 func TestADrainStopsWaitingForABodyThatStalls(t *testing.T) {
+	t.Parallel()
 	const drainLimit = time.Second
 	handler, database, _, served := newRegisteredTestServer(t, testServerOptions{files: filestest.NewMemory()})
 	served.drainReadLimit = drainLimit
@@ -616,6 +623,7 @@ func TestADrainStopsWaitingForABodyThatStalls(t *testing.T) {
 // found in flight at once rather than reading it to judge its digest. A read would have net/http
 // send 100 Continue and wait for the whole body before the refusal went out.
 func TestAnEarlyAnswerToAClientWaitingToContinueAsksForNoBody(t *testing.T) {
+	t.Parallel()
 	handler, database, _ := newTestServer(t, testServerOptions{files: filestest.NewMemory()})
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)

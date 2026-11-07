@@ -68,6 +68,7 @@ func dormantRecordFor(t *testing.T, pid int, sessionID, enrollmentID string, key
 // record whose pid and start ticks match that very process just as exactly — but which names
 // another boot, or no boot at all — must not, however alive that process is.
 func TestOnlyARecordOfThisBootRePinsItsProcess(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name     string
 		bootID   func(this string) string
@@ -126,6 +127,7 @@ func TestOnlyARecordOfThisBootRePinsItsProcess(t *testing.T) {
 // locks — LiveSessionID, then an insert — both would pass the check and both would sign as the
 // session.
 func TestTwoRootsRacingForOneNameLeaveOneWinner(t *testing.T) {
+	t.Parallel()
 	for range 100 {
 		reg := NewRegistry(filepath.Join(t.TempDir(), "sessions.json"))
 		reg.parent = rootingParent
@@ -182,6 +184,7 @@ func TestTwoRootsRacingForOneNameLeaveOneWinner(t *testing.T) {
 // returning process a fresh identity and the old one parked beside it where nothing could
 // reclaim it and only the sweep could end it.
 func TestAProcessComingBackWhileItsSessionRetiresFindsTheIdentity(t *testing.T) {
+	t.Parallel()
 	key, err := proof.NewKey()
 	if err != nil {
 		t.Fatal(err)
@@ -258,6 +261,7 @@ func TestAProcessComingBackWhileItsSessionRetiresFindsTheIdentity(t *testing.T) 
 // broker may have revoked it while the session was away, and only an enroll shows otherwise,
 // so the reply reads NO_CREDENTIAL rather than claiming a grant the session may not have.
 func TestAReclaimedIdentityKeepsItsEnrollmentID(t *testing.T) {
+	t.Parallel()
 	state := filepath.Join(t.TempDir(), "sessions.json")
 	key := parkedRecord(t, state)
 	r := newRig(t, state)
@@ -303,6 +307,7 @@ func TestAReclaimedIdentityKeepsItsEnrollmentID(t *testing.T) {
 // record; dropping it for want of an id would leave an identity nothing could ever reclaim,
 // which is the gap retire's own fix left behind in the recovery path.
 func TestANamedRecordWithNoEnrollmentIsStillParked(t *testing.T) {
+	t.Parallel()
 	state := filepath.Join(t.TempDir(), "sessions.json")
 	gone := sleeper(t)
 	gonePID := gone.Process.Pid
@@ -343,6 +348,7 @@ func TestANamedRecordWithNoEnrollmentIsStillParked(t *testing.T) {
 // of these three registers fails AFTER the point the old code had already deleted the record,
 // and each must leave the identity reclaimable by the session it belongs to.
 func TestARegisterThatFailsLeavesTheIdentityWhereItWas(t *testing.T) {
+	t.Parallel()
 	t.Run("a draining helper", func(t *testing.T) {
 		state := filepath.Join(t.TempDir(), "sessions.json")
 		key := parkedRecord(t, state)
@@ -459,6 +465,7 @@ func requireReclaimable(t *testing.T, r *rig, key *ecdsa.PrivateKey) {
 // knew the session id. The admission's own ancestry walk is as much the kernel's to invalidate
 // as the walk before an insert.
 func TestTheAncestryWinnerIsRefusedToAPeerWhosePIDChanged(t *testing.T) {
+	t.Parallel()
 	state := filepath.Join(t.TempDir(), "sessions.json")
 	key := parkedRecord(t, state)
 	r := startRig(t, state)
@@ -502,6 +509,7 @@ func TestTheAncestryWinnerIsRefusedToAPeerWhosePIDChanged(t *testing.T) {
 // speaks for the enrollment that is gone, not for the one just taken back — and lapsing the new
 // one would have enrollLoop revoke it, destroying the very grants the reclaim exists to keep.
 func TestARefusedRenewOfAnOldEnrollmentLeavesTheReclaimedOneAlone(t *testing.T) {
+	t.Parallel()
 	sess, err := newSession(1000, 1, "testhost:1000:1", "", nil, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -548,6 +556,7 @@ func TestARefusedRenewOfAnOldEnrollmentLeavesTheReclaimedOneAlone(t *testing.T) 
 // instead. Reversed, an outage lasting through three bounded tries leaves the session unable to
 // enrol at all until the blocking row's lease ends.
 func TestTheBlockingEnrollmentTakesTheLapsedSlot(t *testing.T) {
+	t.Parallel()
 	sess := namedSession(t, 1000, testSessionID, nil)
 	sess.adoptLapsed("enr-old-pid") // what a rename retired: the old runtime's enrollment
 	orphans := takeLapsed(sess, []string{"enr-blocking", "enr-other"}, true)
@@ -573,6 +582,7 @@ func TestTheBlockingEnrollmentTakesTheLapsedSlot(t *testing.T) {
 // let a launcher run on believing its session has an identity, and leave the one kept for that
 // name to the sweep.
 func TestNamingASessionThatHasLeftIsNotASuccess(t *testing.T) {
+	t.Parallel()
 	r := startRig(t, "")
 	sess, err := newSession(4242, 1, "testhost:4242:1", "", nil, nil)
 	if err != nil {
@@ -597,6 +607,7 @@ func TestNamingASessionThatHasLeftIsNotASuccess(t *testing.T) {
 // timeout — none of them says anything about the row, and reading one as a refusal costs the
 // session every pending request and grant the enrollment carries.
 func TestATransientRenewFailureDoesNotCostTheInheritedEnrollment(t *testing.T) {
+	t.Parallel()
 	state := filepath.Join(t.TempDir(), "sessions.json")
 	key := parkedRecord(t, state)
 	r := startRig(t, state)
@@ -636,6 +647,7 @@ func TestATransientRenewFailureDoesNotCostTheInheritedEnrollment(t *testing.T) {
 // enrolls again and abandons the live enrollment the session has just proved — the very loss
 // this change exists to prevent. A wake counts only while the identity has in fact moved on.
 func TestAWakeRaisedBeforeThisEnrollmentDoesNotEnrollAgain(t *testing.T) {
+	t.Parallel()
 	r := startRig(t, "")
 	sess, err := newSession(1000, 1, "testhost:1000:1", "", nil, nil)
 	if err != nil {
@@ -676,6 +688,7 @@ func TestAWakeRaisedBeforeThisEnrollmentDoesNotEnrollAgain(t *testing.T) {
 // finished revoke, or filling it with a stale enroll's id, drops that blocker: the next enroll is
 // refused 409 ALREADY_ENROLLED for as long as its row lives, and nothing is left to revoke it.
 func TestARevokeFinishingAfterARenameLeavesTheBlockingID(t *testing.T) {
+	t.Parallel()
 	sess := namedSession(t, 1000, testSessionID, nil)
 	sess.adoptLapsed("enr-old") // the id whose revoke is in flight
 	takeLapsed(sess, []string{"enr-blocking"}, true)
@@ -706,6 +719,7 @@ func TestARevokeFinishingAfterARenameLeavesTheBlockingID(t *testing.T) {
 // and the new runtime enrols; with it overwritten, the new runtime's
 // enroll meets the live blocker and loops on 409 ALREADY_ENROLLED.
 func TestAStaleEnrollArrivingAfterARenameIsNotKeptOverTheBlocker(t *testing.T) {
+	t.Parallel()
 	r := startRig(t, filepath.Join(t.TempDir(), "sessions.json"))
 	// enr-blocking is live under the runtime id the session is about to be renamed to, so a
 	// fresh enroll for that runtime is refused until it is revoked.
@@ -767,6 +781,7 @@ func TestAStaleEnrollArrivingAfterARenameIsNotKeptOverTheBlocker(t *testing.T) {
 // must start again to revoke THAT before enrolling — not fall through to an enroll the live
 // blocker refuses 409 until its lease ends.
 func TestARenameDuringTheOldRevokeRevokesTheNewBlockerFirst(t *testing.T) {
+	t.Parallel()
 	r := startRig(t, filepath.Join(t.TempDir(), "sessions.json"))
 	seedEnrollment(r.fake, "enr-old", "tp-old", "testhost:4242:1")
 	seedEnrollment(r.fake, "enr-blocking", "tp-blocking", SessionRuntimeID(testSessionID))
@@ -824,6 +839,7 @@ func TestARenameDuringTheOldRevokeRevokesTheNewBlockerFirst(t *testing.T) {
 // paths must refuse rather than tell a launcher its session holds a broker identity that
 // nothing live holds and the sweep is about to revoke.
 func TestARegisterForASessionTheRegistryNoLongerHoldsIsRefused(t *testing.T) {
+	t.Parallel()
 	r := startRig(t, "")
 	for _, tc := range []struct {
 		name      string
@@ -849,6 +865,7 @@ func TestARegisterForASessionTheRegistryNoLongerHoldsIsRefused(t *testing.T) {
 // closing its stop. The reply must then be NOT_A_SESSION, not OK with the identity of a session
 // nothing live holds and the sweep is about to revoke.
 func TestARegisterWaitingWhenItsSessionRetiresIsNotASuccess(t *testing.T) {
+	t.Parallel()
 	r := startRig(t, "") // logged in, so the reply actually waits
 	sess, err := newSession(4242, 1, "testhost:4242:1", testSessionID, nil, nil)
 	if err != nil {

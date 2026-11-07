@@ -76,6 +76,7 @@ func issueReferencesQueryRequest(t *testing.T, handler http.Handler, issueKey, q
 }
 
 func TestIssueReferencesClosureDepthViaAndETag(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	createReferenceAPIProject(t, handler, "CORE")
 	createReferenceAPIProject(t, handler, "OPS")
@@ -140,6 +141,7 @@ func TestIssueReferencesClosureDepthViaAndETag(t *testing.T) {
 }
 
 func TestIssueReferencesExcludeOwnArtifactsAndDanglingTargets(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	createReferenceAPIProject(t, handler, "CORE")
 	issue := createReferenceAPIIssue(t, handler, "CORE")
@@ -156,6 +158,7 @@ func TestIssueReferencesExcludeOwnArtifactsAndDanglingTargets(t *testing.T) {
 }
 
 func TestIssueReferencesTruncateBeyondDepthEight(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	createReferenceAPIProject(t, handler, "CORE")
 	issue := createReferenceAPIIssue(t, handler, "CORE")
@@ -187,6 +190,7 @@ func TestIssueReferencesTruncateBeyondDepthEight(t *testing.T) {
 // ?versions=all is the full answer, byte for byte and under the same ETag, as no parameter is;
 // any value but all and latest is refused, and so is a versions given more than once.
 func TestIssueReferencesVersionsAllIsTheFullAnswerAndOtherValuesAreRefused(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	createReferenceAPIProject(t, handler, "CORE")
 	issue := createReferenceAPIIssue(t, handler, "CORE")
@@ -220,6 +224,7 @@ func TestIssueReferencesVersionsAllIsTheFullAnswerAndOtherValuesAreRefused(t *te
 }
 
 func TestArtifactReferencesListOutgoingAndReferencedBy(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	createReferenceAPIProject(t, handler, "CORE")
 	createReferenceAPIProject(t, handler, "OPS")
@@ -242,6 +247,7 @@ func TestArtifactReferencesListOutgoingAndReferencedBy(t *testing.T) {
 }
 
 func TestIssueReferencesRejectUnauthenticatedRequest(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	// Authentication comes before the versions parameter: a value the route refuses still
 	// answers 401 to a caller with no identity.
@@ -274,6 +280,8 @@ func graphEdges(t *testing.T, handler http.Handler, query url.Values) model.Grap
 // the message.created write. Read from the message, the same edge points out at the ask. Filters
 // narrow it and malformed input is 400.
 func TestReferencesReadBacklinksAcrossProjectsWithProvenance(t *testing.T) {
+	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
+	// on is instance-wide — any open transaction anywhere on the Postgres server holds it back.
 	handler, database := newTestHandlerWithStore(t)
 	createReferenceAPIProject(t, handler, "LEGION")
 	createReferenceAPIProject(t, handler, "ACME")
@@ -423,6 +431,9 @@ func awaitSinceRead(
 // proven so far would answer nothing here, the first after boot, and each later read would stop
 // at the previous read's observation, however old. awaitSinceRead settles which answer is final.
 func TestReferencesSinceAnswersAMentionCommittedBeforeTheReadOnAQuietServer(t *testing.T) {
+	// No t.Parallel: this test waits on the event log's safe horizon, which is proven from
+	// pg_snapshot_xmin, the oldest transaction id running anywhere on the instance
+	// (internal/dispatch/events, horizon.go), and its subject is what a quiet server answers.
 	handler := newTestHandler(t)
 	createReferenceAPIProject(t, handler, "CORE")
 	target := createReferenceAPIIssue(t, handler, "CORE")
@@ -452,6 +463,10 @@ func TestReferencesSinceAnswersAMentionCommittedBeforeTheReadOnAQuietServer(t *t
 // Once a commits it answers both. Each edit indexes its comment's body as a comment write does
 // (refs.ReplaceCounted, then refs.Stamp with the edit's event).
 func TestReferencesSinceWithholdsEveryMentionAboveAnOpenLowerEvent(t *testing.T) {
+	// No t.Parallel: this test holds a transaction open on purpose, below the event it then
+	// reads for. The safe horizon is proven from pg_snapshot_xmin, the oldest transaction id
+	// running anywhere on the instance (internal/dispatch/events, horizon.go), so the hold is
+	// what the since read must withhold against.
 	handler, database, deps := newTestServer(t, testServerOptions{})
 	broker := deps.Events
 	createReferenceAPIProject(t, handler, "CORE")
@@ -541,6 +556,7 @@ func TestReferencesSinceWithholdsEveryMentionAboveAnOpenLowerEvent(t *testing.T)
 // the same mention points out at the issue; read from the issue's spec the structural edge points
 // out at it.
 func TestReferencesIncludeStructuralEdgesAndDocumentBlockExcerpts(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	createReferenceAPIProject(t, handler, "CORE")
 	createReferenceAPIProject(t, handler, "OPS")
@@ -621,6 +637,7 @@ func insertUnknownKindEdges(t *testing.T, database *store.Store, edges [][4]stri
 // the graph read skips it in both directions instead of answering 500, and the issue header's
 // count is the number of edges its panel lists, not one more.
 func TestReferencesAnswerAroundAnEdgeOfAKindThisBuildCannotAddress(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	createReferenceAPIProject(t, handler, "CORE")
 	createReferenceAPIProject(t, handler, "OPS")
@@ -675,6 +692,7 @@ func TestReferencesAnswerAroundAnEdgeOfAKindThisBuildCannotAddress(t *testing.T)
 // sides: its referenced-by list is the comment that cites it, and its outgoing list is what its
 // text cites, the known issue and the missing document both unresolved as before.
 func TestArtifactReferencesSkipANodeKindThisBuildCannotAddress(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	createReferenceAPIProject(t, handler, "CORE")
 	issue := createReferenceAPIIssue(t, handler, "CORE")
@@ -707,6 +725,7 @@ func TestArtifactReferencesSkipANodeKindThisBuildCannotAddress(t *testing.T) {
 // that owns it: the issue node writes no mention, and each target's backlink names the spec's
 // block holding it.
 func TestSeededSpecCitationsInMarkdownDelimitersAreDocumentMentions(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	createReferenceAPIProject(t, handler, "LEGION")
 	createReferenceAPIProject(t, handler, "ACME")
@@ -753,6 +772,7 @@ func TestSeededSpecCitationsInMarkdownDelimitersAreDocumentMentions(t *testing.T
 // seeded spec and the author's edit answered 500, and a rebuild stopped at the first stored body
 // that held one.
 func TestCitationsOfAnIDDecodingToNULDoNotFailTheWrite(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	createReferenceAPIProject(t, handler, "CORE")
 	target := createReferenceAPIIssue(t, handler, "CORE")
@@ -813,6 +833,7 @@ func readRefRows(t *testing.T, database *store.Store) []refRow {
 // keeping the provenance of every edge it did not have to recreate, and a second rebuild is a
 // no-op.
 func TestRebuildRefsConvergesOnTheLiveIndex(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	createReferenceAPIProject(t, handler, "CORE")
 	createReferenceAPIProject(t, handler, "OPS")

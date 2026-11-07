@@ -9,6 +9,7 @@ import (
 )
 
 func TestDocumentAsksAndCommentsAreOwnerScoped(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key": "CORE", "name": "Core",
@@ -109,6 +110,7 @@ func TestDocumentAsksAndCommentsAreOwnerScoped(t *testing.T) {
 }
 
 func TestOwnerRoutesRejectLinkedArtifact(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createArtifactIssue(t, handler)
 	base := "/api/v1/artifacts/" + issue.PrimaryArtifactID
@@ -131,6 +133,7 @@ func TestOwnerRoutesRejectLinkedArtifact(t *testing.T) {
 }
 
 func TestDocumentAnchorMustTargetTheDocument(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key": "CORE", "name": "Core",
@@ -149,6 +152,7 @@ func TestDocumentAnchorMustTargetTheDocument(t *testing.T) {
 }
 
 func TestArtifactOwnerWritesAuthenticateBeforeResolvingOwner(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createArtifactIssue(t, handler)
 	targets := []string{

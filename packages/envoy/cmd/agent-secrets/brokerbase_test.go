@@ -16,6 +16,8 @@ import "testing"
 // building `//v1/...` where the other half builds `/v1/...`. A proof's target URI is the URL the
 // caller built, so a path the broker's own mux then cleans no longer matches the proof, and the
 // call is refused naming the credential rather than the URL an operator could fix.
+// Serial: it sets a process-wide variable, AGENT_SECRETS_URL, which brokerBaseURL (identity.go)
+// reads the broker's address from; t.Setenv panics under t.Parallel.
 func TestBrokerBaseURLDropsEverySlashItEndsIn(t *testing.T) {
 	const want = "https://secrets.internal.example"
 	for _, given := range []string{

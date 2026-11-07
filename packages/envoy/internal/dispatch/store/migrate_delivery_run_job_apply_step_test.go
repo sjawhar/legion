@@ -12,6 +12,7 @@ const deliveryRunJobApplyStepVersion = 110
 // TestMigrationAddsTheJobApplyStep: a job stored before the migration reads back with both new
 // columns null and nothing rewritten, so the change log records nothing.
 func TestMigrationAddsTheJobApplyStep(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store := openEmptyTestStore(t)
 	if err := store.migrate(ctx, migrationsThrough(t, deliveryRunJobApplyStepVersion-1)); err != nil {

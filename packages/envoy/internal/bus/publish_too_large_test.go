@@ -18,6 +18,7 @@ import (
 // a caller answers as a refusal rather than a failure to retry, and none may close the connection
 // every subscription and watcher of the client runs on.
 func TestPublishRefusesAnEnvelopeNATSCannotTakeWhole(t *testing.T) {
+	t.Parallel()
 	client, err := ConnectOwningStream([]string{testnats.URL(t)})
 	if err != nil {
 		t.Fatalf("connect: %v", err)

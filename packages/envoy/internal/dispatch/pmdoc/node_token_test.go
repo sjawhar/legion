@@ -7,6 +7,7 @@ import (
 )
 
 func TestTokenJSONTracksMarksButNotIdentityOrServerState(t *testing.T) {
+	t.Parallel()
 	base, err := Parse(":::ask{#decision urgency=\"med\" multiple=\"false\"}\nShip it?\n:::\n")
 	if err != nil {
 		t.Fatalf("parse base: %v", err)
@@ -53,6 +54,7 @@ func TestTokenJSONTracksMarksButNotIdentityOrServerState(t *testing.T) {
 // of the representation built whole: a node of type, attrs, content, text and marks, its marks in
 // the order of their encodings.
 func TestTokenJSONIsWhatEncodingJSONMakesOfTheRepresentation(t *testing.T) {
+	t.Parallel()
 	parsed, err := Parse("---\ntitle: <T&C>\n---\n\n# Heading \"quoted\" & <b>\n\n" +
 		":::ask{#decision urgency=\"high\" multiple=\"true\" state=\"answered\"}\nShip it?\n\n- Yes: now\n- No\n:::\n\n" +
 		"| a | b |\n| :- | -: |\n| x \\| y | <i>z</i> |\n\n" +

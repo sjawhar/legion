@@ -88,6 +88,9 @@ func (b *lockedBuffer) String() string {
 // event is marked published instead of backing off forever. A stand-in the bus takes is in
 // event_share_nats_test.go, against a real NATS server, and it is that send that logs the line
 // saying a stand-in went out.
+//
+// Serial: it swaps process-wide state, the default logger it counts its refusal line in
+// (docs/testing.md).
 func TestRunSendsAStandInForARefusedDestinationAndIsDoneOnceThatIsRefusedToo(t *testing.T) {
 	var logged lockedBuffer
 	logtest.SetDefault(t, slog.NewTextHandler(&logged, nil))

@@ -32,6 +32,7 @@ type feedStep struct {
 }
 
 func TestPromptReaderFeed(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name    string
 		ignored []int
@@ -140,6 +141,7 @@ func TestPromptReaderFeed(t *testing.T) {
 }
 
 func TestPromptSignalKeys(t *testing.T) {
+	t.Parallel()
 	all := [3]promptKey{{0x03, syscall.SIGINT}, {0x1c, syscall.SIGQUIT}, {0x1a, syscall.SIGTSTP}}
 	unset := promptSettings()
 	unset.Cc[unix.VQUIT], unset.Cc[unix.VSUSP] = 0, 0xff

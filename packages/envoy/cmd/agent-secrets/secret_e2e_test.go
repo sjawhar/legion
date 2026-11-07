@@ -25,6 +25,9 @@ func secretsLocalWithoutValue(name, owner string) secrets.LocalSecret {
 
 // TestSecretCreateIsServedByTheBrokerAtOnce drives a create end to end: the CLI writes to (fake)
 // AWS and the broker serves the secret on its very next read, no reload.
+// Serial: it shares process-wide state - AGENT_SECRETS_URL, which brokerBaseURL (identity.go)
+// reads the broker's address from, and the package-level seams the secret forms are reached
+// through (awsClients, secretStdin); t.Setenv panics under t.Parallel.
 func TestSecretCreateIsServedByTheBrokerAtOnce(t *testing.T) {
 	rig := brokertest.NewRig(t)
 	t.Setenv("AGENT_SECRETS_URL", rig.URL)
@@ -48,6 +51,9 @@ func TestSecretCreateIsServedByTheBrokerAtOnce(t *testing.T) {
 // TestSecretDeleteAndRestoreAreServedByTheBrokerAtOnce: the broker stops serving a secret the
 // moment the CLI deletes it, and serves it again the moment the CLI restores it, each on the
 // CLI's own reread; a retag the broker would refuse is reported, and exits 1.
+// Serial: it shares process-wide state - AGENT_SECRETS_URL, which brokerBaseURL (identity.go)
+// reads the broker's address from, and the package-level seams the secret forms are reached
+// through (awsClients, secretStdin); t.Setenv panics under t.Parallel.
 func TestSecretDeleteAndRestoreAreServedByTheBrokerAtOnce(t *testing.T) {
 	rig := brokertest.NewRig(t)
 	t.Setenv("AGENT_SECRETS_URL", rig.URL)

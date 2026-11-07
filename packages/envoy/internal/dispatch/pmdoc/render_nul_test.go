@@ -11,6 +11,7 @@ import (
 // markdown a version stores then holds none, which PostgreSQL's text cannot store. A typed block's
 // other attributes are written quoted, U+0000 as the escape \x00, and read back as U+0000.
 func TestRenderWritesNoNul(t *testing.T) {
+	t.Parallel()
 	text := func(value string, marks ...Mark) *Node { return &Node{Type: "text", Text: value, Marks: marks} }
 	paragraph := func(children ...*Node) *Node { return &Node{Type: "paragraph", Children: children} }
 	for name, block := range map[string]*Node{

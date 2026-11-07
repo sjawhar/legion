@@ -1,5 +1,8 @@
 package main
 
+// Every test here sets NATS_NKEY_SEED with t.Setenv, which panics the process beside
+// t.Parallel, so none of them is parallel (dispatch://INFRA-1075).
+
 import (
 	"context"
 	"encoding/json"
@@ -68,7 +71,7 @@ func newRelayRigUnowned(t *testing.T, first, max time.Duration) *relayRig {
 		t.Fatalf("start the session relays: %v", err)
 	}
 	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), listenerWait)
 		defer cancel()
 		relays.stop(ctx)
 	})
@@ -306,7 +309,7 @@ func awaitAcked(t *testing.T, consumers *bus.SessionConsumers, sessionID string,
 // every message through floor acked.
 func awaitAckState(t *testing.T, consumers *bus.SessionConsumers, sessionID string, pending int, floor uint64) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(listenerWait)
 	for {
 		info, err := consumers.Info(context.Background(), sessionID)
 		if err != nil {
@@ -486,7 +489,7 @@ func TestRelayRunRetryWaitEndsOnAWake(t *testing.T) {
 		if !ok {
 			t.Fatal("the retry wait reported the run stopped")
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(listenerWait):
 		t.Fatal("the retry wait did not end on the wake sent before it")
 	}
 }
@@ -496,6 +499,9 @@ func TestRelayRunRetryWaitEndsOnAWake(t *testing.T) {
 // own, with no registration: after its pause backoff it restarts at the ack floor and sends the
 // unanswered frame and the one stored during the pause, in stream order, which a session that is
 // answering again takes once.
+//
+// Real time, at relayReceiptWait: the relay, the session stand-in and the frames between them are
+// a live NATS server over TCP, which no synctest bubble can hold.
 func TestSessionConsumerUnreachableSessionPausesAndSendsAgainAfterItsBackoff(t *testing.T) {
 	// Shorter than the production bounds, long enough that the silent window below ends before
 	// the first probe: the relay sends again receipt + pauseFirst after the frame it got no
@@ -530,6 +536,9 @@ func TestSessionConsumerUnreachableSessionPausesAndSendsAgainAfterItsBackoff(t *
 }
 
 // A registration resumes a paused relay at once, long before its backoff would send again.
+//
+// Real time, at relayReceiptWait: the relay and its session stand-in are a live NATS server over
+// TCP, which no synctest bubble can hold.
 func TestSessionConsumerUnreachableSessionResumesAtOnceWhenItRegisters(t *testing.T) {
 	// A backoff no test waits out: only the registration can make the relay send again here.
 	// The receipt wait is this row's own, as in the row above.
@@ -866,7 +875,7 @@ func TestSessionConsumerWithoutTheGrantProbesItOncePerTenMinutes(t *testing.T) {
 		}
 	}
 	awaitRefusedCalls := func(want int) {
-		deadline := time.Now().Add(2 * time.Second)
+		deadline := time.Now().Add(listenerWait)
 		for refusedCalls() < want && time.Now().Before(deadline) {
 			time.Sleep(20 * time.Millisecond)
 		}

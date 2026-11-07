@@ -14,6 +14,7 @@ import (
 // PublishReportingDuplicate returns it. Publish itself keeps its signature: it is an interface
 // method in cistore, outbox and webhook.
 func TestPublishReportingDuplicateReportsTheStreamsVerdict(t *testing.T) {
+	t.Parallel()
 	client, err := ConnectOwningStream([]string{testnats.URL(t)})
 	if err != nil {
 		t.Fatalf("connect: %v", err)

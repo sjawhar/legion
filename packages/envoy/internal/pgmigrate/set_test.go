@@ -35,6 +35,76 @@ func TestLoadReturnsForwardMigrationsInVersionOrder(t *testing.T) {
 	}
 }
 
+// The test harnesses name one shared template database after the fingerprint, so a set that
+// would leave a database in another state must not hash alike: an edited migration, a new one,
+// one taken away, and the same statements split between two files differently all differ. What
+// no runner runs does not: a rollback script leaves the digest alone.
+func TestFingerprintChangesWithEveryChangeARunnerWouldApply(t *testing.T) {
+	set := fstest.MapFS{
+		"migrations/0001_first.up.sql":  file("select 1"),
+		"migrations/0002_second.up.sql": file("select 2"),
+	}
+	base := fingerprintOf(t, set)
+
+	// The harnesses make a database name of a prefix and this, and Postgres cuts an identifier
+	// at 63 bytes without saying so: a harness looking for a name the server had cut would find
+	// no template and migrate one every run.
+	if len(base) != 32 {
+		t.Errorf("the fingerprint is %d characters, want 32: a database name is a prefix and this, inside Postgres's 63 bytes", len(base))
+	}
+
+	for _, change := range []struct {
+		what string
+		set  fstest.MapFS
+	}{
+		{"a migration's statements change", fstest.MapFS{
+			"migrations/0001_first.up.sql":  file("select 1"),
+			"migrations/0002_second.up.sql": file("select 22"),
+		}},
+		{"a migration is added", fstest.MapFS{
+			"migrations/0001_first.up.sql":  file("select 1"),
+			"migrations/0002_second.up.sql": file("select 2"),
+			"migrations/0003_third.up.sql":  file("select 3"),
+		}},
+		{"a migration is taken away", fstest.MapFS{
+			"migrations/0001_first.up.sql": file("select 1"),
+		}},
+		{"a migration is renamed", fstest.MapFS{
+			"migrations/0001_first.up.sql":   file("select 1"),
+			"migrations/0002_renamed.up.sql": file("select 2"),
+		}},
+		{"the same statements are split between the files differently", fstest.MapFS{
+			"migrations/0001_first.up.sql":  file("select 1select"),
+			"migrations/0002_second.up.sql": file(" 2"),
+		}},
+	} {
+		if got := fingerprintOf(t, change.set); got == base {
+			t.Errorf("the fingerprint is %s when %s", got, change.what)
+		}
+	}
+
+	// A rollback script no runner applies, and a census no runner runs, leave the database the
+	// same, so a template built from this set serves the one above.
+	withRollback := fstest.MapFS{
+		"migrations/0001_first.up.sql":      file("select 1"),
+		"migrations/0002_second.up.sql":     file("select 2"),
+		"migrations/0002_second.down.sql":   file("select -2"),
+		"migrations/0002_second.census.sql": file("select count(*) from nothing"),
+	}
+	if got := fingerprintOf(t, withRollback); got != base {
+		t.Errorf("the fingerprint is %s with a rollback script and a census beside the set, want the set's own %s", got, base)
+	}
+}
+
+func fingerprintOf(t *testing.T, set fstest.MapFS) string {
+	t.Helper()
+	migrations, err := Load(set, "migrations")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	return Fingerprint(migrations)
+}
+
 // A version past int4 is no longer refused: a migration added since the sets stopped being
 // numbered is named for the UTC moment it was created, 14 digits, which the runners' bigint
 // version column holds and which sorts after every number.

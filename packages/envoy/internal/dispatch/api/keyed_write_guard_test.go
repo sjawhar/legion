@@ -166,6 +166,7 @@ func writingCallOf(functions []string) *regexp.Regexp {
 // whose SQL it cannot read at all is refused too, since it cannot be told from a write.
 // keyedWriteGuardStops and keyedWriteGuardAllowed name, with their reasons, what it leaves.
 func TestEveryKeyedWriteCommitsInsideATransactionTheMarkHooks(t *testing.T) {
+	t.Parallel()
 	var offences []string
 	for _, offence := range newKeyedWriteGuard(t).offences() {
 		offences = append(offences, offence.at+" in "+offence.function+": "+offence.why)
@@ -187,6 +188,7 @@ func TestEveryKeyedWriteCommitsInsideATransactionTheMarkHooks(t *testing.T) {
 // takes its SQL as a parameter, the work a handler hands a Go method or starts with a go statement,
 // and a select of a SQL function that writes.
 func TestTheKeyedWriteGuardSeesWhatItGuards(t *testing.T) {
+	t.Parallel()
 	guard := newKeyedWriteGuard(t)
 	guard.offences()
 	var want []string

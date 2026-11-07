@@ -78,6 +78,7 @@ func record(t *testing.T, records []map[string]any, msg string) map[string]any {
 // the role restore line's: entries are the live keys the scan delivered, delete_markers what it
 // streamed past to find them.
 func TestAWarmUpLogsWhatItStreamedAndThatItCompleted(t *testing.T) {
+	t.Parallel()
 	uri := testnats.URL(t)
 	_, kv := bucket(t, uri)
 	const (
@@ -134,6 +135,7 @@ func TestAWarmUpLogsWhatItStreamedAndThatItCompleted(t *testing.T) {
 // The read is incomplete, so it completes nothing and the copy is not served; the watcher reads the
 // bucket again itself after its re-read delay, and that read's warm-up line says it completed.
 func TestATimedOutWarmUpSaysSoAndIsReadAgainByTheWatcher(t *testing.T) {
+	t.Parallel()
 	uri := testnats.URL(t)
 	_, kv := bucket(t, uri)
 	for _, key := range []string{"one", "two", "three"} {

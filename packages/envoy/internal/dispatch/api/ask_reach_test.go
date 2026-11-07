@@ -157,6 +157,7 @@ func requireAskReaches(t *testing.T, handler http.Handler, roster *fakeRoster, e
 // and no_holder with a null holder for a route nobody holds; a project document's ask has no
 // issue, so none of the four.
 func TestAskReadsCarryTheIssueClaimantAndRoute(t *testing.T) {
+	t.Parallel()
 	roster := &fakeRoster{}
 	roster.set("session-routed")
 	roster.set("ses-reviewer", "reviewer")
@@ -230,6 +231,7 @@ func unknownReachCases(t *testing.T, handler http.Handler) []routedAskCase {
 }
 
 func TestAskReadsReachUnknownWhenTheListenerDoesNotAnswer(t *testing.T) {
+	t.Parallel()
 	roster := &fakeRoster{}
 	roster.set("session-routed")
 	roster.set("ses-reviewer", "reviewer")
@@ -239,6 +241,7 @@ func TestAskReadsReachUnknownWhenTheListenerDoesNotAnswer(t *testing.T) {
 }
 
 func TestAskReadsReachUnknownWithoutAConfiguredListener(t *testing.T) {
+	t.Parallel()
 	handler, database, _ := newTestServer(t, testServerOptions{})
 	requireAskReaches(t, handler, nil, openRoutedAsks(t, handler, database, unknownReachCases(t, handler)))
 }

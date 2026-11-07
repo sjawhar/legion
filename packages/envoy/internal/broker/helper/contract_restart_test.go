@@ -60,6 +60,7 @@ func (l *losingTokenTransport) RoundTrip(r *http.Request) (*http.Response, error
 // interval, redeems the refresh token it still holds inside the broker's rotation grace, so the
 // login is kept, rotated, in memory and on disk.
 func TestContractALostRefreshAnswerIsRetriedInsideTheGrace(t *testing.T) {
+	t.Parallel()
 	first := newContractRig(t)
 	credentialID := first.login(t)
 	kept, err := LoadMachineFile(first.machineFile)
@@ -103,6 +104,7 @@ func TestContractALostRefreshAnswerIsRetriedInsideTheGrace(t *testing.T) {
 // session with no new approval. Its start refreshes the login against the real broker, which
 // rotates the refresh token the file keeps.
 func TestContractALoginSurvivesARestart(t *testing.T) {
+	t.Parallel()
 	first := newContractRig(t)
 	credentialID := first.login(t)
 	info, err := os.Stat(first.machineFile)
@@ -144,6 +146,7 @@ func TestContractALoginSurvivesARestart(t *testing.T) {
 // helper drops the credential with the refresh-refused reason, deletes its machine file, and
 // login-status reads expired, refused for that reason.
 func TestContractARevokedMachinesNextRefreshDropsItsLogin(t *testing.T) {
+	t.Parallel()
 	first := newContractRig(t)
 	credentialID := first.login(t)
 	status, body := first.broker.UI(t, http.MethodPost, "/v1/launcher-credentials/"+credentialID+"/revoke-by-approver",
@@ -177,6 +180,7 @@ func TestContractARevokedMachinesNextRefreshDropsItsLogin(t *testing.T) {
 // cannot reach the token endpoint keeps the login it kept, reports it issued, and enrolls sessions
 // with it; the machine file is unchanged.
 func TestContractARefreshThatCannotReachTheBrokerKeepsTheLogin(t *testing.T) {
+	t.Parallel()
 	first := newContractRig(t)
 	first.login(t)
 	kept, err := LoadMachineFile(first.machineFile)
@@ -208,6 +212,7 @@ func TestContractARefreshThatCannotReachTheBrokerKeepsTheLogin(t *testing.T) {
 // holds its login until the expiry it kept, then drops it for that reason, as the broker's own
 // lapse would refuse it.
 func TestContractAnUnrefreshedLoginDropsAtItsExpiry(t *testing.T) {
+	t.Parallel()
 	first := newContractRig(t)
 	first.login(t)
 	kept, err := LoadMachineFile(first.machineFile)
@@ -241,6 +246,7 @@ func TestContractAnUnrefreshedLoginDropsAtItsExpiry(t *testing.T) {
 // TestContractAReLoginReplacesTheKeptLogin: a machine login while one is held mints a new key and
 // a new login; the machine file names the old login until the new one is issued, then the new one.
 func TestContractAReLoginReplacesTheKeptLogin(t *testing.T) {
+	t.Parallel()
 	cr := newContractRig(t)
 	first := cr.login(t)
 	code, err := cr.srv.Broker.Login(context.Background(), cr.srv.Hostname)
@@ -272,6 +278,7 @@ func TestContractAReLoginReplacesTheKeptLogin(t *testing.T) {
 // proof: no old copy of the machine file can refresh it, and the session it enrolled keeps its
 // enrollment and renews it; the new login keeps working.
 func TestContractAReLoginRetiresTheCredentialItReplaces(t *testing.T) {
+	t.Parallel()
 	cr := newContractRig(t, brokertest.WithLease(3*time.Second))
 	first := cr.login(t)
 	reg := cr.call(t, Request{Op: "register", WaitSeconds: 10})
@@ -333,6 +340,7 @@ func TestContractAReLoginRetiresTheCredentialItReplaces(t *testing.T) {
 // redeems the token the helper holds and keeps the login; a retry once the grace has ended is a
 // reuse, which the broker refuses, and the helper drops the login and its file.
 func TestContractALostRefreshAnswerIsRedeemableUntilTheGraceEnds(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name  string
 		shift string

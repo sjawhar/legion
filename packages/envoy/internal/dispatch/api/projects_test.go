@@ -21,6 +21,7 @@ type projectResponse struct {
 }
 
 func TestCreateProjectRejectsDuplicateKeyWithProjectExists(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 
 	first := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
@@ -45,6 +46,7 @@ func TestCreateProjectRejectsDuplicateKeyWithProjectExists(t *testing.T) {
 // An agent session creates a project with its bearer, as it creates an issue: the project is
 // listed like any other, and its project.created event names the session that created it.
 func TestASessionBearerCreatesAProject(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 
 	created := sessionRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]any{
@@ -85,6 +87,7 @@ func TestASessionBearerCreatesAProject(t *testing.T) {
 // A key that already exists is refused whoever asks: a session's bearer and a signed-in person's
 // cookie each get 409 PROJECT_EXISTS, and the project keeps the name it was created with.
 func TestCreatingATakenProjectKeyIsRefusedForABearerAndACookie(t *testing.T) {
+	t.Parallel()
 	handler, _, _, withCookie := newCookieServer(t)
 
 	if first := sessionRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]any{
@@ -117,6 +120,7 @@ func TestCreatingATakenProjectKeyIsRefusedForABearerAndACookie(t *testing.T) {
 // so an agent learns the rule once, whichever route it called. The rule is contracts'
 // PROJECT_KEY_RULE, generated into Go, which the dispatch command's own refusal gives too.
 func TestEveryRouteRefusesABadProjectKeyInOneWording(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	rule := contracts.ProjectKeyRule
 	for _, probe := range []struct {
@@ -142,6 +146,7 @@ func TestEveryRouteRefusesABadProjectKeyInOneWording(t *testing.T) {
 // A bad key or an empty name is 400 INVALID_PROJECT for a session as for a person, and the
 // refusal names which of the two is wrong: an agent reads it as the whole answer.
 func TestAnInvalidProjectIsRefusedForABearerAndAPerson(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	badKey := func(key string) string {
 		return fmt.Sprintf(`key \"%s\" is not a project key: %s`, key, contracts.ProjectKeyRule)
@@ -200,6 +205,7 @@ func TestAnInvalidProjectIsRefusedForABearerAndAPerson(t *testing.T) {
 // soft hyphen - or a combining mark on a letter, and in any script, Hangul included. No route
 // renames a project, so refusing one leaves its maker no way to the name they meant.
 func TestAVisibleNameWithFormatCharactersIsAcceptedForABearerAndAPerson(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	for index, name := range []string{
 		"Team 👨\u200d👩\u200d👧\u200d👦",
@@ -240,6 +246,7 @@ func TestAVisibleNameWithFormatCharactersIsAcceptedForABearerAndAPerson(t *testi
 // point of plane 3 (outside the noncharacter and default-ignorable ranges) they leave unassigned,
 // so it keeps testing that rule on whatever toolchain runs it, and fails if none is left to find.
 func TestACodePointGoLeavesUnassignedIsVisibleForABearerAndAPerson(t *testing.T) {
+	t.Parallel()
 	unassigned := rune(-1)
 	for candidate := rune(0x30000); candidate <= 0x3FFFD; candidate++ {
 		if unicode.Is(unicode.Cn, candidate) {
@@ -271,6 +278,7 @@ func TestACodePointGoLeavesUnassignedIsVisibleForABearerAndAPerson(t *testing.T)
 // every dashboard reads, and no route renames a project. The cap counts UTF-16 units after the
 // trim, so a name at it is created and one unit over is CAP_EXCEEDED, for a session as for a person.
 func TestAProjectNameOverTheCapIsCapExceededForABearerAndAPerson(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	for _, caller := range []struct {
 		name, key string
@@ -296,6 +304,7 @@ func TestAProjectNameOverTheCapIsCapExceededForABearerAndAPerson(t *testing.T) {
 }
 
 func TestListProjectsIncludesCreatedAt(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
@@ -315,6 +324,7 @@ func TestListProjectsIncludesCreatedAt(t *testing.T) {
 }
 
 func TestProjectAndSettingsMutationsAppendLiveEvents(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key": "CORE", "name": "Core",
@@ -384,6 +394,7 @@ func TestProjectAndSettingsMutationsAppendLiveEvents(t *testing.T) {
 }
 
 func TestListProjectsCountsOpenAsksOnIssuesAndDocuments(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key": "CORE", "name": "Core",

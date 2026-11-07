@@ -37,6 +37,7 @@ var newestReviewQueries = []struct {
 const reviewPlanDocument = "00000000-0000-4000-8000-000000000000"
 
 func TestNewestReviewReadsTakeTheReviewOrderIndex(t *testing.T) {
+	t.Parallel()
 	service, _ := newTestService(t)
 	ctx := context.Background()
 	tx, err := service.store.Pool.Begin(ctx)
@@ -80,6 +81,7 @@ func TestNewestReviewReadsTakeTheReviewOrderIndex(t *testing.T) {
 // query constant of that file that reads one row of artifact_reviews is therefore required to be
 // in the table, by name.
 func TestEveryNewestReviewQueryIsPlanned(t *testing.T) {
+	t.Parallel()
 	planned := map[string]struct{}{}
 	for _, query := range newestReviewQueries {
 		planned[query.constant] = struct{}{}

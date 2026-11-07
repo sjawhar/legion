@@ -30,6 +30,7 @@ type browserOrigin struct{ _ byte }
 // Yjs does (#350), so the room receives no formatting cleanup to make after these browser updates.
 // The room's stored history therefore contains only the commits its browser and its own Apply made.
 func TestEveryCopyOfARoomReplaysItsFormattedCommitsToItsMarkdown(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "seed")
@@ -157,6 +158,7 @@ func TestEveryCopyOfARoomReplaysItsFormattedCommitsToItsMarkdown(t *testing.T) {
 // never sees, so the room held a state its history and every copy of it lack; the markdown is the
 // same either way, so only the state shows it.
 func TestARoomLoadsItsStoredHistoryAsItWasStored(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "seed")
@@ -226,6 +228,7 @@ func TestARoomLoadsItsStoredHistoryAsItWasStored(t *testing.T) {
 // markers of those gaps, and the cold read renders a marked run where the room rendered a plain
 // one.
 func TestAColdReadReplaysAChurnOfFormattingToTheRoomsMarkdown(t *testing.T) {
+	t.Parallel()
 	for _, seed := range []uint64{1, 2, 3} {
 		t.Run(fmt.Sprintf("seed %d", seed), func(t *testing.T) { formattingChurnRound(t, seed) })
 	}
@@ -483,6 +486,7 @@ func roomMarkdown(t *testing.T, service *Service, artifactID string) string {
 // would store formatting the room never had, *xy* for the room's *x*y, under a client the room
 // never saw, for every later load to read.
 func TestACompactionStoresTheRoomsFormattedStateAsTheRoomHoldsIt(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "seed")

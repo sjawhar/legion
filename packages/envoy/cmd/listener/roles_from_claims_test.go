@@ -102,6 +102,7 @@ func roleViewUnanswered(recorder *httptest.ResponseRecorder) bool {
 // claim's holder holds the role though its record lacks the topic, or though it has no interest
 // record at all.
 func TestARoleIsHeldByTheSessionItsClaimNamesWhateverTheRecordsTopics(t *testing.T) {
+	t.Parallel()
 	const (
 		stale  = "ses_claims_stale_topic"
 		holder = "ses_claims_holder_without_topic"
@@ -164,6 +165,7 @@ func TestARoleIsHeldByTheSessionItsClaimNamesWhateverTheRecordsTopics(t *testing
 // bus-unavailable 503 with Retry-After, never a row a roster would take for a role nobody holds. A
 // send only stamps roles as a hint, so it still goes out, its sender carrying no roles.
 func TestAClaimsViewThatCannotAnswerIsTheBusNotAnsweringOnTheSessionRoutes(t *testing.T) {
+	t.Parallel()
 	const (
 		sender = "ses_claims_view_sender"
 		target = "ses_claims_view_target"
@@ -269,6 +271,7 @@ func requireRolesOrUnanswered(t *testing.T, what string, recorder *httptest.Resp
 // Retry-After: 1, never the claim's holder listed with no roles, and a send still goes out, its
 // sender carrying no roles.
 func TestARoleViewWhoseFirstScanTimedOutIsTheBusNotAnsweringOnTheSessionRoutes(t *testing.T) {
+	t.Parallel()
 	const (
 		holder = "ses_timed_out_view_holder"
 		target = "ses_timed_out_view_target"
@@ -314,6 +317,7 @@ func TestARoleViewWhoseFirstScanTimedOutIsTheBusNotAnsweringOnTheSessionRoutes(t
 // new bucket writes at a lower revision than the old bucket's claim of the same role
 // (architect's) gives its holder the role, since a read of a recreated bucket drops the fence.
 func TestARecreatedRoleBucketIsNeverAnsweredAsAHolderWithoutItsRole(t *testing.T) {
+	t.Parallel()
 	const (
 		holder = "ses_recreated_roles_holder"
 		filler = "ses_recreated_roles_filler"

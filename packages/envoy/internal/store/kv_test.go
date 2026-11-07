@@ -48,6 +48,7 @@ func holding(t *testing.T, interests map[string]Interest) *Registry {
 }
 
 func TestMatch_FiltersByMachineID(t *testing.T) {
+	t.Parallel()
 	r := holding(t, map[string]Interest{
 		"ses_a": {SessionID: "ses_a", MachineID: "machine-A", Topics: []string{"notifications.>"}},
 		"ses_b": {SessionID: "ses_b", MachineID: "machine-B", Topics: []string{"notifications.>"}},
@@ -79,6 +80,7 @@ func TestMatch_FiltersByMachineID(t *testing.T) {
 // session must find the ones registered through another machine's listener, by an exact topic or
 // a wildcard alike, and none whose patterns miss the topic.
 func TestMatchAll_ReturnsMatchingSessionsOnEveryMachine(t *testing.T) {
+	t.Parallel()
 	r := holding(t, map[string]Interest{
 		"ses_b_exact": {SessionID: "ses_b_exact", MachineID: "machine-B", Topics: []string{"notifications.team.deploy"}},
 		"ses_a_star":  {SessionID: "ses_a_star", MachineID: "machine-A", Topics: []string{"notifications.team.*"}},
@@ -103,6 +105,7 @@ func TestMatchAll_ReturnsMatchingSessionsOnEveryMachine(t *testing.T) {
 }
 
 func TestMatch_WildcardPatterns(t *testing.T) {
+	t.Parallel()
 	r := holding(t, map[string]Interest{
 		"ses_exact":   {SessionID: "ses_exact", MachineID: "m1", Topics: []string{"notifications.github.sjawhar.legion.pr"}},
 		"ses_star":    {SessionID: "ses_star", MachineID: "m1", Topics: []string{"notifications.github.*.*.pr"}},
@@ -137,6 +140,7 @@ func TestMatch_WildcardPatterns(t *testing.T) {
 }
 
 func TestMatch_SlackThreadIsolation(t *testing.T) {
+	t.Parallel()
 	r := holding(t, map[string]Interest{
 		"ses_thread_a": {SessionID: "ses_thread_a", MachineID: "m1", Topics: []string{
 			"notifications.slack.T123.C456.thread.1111111111_111111.>",
@@ -183,6 +187,7 @@ func TestMatch_SlackThreadIsolation(t *testing.T) {
 }
 
 func TestMatch_EmptyCache(t *testing.T) {
+	t.Parallel()
 	r := holding(t, map[string]Interest{})
 	got := r.Match("m1", "notifications.test")
 	if len(got) != 0 {
@@ -191,6 +196,7 @@ func TestMatch_EmptyCache(t *testing.T) {
 }
 
 func TestMatch_MultipleTopicsOnOneEntry(t *testing.T) {
+	t.Parallel()
 	r := holding(t, map[string]Interest{
 		"ses_multi": {
 			SessionID: "ses_multi",
@@ -225,6 +231,7 @@ func TestMatch_MultipleTopicsOnOneEntry(t *testing.T) {
 // (only the agent topic), truncating the session's subscriptions to its own topic.
 
 func TestMergeForUpsert_SuccessfulGetMergesTopics(t *testing.T) {
+	t.Parallel()
 	cur := Interest{
 		SessionID: "ses_x",
 		MachineID: "m1",
@@ -252,6 +259,7 @@ func TestMergeForUpsert_SuccessfulGetMergesTopics(t *testing.T) {
 }
 
 func TestMergeForUpsert_ErrKeyNotFoundCreatesNewEntry(t *testing.T) {
+	t.Parallel()
 	item := Interest{
 		SessionID: "ses_new",
 		MachineID: "m1",
@@ -274,6 +282,7 @@ func TestMergeForUpsert_ErrKeyNotFoundCreatesNewEntry(t *testing.T) {
 }
 
 func TestMergeForUpsert_TransientErrorRefusesToWrite(t *testing.T) {
+	t.Parallel()
 	// This is the regression test for the Atlas dropout bug. A transient KV error
 	// (NOT ErrKeyNotFound) MUST propagate up so the caller refuses to silently
 	// overwrite durable state with whatever was passed in.
@@ -294,6 +303,7 @@ func TestMergeForUpsert_TransientErrorRefusesToWrite(t *testing.T) {
 }
 
 func TestMergeForUpsert_PreservesMachineIDAndDirFromExistingEntry(t *testing.T) {
+	t.Parallel()
 	// Heartbeats from the plugin do not send MachineID. The cached state must win.
 	cur := Interest{
 		SessionID: "ses_x",
@@ -333,6 +343,7 @@ func TestMergeForUpsert_PreservesMachineIDAndDirFromExistingEntry(t *testing.T) 
 // failed-delivery lane wildcard, a Legion controller lane and notifications.> go, while the
 // session's own agent subject, the issue topic it followed and the topic it registers now stay.
 func TestMergeForUpsert_DropsStoredTopicsReachingAPrivateStreamSubject(t *testing.T) {
+	t.Parallel()
 	cur := Interest{
 		SessionID: "ses_x",
 		MachineID: "m1",
@@ -363,6 +374,7 @@ func TestMergeForUpsert_DropsStoredTopicsReachingAPrivateStreamSubject(t *testin
 // sends (cmd/listener/api.go's senderStamp) - names the listener the session is registered through
 // now, not the one it registered through first.
 func TestMergeForUpsertMovesTheRowToTheMachineAndDirectoryOfASecondRegistration(t *testing.T) {
+	t.Parallel()
 	cur := Interest{
 		SessionID: "ses_moved",
 		MachineID: "machine-first",
@@ -388,6 +400,7 @@ func TestMergeForUpsertMovesTheRowToTheMachineAndDirectoryOfASecondRegistration(
 // so the row keeps the directory the session's registration stored: claiming a role never clears
 // the Cwd of the sender stamp.
 func TestMergeForUpsertKeepsTheStoredDirectoryForARoleClaimThatCarriesNone(t *testing.T) {
+	t.Parallel()
 	cur := Interest{
 		SessionID: "ses_claimant",
 		MachineID: "machine-first",
@@ -408,6 +421,7 @@ func TestMergeForUpsertKeepsTheStoredDirectoryForARoleClaimThatCarriesNone(t *te
 // A request that carries no machine id keeps the stored one: a caller that names no machine says
 // nothing about where the session runs, so the row is left naming the listener it has.
 func TestMergeForUpsertKeepsTheStoredMachineIDForARequestThatCarriesNone(t *testing.T) {
+	t.Parallel()
 	cur := Interest{
 		SessionID: "ses_machineless",
 		MachineID: "machine-first",
@@ -472,6 +486,7 @@ func pollMatch(t *testing.T, r *Registry, machineID, topic string, wantCount int
 }
 
 func TestOpen_WatchPopulatesExistingKeys(t *testing.T) {
+	t.Parallel()
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 
@@ -500,6 +515,7 @@ func TestOpen_WatchPopulatesExistingKeys(t *testing.T) {
 }
 
 func TestWatch_PropagatesUpsert(t *testing.T) {
+	t.Parallel()
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 
@@ -527,6 +543,7 @@ func TestWatch_PropagatesUpsert(t *testing.T) {
 }
 
 func TestWatch_PropagatesDelete(t *testing.T) {
+	t.Parallel()
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 
@@ -559,6 +576,7 @@ func TestWatch_PropagatesDelete(t *testing.T) {
 }
 
 func TestWatch_PropagatesPurge(t *testing.T) {
+	t.Parallel()
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 
@@ -591,6 +609,7 @@ func TestWatch_PropagatesPurge(t *testing.T) {
 }
 
 func TestMatch_IndependentOfKVAfterStartup(t *testing.T) {
+	t.Parallel()
 	srv, uri := testnats.Start(t)
 	conn := testnats.Connect(t, uri)
 	// Safety net: a double close is a no-op.
@@ -630,6 +649,7 @@ func TestMatch_IndependentOfKVAfterStartup(t *testing.T) {
 }
 
 func TestOpen_EmptyBucketSucceeds(t *testing.T) {
+	t.Parallel()
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 
@@ -680,6 +700,7 @@ func coldRegistry(t *testing.T, conn *natsgo.Conn) (*Registry, natsgo.KeyValue) 
 }
 
 func TestGet_ColdCacheFallsBackToKV(t *testing.T) {
+	t.Parallel()
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 
@@ -700,6 +721,7 @@ func TestGet_ColdCacheFallsBackToKV(t *testing.T) {
 }
 
 func TestGet_ColdCachePopulatesCacheOnHit(t *testing.T) {
+	t.Parallel()
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 
@@ -719,6 +741,7 @@ func TestGet_ColdCachePopulatesCacheOnHit(t *testing.T) {
 }
 
 func TestGet_ColdCacheMissReturnsError(t *testing.T) {
+	t.Parallel()
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 
@@ -738,6 +761,7 @@ func TestGet_ColdCacheMissReturnsError(t *testing.T) {
 // release's read - instead returns ctx's end, naming the call, and a release left that way deletes
 // nothing.
 func TestReadsWhoseContextHasEndedAnswerOnlyFromTheCache(t *testing.T) {
+	t.Parallel()
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 
@@ -779,6 +803,7 @@ func TestReadsWhoseContextHasEndedAnswerOnlyFromTheCache(t *testing.T) {
 // A claim record the bucket holds and no read can decode is ErrMalformedRoleClaim, so a caller can
 // tell it from a read that did not answer, with the detail of what is wrong kept in the message.
 func TestRoleClaimReadsAnUndecodableRecordAsErrMalformedRoleClaim(t *testing.T) {
+	t.Parallel()
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 
@@ -850,6 +875,7 @@ func storeUndecodableInterest(t *testing.T, reg *Registry, kv natsgo.KeyValue, s
 // record and releases the session's role claims, as it does for a record that decodes: failing on
 // the read would leave nothing that can clear the record.
 func TestRemoveAllDeletesAnUndecodableInterestRecordAndReleasesItsRoles(t *testing.T) {
+	t.Parallel()
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 
@@ -978,6 +1004,7 @@ func TestSetRoleClaimsOverUndecodableInterestRecords(t *testing.T) {
 }
 
 func TestUpsert_TransientGetErrorPropagatesAndDoesNotClobber(t *testing.T) {
+	t.Parallel()
 	// Integration regression for the Atlas dropout bug: when the interest bucket's Get fails
 	// transiently (not ErrKeyNotFound), Upsert MUST return the error rather
 	// than silently writing a truncated state to KV.
@@ -1010,6 +1037,7 @@ func TestUpsert_TransientGetErrorPropagatesAndDoesNotClobber(t *testing.T) {
 }
 
 func TestUpsert_ColdCacheMergesWithExistingKVEntry(t *testing.T) {
+	t.Parallel()
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 
@@ -1067,6 +1095,7 @@ func TestUpsert_ColdCacheMergesWithExistingKVEntry(t *testing.T) {
 	}
 }
 func TestUpsert_ColdCacheDuplicateTopicDeduped(t *testing.T) {
+	t.Parallel()
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 
@@ -1160,6 +1189,7 @@ func upsertOrFail(t *testing.T, reg *Registry, sessionID string, topics ...strin
 // InterestRefreshAge old: before that Upsert returns the stored row, UpdatedAt and all, and the
 // bucket gains no revision; at that age, and past it, the row is written and restamped.
 func TestUpsertWritesAnUnchangedRowOnlyOnceItIsInterestRefreshAgeOld(t *testing.T) {
+	t.Parallel()
 	start := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
 	clock := &manualClock{at: start}
 	reg, kv := clockedRegistry(t, clock)
@@ -1214,6 +1244,7 @@ func TestUpsertWritesAnUnchangedRowOnlyOnceItIsInterestRefreshAgeOld(t *testing.
 // A heartbeat that adds a topic is written at once, however young the row; one that re-sends the
 // stored topics in another order changes nothing, since the merge sorts them.
 func TestUpsertWritesAChangedTopicSetAtOnce(t *testing.T) {
+	t.Parallel()
 	start := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
 	clock := &manualClock{at: start}
 	reg, kv := clockedRegistry(t, clock)
@@ -1241,6 +1272,7 @@ func TestUpsertWritesAChangedTopicSetAtOnce(t *testing.T) {
 // A row stored with a null topic list is not the [] a write would store, so the first heartbeat
 // over it writes it once, however young it is, and the next one finds it unchanged.
 func TestUpsertWritesARowStoredWithNullTopicsOnce(t *testing.T) {
+	t.Parallel()
 	start := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
 	clock := &manualClock{at: start}
 	reg, kv := clockedRegistry(t, clock)
@@ -1268,6 +1300,7 @@ func TestUpsertWritesARowStoredWithNullTopicsOnce(t *testing.T) {
 }
 
 func TestRemove_ColdCacheReadsFromKV(t *testing.T) {
+	t.Parallel()
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 
@@ -1298,6 +1331,7 @@ func TestRemove_ColdCacheReadsFromKV(t *testing.T) {
 // agent subject and a failed-delivery lane are dropped, so Match stops fanning that lane out to the
 // session, while its own agent subject and the issue topic it follows stay.
 func TestRemoveAndSetRole_DropStoredTopicsReachingAPrivateStreamSubject(t *testing.T) {
+	t.Parallel()
 	const lane = "notifications.envoy.exceptions.notifications.agent.ses_other"
 	stale := []string{
 		"notifications.agent.ses_other",
@@ -1354,6 +1388,7 @@ func TestRemoveAndSetRole_DropStoredTopicsReachingAPrivateStreamSubject(t *testi
 }
 
 func TestSetRole_ClaimNewRole(t *testing.T) {
+	t.Parallel()
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 
@@ -1395,6 +1430,7 @@ func TestSetRole_ClaimNewRole(t *testing.T) {
 	}
 }
 func TestSetRole_PersistsClaimMetadata(t *testing.T) {
+	t.Parallel()
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 
@@ -1422,6 +1458,7 @@ func TestSetRole_PersistsClaimMetadata(t *testing.T) {
 }
 
 func TestSetRole_TransferRole(t *testing.T) {
+	t.Parallel()
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 
@@ -1481,6 +1518,7 @@ func TestSetRole_TransferRole(t *testing.T) {
 }
 
 func TestSetRole_Idempotent(t *testing.T) {
+	t.Parallel()
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 
@@ -1509,6 +1547,7 @@ func TestSetRole_Idempotent(t *testing.T) {
 }
 
 func TestRemove_ReleasesRoleClaimAfterSameSessionReplacement(t *testing.T) {
+	t.Parallel()
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 
@@ -1529,6 +1568,7 @@ func TestRemove_ReleasesRoleClaimAfterSameSessionReplacement(t *testing.T) {
 }
 
 func TestSetRole_OldHolderMissing(t *testing.T) {
+	t.Parallel()
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 
@@ -1555,6 +1595,7 @@ func TestSetRole_OldHolderMissing(t *testing.T) {
 // --- Reaper Tests (cross-reference sessions for stale interest cleanup) ---
 
 func TestInterestReaper(t *testing.T) {
+	t.Parallel()
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 
@@ -1596,6 +1637,7 @@ func TestInterestReaper(t *testing.T) {
 	}
 }
 func TestReapKeepsRoleClaimsForSessionRecovery(t *testing.T) {
+	t.Parallel()
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 
@@ -1636,6 +1678,7 @@ func TestReapKeepsRoleClaimsForSessionRecovery(t *testing.T) {
 	assertRoleHolder(t, reg, role, sessionID)
 }
 func TestReapRoleClaimsDropsDeadHolderAfterTTL(t *testing.T) {
+	t.Parallel()
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 
@@ -1658,6 +1701,7 @@ func TestReapRoleClaimsDropsDeadHolderAfterTTL(t *testing.T) {
 }
 
 func TestReleaseReadExpiredRoleClaimDoesNotReportReleaseAfterConcurrentChange(t *testing.T) {
+	t.Parallel()
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 
@@ -1705,6 +1749,7 @@ func TestReleaseReadExpiredRoleClaimDoesNotReportReleaseAfterConcurrentChange(t 
 }
 
 func TestReleaseReadExpiredRoleClaimDoesNotReportReleaseAfterConcurrentRemoval(t *testing.T) {
+	t.Parallel()
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 
@@ -1743,6 +1788,7 @@ func TestReleaseReadExpiredRoleClaimDoesNotReportReleaseAfterConcurrentRemoval(t
 }
 
 func TestReleaseReadExpiredRoleClaimReturnsErrorWithoutRelease(t *testing.T) {
+	t.Parallel()
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 
@@ -1774,6 +1820,7 @@ func TestReleaseReadExpiredRoleClaimReturnsErrorWithoutRelease(t *testing.T) {
 }
 
 func TestReaperGraceWindow(t *testing.T) {
+	t.Parallel()
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 
@@ -1822,6 +1869,7 @@ func TestReaperGraceWindow(t *testing.T) {
 // after the session row's 5-minute TTL has made the session dead. A session back under the same
 // id at 6 or at 9 minutes finds its row and topics.
 func TestAPausedSessionKeepsItsInterestThroughTheReapGrace(t *testing.T) {
+	t.Parallel()
 	const sessionTTL = 5 * time.Minute // the session bucket's MaxAge, the liveness clock
 	start := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
 	clock := &manualClock{at: start}
@@ -1931,6 +1979,7 @@ func upsertWithin(t *testing.T, reg *Registry, item Interest, topics []string) b
 }
 
 func TestReapCallsIsAliveWithoutHoldingTheInterestLock(t *testing.T) {
+	t.Parallel()
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 
@@ -1965,6 +2014,7 @@ func TestReapCallsIsAliveWithoutHoldingTheInterestLock(t *testing.T) {
 }
 
 func TestReapKeepsAnInterestReupsertedDuringThePass(t *testing.T) {
+	t.Parallel()
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 
@@ -1996,6 +2046,7 @@ func TestReapKeepsAnInterestReupsertedDuringThePass(t *testing.T) {
 }
 
 func TestReapKeepsAnInterestWrittenAfterItsRecheck(t *testing.T) {
+	t.Parallel()
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 
@@ -2051,6 +2102,7 @@ func (kv *putBeforeDeleteKeyValue) Delete(key string, opts ...natsgo.DeleteOpt) 
 }
 
 func TestPing_HealthyConnReturnsNil(t *testing.T) {
+	t.Parallel()
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 
@@ -2065,6 +2117,7 @@ func TestPing_HealthyConnReturnsNil(t *testing.T) {
 }
 
 func TestPing_ClosedConnReturnsError(t *testing.T) {
+	t.Parallel()
 	// A closed KV handle must remain observable through Ping so /healthz can
 	// report the unavailable dependency while NATS reconnects.
 	conn, cleanup := connectNATS(t)
@@ -2093,6 +2146,7 @@ func TestPing_ClosedConnReturnsError(t *testing.T) {
 // interests" even when the durable KV entry has subscribers.
 
 func TestWaitForCacheReady_ReturnsAfterInitialScan(t *testing.T) {
+	t.Parallel()
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 
@@ -2109,6 +2163,7 @@ func TestWaitForCacheReady_ReturnsAfterInitialScan(t *testing.T) {
 }
 
 func TestWaitForCacheReady_PrePopulatedKVIsVisibleAfterReady(t *testing.T) {
+	t.Parallel()
 	// The whole point of this gate: after WaitForCacheReady returns, every
 	// existing KV entry must be findable via Match without falling through to
 	// "no matching interests".
@@ -2151,6 +2206,7 @@ func TestWaitForCacheReady_PrePopulatedKVIsVisibleAfterReady(t *testing.T) {
 }
 
 func TestRemoveWritesThroughCache(t *testing.T) {
+	t.Parallel()
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 
@@ -2183,6 +2239,7 @@ func TestRemoveWritesThroughCache(t *testing.T) {
 }
 
 func TestRemoveAllClearsCache(t *testing.T) {
+	t.Parallel()
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 
@@ -2206,6 +2263,7 @@ func TestRemoveAllClearsCache(t *testing.T) {
 	}
 }
 func TestRemoveAllReleasesRoleClaims(t *testing.T) {
+	t.Parallel()
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 
@@ -2223,6 +2281,7 @@ func TestRemoveAllReleasesRoleClaims(t *testing.T) {
 	assertRoleHolder(t, reg, role, "")
 }
 func TestRemoveAllReleasesRoleClaimMissingFromInterest(t *testing.T) {
+	t.Parallel()
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 
@@ -2244,6 +2303,7 @@ func TestRemoveAllReleasesRoleClaimMissingFromInterest(t *testing.T) {
 }
 
 func TestSetRoleRollsBackWhenInterestUpsertFails(t *testing.T) {
+	t.Parallel()
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 
@@ -2281,6 +2341,7 @@ func TestSetRoleRollsBackWhenInterestUpsertFails(t *testing.T) {
 // failure of it is still a failure: the claim is refused, the old holder keeps the role, and the
 // claimant's role topic is rolled back.
 func TestSetRoleLeavesInterestWhenRoleWriteFails(t *testing.T) {
+	t.Parallel()
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 
@@ -2317,6 +2378,7 @@ func TestSetRoleLeavesInterestWhenRoleWriteFails(t *testing.T) {
 // A soft claim of an unheld role creates its claim conditionally, so a genuine failure of that
 // create is still a failure: nothing holds the role and the claimant's role topic is rolled back.
 func TestSetRoleRollsBackWhenRoleCreateFails(t *testing.T) {
+	t.Parallel()
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 
@@ -2551,6 +2613,7 @@ func (b *lockedBuffer) String() string {
 // own concurrent claim: the role is held by the session that asked for it, so the call is the
 // success it would have been had it won, not *ErrRoleHeld against itself and not a failure.
 func TestSetRoleSoftTreatsSameSessionCASConflictAsConcurrentSuccess(t *testing.T) {
+	t.Parallel()
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 
@@ -2589,6 +2652,7 @@ func TestSetRoleSoftTreatsSameSessionCASConflictAsConcurrentSuccess(t *testing.T
 // wrote as a 500. The role ends held by one of the claimants, and that holder's interest row names
 // the role topic: no cleanup takes the topic from the session that ended up holding the role.
 func TestSetRoleConcurrentHardClaimsOfOneRoleAllLand(t *testing.T) {
+	t.Parallel()
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 
@@ -2636,6 +2700,7 @@ func TestSetRoleConcurrentHardClaimsOfOneRoleAllLand(t *testing.T) {
 }
 
 func TestSetRoleSoft_TakesUnheldAndOwnAndSupersedableRoles(t *testing.T) {
+	t.Parallel()
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 
@@ -2663,6 +2728,7 @@ func TestSetRoleSoft_TakesUnheldAndOwnAndSupersedableRoles(t *testing.T) {
 }
 
 func TestSetRoleSoft_RefusesLiveHolderAndLeavesClaimUntouched(t *testing.T) {
+	t.Parallel()
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 
@@ -2694,6 +2760,7 @@ func TestSetRoleSoft_RefusesLiveHolderAndLeavesClaimUntouched(t *testing.T) {
 }
 
 func TestSetRoleOldHolderCleanupDoesNotDeleteNewerClaim(t *testing.T) {
+	t.Parallel()
 	// Interleaving: role at A. B claims — its role-row write lands (row -> B)
 	// — and before B's cleanup of A runs, A re-claims (row -> A). B's cleanup
 	// must not delete A's fresh claim. The previous implementation released
@@ -2751,6 +2818,7 @@ func (kv *afterRoleWriteKeyValue) Update(key string, value []byte, last uint64) 
 }
 
 func TestRemoveDoesNotOverwriteNewerWatcherValue(t *testing.T) {
+	t.Parallel()
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 
@@ -2855,6 +2923,7 @@ func (kv *interleavingPutKeyValue) Put(key string, value []byte) (uint64, error)
 }
 
 func TestDeleteHistoryFailureSuppressesStaleWatcherUpdate(t *testing.T) {
+	t.Parallel()
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 
@@ -2908,6 +2977,7 @@ func TestMain(m *testing.M) { os.Exit(testnats.Main(m)) }
 // The registry's clock stamps what it records: an interest's UpdatedAt and a role claim's
 // ClaimedAt come from the clock Open was given, as the grace window does.
 func TestTheRegistryClockStampsWhatItRecords(t *testing.T) {
+	t.Parallel()
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 	at := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
@@ -2940,6 +3010,7 @@ func TestTheRegistryClockStampsWhatItRecords(t *testing.T) {
 // then swept. The recreated stream numbers its revisions from 1, so a cache still fenced by the old
 // bucket's revisions would keep an old value for every key the new bucket has not yet written past.
 func TestRewatchOntoARecreatedBucketRefillsTheCache(t *testing.T) {
+	t.Parallel()
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 	reg, held, _ := rebuiltRegistry(t, conn)
@@ -3004,6 +3075,7 @@ func TestRewatchOntoARecreatedBucketRefillsTheCache(t *testing.T) {
 // watcher and both bucket handles stay on the connection they were on, so the registry keeps
 // working there instead of writing interests through one connection and roles through another.
 func TestARewatchThatCannotOpenTheRoleBucketMovesNothing(t *testing.T) {
+	t.Parallel()
 	first, closeFirst := connectNATS(t)
 	defer closeFirst()
 	reg, err := Open(first, WithReplicas(1))
@@ -3046,6 +3118,7 @@ func TestARewatchThatCannotOpenTheRoleBucketMovesNothing(t *testing.T) {
 // claim watcher stay on the connection they were on, so the registry does not read and write the
 // two buckets through different connections, and the role claim view still answers there.
 func TestARewatchWhoseInterestWatcherCannotMoveMovesNothing(t *testing.T) {
+	t.Parallel()
 	first, closeFirst := connectNATS(t)
 	defer closeFirst()
 	reg, err := Open(first, WithReplicas(1))
@@ -3094,6 +3167,7 @@ func TestARewatchWhoseInterestWatcherCannotMoveMovesNothing(t *testing.T) {
 // it ends up with must be the bucket's: every claim at the revision stored for it, no entry for a
 // deleted key, and the grace those revisions exist for.
 func TestOpeningTheRegistryReadsEveryRoleRevisionWithoutAGetPerKey(t *testing.T) {
+	t.Parallel()
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 	js, err := conn.JetStream()
@@ -3179,6 +3253,7 @@ func TestOpeningTheRegistryReadsEveryRoleRevisionWithoutAGetPerKey(t *testing.T)
 // role watcher, and so do its release and its replacement, and the cache answers with no read of the
 // bucket, so the role lane resolves a holder without a round trip per message.
 func TestCachedRoleHolderFollowsAnotherRegistrysClaimsWithoutReadingTheBucket(t *testing.T) {
+	t.Parallel()
 	uri := testnats.URL(t)
 	reader, writer := testnats.Connect(t, uri), testnats.Connect(t, uri)
 	defer reader.Close()
@@ -3276,6 +3351,7 @@ func putRoleClaim(t *testing.T, kv natsgo.KeyValue, role, holder string) uint64 
 // to find them and is what grows without bound. A single total of both would read as claims the
 // restart failed to restore, which is the misreading this whole issue was filed on.
 func TestOpeningTheRegistryLogsHowManyRoleClaimsItRestored(t *testing.T) {
+	t.Parallel()
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 	js, err := conn.JetStream()
@@ -3367,6 +3443,7 @@ func (w *earlyEndWatcher) Updates() <-chan jetstream.KeyValueEntry { return w.up
 // the scan's own idle bound ends. Neither may return what the scan managed to read; Open returns
 // the error unchanged, failing the start as a failed read did when this was one Get per key.
 func TestARoleRevisionScanThatEndsEarlyIsAnErrorNotAShortSnapshot(t *testing.T) {
+	t.Parallel()
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 	js, err := conn.JetStream()
@@ -3557,6 +3634,7 @@ func stallingProxy(t *testing.T, target, trigger string, budget int, hold time.D
 // regression lock. The lock is TestARoleRevisionScanThatEndsEarlyIsAnErrorNotAShortSnapshot,
 // which is deterministic, cannot pass vacuously, and fails on either of those two readings.
 func TestOpenFailsWhenTheRoleRevisionScanStalls(t *testing.T) {
+	t.Parallel()
 	direct, cleanup := connectNATS(t)
 	defer cleanup()
 	js, err := direct.JetStream()

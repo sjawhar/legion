@@ -26,6 +26,7 @@ import (
 // is taken and the resolution that then fails records nothing, and a mode that cannot be read is
 // refused before the entry is read at all but recorded only where the resolution succeeded.
 func TestTheFanoutReportsItsOwnRefusalsForTheSessionsItDeliversTo(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name string
 		// entry is the recipient's session entry, nil for a recipient that has none.
@@ -147,6 +148,7 @@ func TestTheFanoutReportsItsOwnRefusalsForTheSessionsItDeliversTo(t *testing.T) 
 // nobody, so a record would have the relay's own copy of the next event under that key skipped as
 // one already on its way (INFRA-594).
 func TestTheFanoutReportsARefusalOfASessionOnConsumerDelivery(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name string
 		// payload is what the publisher sends.
@@ -205,6 +207,7 @@ func TestTheFanoutReportsARefusalOfASessionOnConsumerDelivery(t *testing.T) {
 // neither an attempt nor a dedupe key for it -- records that would have the next copy of the same
 // event skipped as one the session already has (INFRA-594).
 func TestTheRelaySendsAFollowedTopicTheDurablePathAlsoReads(t *testing.T) {
+	t.Parallel()
 	// Unowned, so no relay runs until the fan-out has read the message: the test orders the two
 	// paths by construction rather than by timing.
 	rig := newRelayRigUnowned(t, relayPauseFirst, relayPauseMax)
@@ -247,6 +250,7 @@ func TestTheRelaySendsAFollowedTopicTheDurablePathAlsoReads(t *testing.T) {
 // The verdict is the same either way, because judgeFollowedTopic is never told the lane: its
 // signature takes no deliveryMessage, so a core message earns the verdict a durable one would.
 func TestTheFanoutSkipsAMessageOnAFollowedTopicAsAnEchoOfTheSessionThatPublishedIt(t *testing.T) {
+	t.Parallel()
 	harness := newListenerDeliveryHarness(t)
 	run := id.New()
 	sender := "ses_echo_sender_" + run

@@ -16,6 +16,9 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/secrets"
 )
 
+// Serial: it shares process-wide state - AGENT_SECRETS_URL, which brokerBaseURL (identity.go)
+// reads the broker's address from (startSecretBroker's t.Setenv), and the package-level seams
+// the secret forms are reached through (awsClients or the gcp* ones, secretStdin, readHidden).
 func TestSecretKindAndMaxGrantOnAWS(t *testing.T) {
 	local := secrets.NewLocal()
 	startSecretBroker(t, servedBy(local))
@@ -83,6 +86,9 @@ func TestSecretKindAndMaxGrantOnAWS(t *testing.T) {
 	}
 }
 
+// Serial: it shares process-wide state - AGENT_SECRETS_URL, which brokerBaseURL (identity.go)
+// reads the broker's address from (startSecretBroker's t.Setenv), and the package-level seams
+// the secret forms are reached through (awsClients or the gcp* ones, secretStdin, readHidden).
 func TestSecretKindAndMaxGrantOnGCP(t *testing.T) {
 	fake := newFakeSecretManager()
 	startFakeSecretManager(t, fake)
@@ -154,6 +160,9 @@ func TestSecretKindAndMaxGrantOnGCP(t *testing.T) {
 	}
 }
 
+// Serial: it shares process-wide state - AGENT_SECRETS_URL, which brokerBaseURL (identity.go)
+// reads the broker's address from (startSecretBroker's t.Setenv), and the package-level seams
+// the secret forms are reached through (awsClients or the gcp* ones, secretStdin, readHidden).
 func TestSecretKindFlagsRejectInvalidValues(t *testing.T) {
 	local := secrets.NewLocal(policytest.Secret("HELD_KEY", "ada@example.com", policy.TierAgent, "value"))
 	startSecretBroker(t, servedBy(local))
@@ -202,6 +211,9 @@ func TestSecretKindFlagsRejectInvalidValues(t *testing.T) {
 // TestANoneBesideALoginIsRefusedOnCreateAndRetag: none removes github-owners only alone on retag,
 // so a list that names it beside a login, in any case, is refused before anything is read or
 // written, on create and on retag, rather than written as a login named none.
+// Serial: it shares process-wide state - AGENT_SECRETS_URL, which brokerBaseURL (identity.go)
+// reads the broker's address from (startSecretBroker's t.Setenv), and the package-level seams
+// the secret forms are reached through (awsClients or the gcp* ones, secretStdin, readHidden).
 func TestANoneBesideALoginIsRefusedOnCreateAndRetag(t *testing.T) {
 	local := secrets.NewLocal(kindTaggedSecret("APP_KEY"))
 	startSecretBroker(t, servedBy(local))
@@ -230,6 +242,9 @@ func TestANoneBesideALoginIsRefusedOnCreateAndRetag(t *testing.T) {
 // github-owners tag was written with a comma outside the CLI is refused by the broker as
 // github-owners-malformed, and a retag that leaves the tag as it is says so, not that owners are
 // missing, and writes nothing; naming the owners fixes it.
+// Serial: it shares process-wide state - AGENT_SECRETS_URL, which brokerBaseURL (identity.go)
+// reads the broker's address from (startSecretBroker's t.Setenv), and the package-level seams
+// the secret forms are reached through (awsClients or the gcp* ones, secretStdin, readHidden).
 func TestARetagOfASecretWhoseStoredOwnersAreMalformedNamesTheMalformedTag(t *testing.T) {
 	commas := kindTaggedSecret("APP_KEY")
 	commas.Tags[policy.TagGitHubOwners] = "acme-org,ada"
@@ -256,6 +271,9 @@ func TestARetagOfASecretWhoseStoredOwnersAreMalformedNamesTheMalformedTag(t *tes
 // (policy.GitHubOwnersFor) holds on retag as on create, against the kind and owners the secret
 // will hold once the write lands, on both stores, so a retag never writes a github-app secret the
 // broker then refuses as github-owners-missing.
+// Serial: it shares process-wide state - AGENT_SECRETS_URL, which brokerBaseURL (identity.go)
+// reads the broker's address from (startSecretBroker's t.Setenv), and the package-level seams
+// the secret forms are reached through (awsClients or the gcp* ones, secretStdin, readHidden).
 func TestARetagThatLeavesAGitHubAppSecretWithoutOwnersWritesNothing(t *testing.T) {
 	refusals := [][]string{
 		{"retag", "PLAIN_KEY", "--kind", policy.KindGitHubApp},
@@ -392,6 +410,9 @@ func TestARetagThatLeavesASecretUnservableToItsRequestersWritesNothing(t *testin
 // space and no comma, a list of several accounts is written as the broker reads it, lowercased,
 // sorted and single-spaced; a comma anywhere is refused before create or retag writes anything,
 // naming the space-separated form.
+// Serial: it shares process-wide state - AGENT_SECRETS_URL, which brokerBaseURL (identity.go)
+// reads the broker's address from (startSecretBroker's t.Setenv), and the package-level seams
+// the secret forms are reached through (awsClients or the gcp* ones, secretStdin, readHidden).
 func TestAGitHubOwnersListIsWrittenSpaceSeparatedAndACommaIsRefused(t *testing.T) {
 	local := secrets.NewLocal(kindTaggedSecret("APP_KEY"))
 	startSecretBroker(t, servedBy(local))
@@ -432,6 +453,9 @@ func TestAGitHubOwnersListIsWrittenSpaceSeparatedAndACommaIsRefused(t *testing.T
 // any case) names no GitHub account. It is not the removal it is on retag, and the github-app
 // secret it would write has no github-owners tag. Such a create is refused with a usage error
 // before anything is written, on both stores, as a create without --github-owners is.
+// Serial: it shares process-wide state - AGENT_SECRETS_URL, which brokerBaseURL (identity.go)
+// reads the broker's address from (startSecretBroker's t.Setenv), and the package-level seams
+// the secret forms are reached through (awsClients or the gcp* ones, secretStdin, readHidden).
 func TestACreateThatNamesNoneAsItsGitHubOwnersWritesNothing(t *testing.T) {
 	owners := []string{"none", "None", "NONE"}
 	t.Run("aws", func(t *testing.T) {
@@ -508,6 +532,9 @@ func kindTaggedSecret(name string) secrets.LocalSecret {
 // both removes and sets tags is refused before any read or write, since it would take two calls.
 // Each retag reads the secret's tags once, to build the tags it will leave and check them, and a
 // write that lands reads them once more, to find a concurrent writer's (awsBackend.raceCheck).
+// Serial: it shares process-wide state - AGENT_SECRETS_URL, which brokerBaseURL (identity.go)
+// reads the broker's address from (startSecretBroker's t.Setenv), and the package-level seams
+// the secret forms are reached through (awsClients or the gcp* ones, secretStdin, readHidden).
 func TestSecretRetagRemovalIsOneCallThatChangesNothingElse(t *testing.T) {
 	local := secrets.NewLocal(kindTaggedSecret("APP_KEY"))
 	startSecretBroker(t, servedBy(local))
@@ -563,6 +590,9 @@ func TestSecretRetagRemovalIsOneCallThatChangesNothingElse(t *testing.T) {
 
 // TestSecretRefusedRemovalOnASharedSecretSaysOnlyWhatTheCloudSaid: a removal sends no owner or
 // tier, so the cloud refusing one on a shared secret does not print the owner-and-tier hint.
+// Serial: it shares process-wide state - AGENT_SECRETS_URL, which brokerBaseURL (identity.go)
+// reads the broker's address from (startSecretBroker's t.Setenv), and the package-level seams
+// the secret forms are reached through (awsClients or the gcp* ones, secretStdin, readHidden).
 func TestSecretRefusedRemovalOnASharedSecretSaysOnlyWhatTheCloudSaid(t *testing.T) {
 	shared := kindTaggedSecret("SHARED_APP_KEY")
 	shared.Tags[policy.TagOwner] = policy.OwnerShared
@@ -577,6 +607,9 @@ func TestSecretRefusedRemovalOnASharedSecretSaysOnlyWhatTheCloudSaid(t *testing.
 
 // TestSecretRetagSetsAndRemovesMaxGrant: retag --max-grant sets the tag on both backends and keeps
 // kind, and --max-grant none removes it and keeps kind.
+// Serial: it shares process-wide state - AGENT_SECRETS_URL, which brokerBaseURL (identity.go)
+// reads the broker's address from (startSecretBroker's t.Setenv), and the package-level seams
+// the secret forms are reached through (awsClients or the gcp* ones, secretStdin, readHidden).
 func TestSecretRetagSetsAndRemovesMaxGrant(t *testing.T) {
 	t.Run("aws", func(t *testing.T) {
 		local := secrets.NewLocal(kindTaggedSecret("APP_KEY"))

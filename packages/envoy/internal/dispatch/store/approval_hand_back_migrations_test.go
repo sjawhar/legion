@@ -41,6 +41,7 @@ func waitForQueuedLock(t *testing.T, store *Store, relation, mode string) {
 // From 0065 a comment that names no created_at is stamped when its insert runs, so two comments
 // one transaction inserts are ordered as they were written.
 func TestMigrate0064To0066RecordApprovalHandBacks(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store := openEmptyTestStore(t)
 	migrateThrough(t, store, 63)
@@ -169,6 +170,11 @@ func TestMigrate0064To0066RecordApprovalHandBacks(t *testing.T) {
 // while 0066 waits for comments closes a cycle with it, and 0066 gives up first, applying nothing,
 // before Postgres's deadlock check runs on either side: the write commits, and the runner's next
 // attempt applies 0066. Under the runner's five-second bound that cycle aborts one side with 40P01.
+//
+// It runs on its own, as the other migration lock tests do (migrate_lock_retry_test.go): it reads
+// what the migration runner logged, and captureLogs sends the default logger, which the whole
+// process shares, to this test's buffer. A test running beside it would take those lines into its
+// own buffer, leaving this one with none to read.
 func TestMigrate0066GivesUpBeforeACommentWriteThatWritesAsksDeadlocks(t *testing.T) {
 	ctx := context.Background()
 	store := openEmptyTestStore(t)

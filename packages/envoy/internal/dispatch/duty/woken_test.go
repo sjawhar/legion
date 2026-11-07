@@ -389,7 +389,7 @@ func TestRunWokenRetriesALeaseHeldElsewhereUntilThePassRuns(t *testing.T) {
 	}
 	select {
 	case <-ran:
-	case <-time.After(5 * time.Second):
-		t.Fatal("the pass did not run within 5s of the lease being let go")
+	case <-time.After(eventWait):
+		t.Fatalf("the pass did not run within %s of the lease being let go", eventWait)
 	}
 }

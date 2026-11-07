@@ -5,22 +5,24 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/url"
 	"os"
 	"reflect"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"testing/fstest"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/envoy/internal/pgmigrate"
 	"github.com/sjawhar/envoy/internal/pgmigrate/pgmigratetest"
-	"github.com/sjawhar/envoy/internal/testpg"
 	"github.com/sjawhar/envoy/migrationid"
 )
 
@@ -33,40 +35,220 @@ func testDatabaseURL(t *testing.T) string {
 	return databaseURL
 }
 
-func openTestStore(t *testing.T) *Store {
-	t.Helper()
-	store, err := Open(context.Background(), testDatabaseURL(t))
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	t.Cleanup(store.Pool.Close)
-	return store
+// The databases these tests run on. This package cannot import its own storetest, which imports
+// it, so it keeps that harness's shape here: one migrated template per run, a file copy of it
+// per test that wants the current schema, a file copy of template1 per test that migrates, and
+// a drop when the test that took it ends (docs/testing.md, "A database a Go test creates",
+// dispatch://INFRA-1075).
+var shared struct {
+	once     sync.Once
+	err      error
+	server   url.URL
+	admin    *pgxpool.Pool
+	template string
+
+	drops     sync.WaitGroup
+	dropMu    sync.Mutex
+	dropFails []string
 }
 
-func openEmptyTestStore(t *testing.T) *Store {
-	t.Helper()
-	ctx := context.Background()
-	baseURL, err := url.Parse(testDatabaseURL(t))
-	if err != nil {
-		t.Fatalf("parse test database URL: %v", err)
+// TestMain runs the package's tests, waits for their databases to drop, then drops the template
+// the current-schema tests cloned.
+func TestMain(m *testing.M) { os.Exit(runTests(m)) }
+
+func runTests(m *testing.M) int {
+	code := m.Run()
+	if shared.admin == nil {
+		return code
 	}
-	adminURL := *baseURL
-	adminURL.Path = "/postgres"
-	store, err := Open(ctx, testpg.DatabaseOn(t, adminURL.String(), "dispatch_test"))
+	defer shared.admin.Close()
+	shared.drops.Wait()
+	for _, failure := range shared.dropFails {
+		fmt.Fprintf(os.Stderr, "store test: %s\n", failure)
+		if code == 0 {
+			code = 1
+		}
+	}
+	if shared.template == "" {
+		return code
+	}
+	if _, err := shared.admin.Exec(context.Background(), "drop database "+shared.template); err != nil {
+		fmt.Fprintf(os.Stderr, "store test: drop template database %s: %v\n", shared.template, err)
+		if code == 0 {
+			code = 1
+		}
+	}
+	return code
+}
+
+// eventWait is how long a test here waits FOR AN EVENT: a statement joining a lock queue, a
+// listener answering, a transaction reaching an age. It is where the test gives up, never a
+// measurement - the test still fails when the event never comes, and on an idle machine the wait
+// returns in milliseconds - so it allows for a loaded runner: every package of this module now
+// runs at once, four CI cores to some 3,800 parallel tests, under the race detector besides
+// (dispatch://INFRA-1075). A test whose SUBJECT is a span - the census lock timeout, a hold's
+// length - keeps its own number.
+const eventWait = 30 * time.Second
+
+// prepareClones opens the admin pool and migrates the template every current-schema test clones.
+func prepareClones(raw string) error {
+	server, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("parse DISPATCH_TEST_DATABASE_URL: %w", err)
+	}
+	shared.server = *server
+	ctx := context.Background()
+	// The admin pool is on the server's postgres database: neither create database nor drop
+	// database may run against the database it names.
+	config, err := pgxpool.ParseConfig(testDatabaseURLFor("postgres"))
+	if err != nil {
+		return fmt.Errorf("parse admin database URL: %w", err)
+	}
+	// One create and one drop a test run on this pool, so it is sized for the tests this
+	// package runs at once rather than for the drops alone.
+	config.MaxConns = 8
+	admin, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		return fmt.Errorf("open admin pool: %w", err)
+	}
+	shared.admin = admin
+
+	suffix, err := randomSuffix()
+	if err != nil {
+		return err
+	}
+	name := "dispatch_store_template_" + suffix
+	// The template is a file copy of template1, for the reason each clone of it is one.
+	if _, err := admin.Exec(ctx, "create database "+name+" strategy file_copy"); err != nil {
+		return fmt.Errorf("create template database: %w", err)
+	}
+	shared.template = name
+	database, err := Open(ctx, testDatabaseURLFor(name), WithMaxConns(testPoolSize))
+	if err != nil {
+		return fmt.Errorf("open template database: %w", err)
+	}
+	database.Locking = testLocking
+	err = database.Migrate(ctx)
+	database.Pool.Close()
+	if err != nil {
+		return fmt.Errorf("migrate template database: %w", err)
+	}
+	// Postgres refuses to clone a database another session is connected to.
+	if _, err := admin.Exec(ctx, "alter database "+name+" with allow_connections false"); err != nil {
+		return fmt.Errorf("close template database to connections: %w", err)
+	}
+	return nil
+}
+
+// testDatabaseURLFor is the server's DSN pointed at one database of this package's own.
+func testDatabaseURLFor(database string) string {
+	server := shared.server
+	server.Path = "/" + database
+	return server.String()
+}
+
+// cloneTestDatabase makes a database of this test's own, a file copy of template, and drops it
+// in the background when t ends; TestMain waits for the drops. The template is the migrated one,
+// or template1 for a test that migrates.
+func cloneTestDatabase(t *testing.T, prefix, template string) string {
+	t.Helper()
+	raw := testDatabaseURL(t)
+	shared.once.Do(func() { shared.err = prepareClones(raw) })
+	if shared.err != nil {
+		t.Fatalf("prepare the migrated template database: %v", shared.err)
+	}
+	suffix, err := randomSuffix()
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	name := prefix + suffix
+	statement := "create database " + name + " template " + template + " strategy file_copy"
+	if _, err := shared.admin.Exec(context.Background(), statement); err != nil {
+		t.Fatalf("clone isolated database from %s: %v", template, err)
+	}
+	t.Cleanup(func() { dropTestDatabase(name) })
+	return name
+}
+
+// dropTestDatabase drops name without waiting for it; TestMain waits for every drop before it
+// drops the template and returns. Dropping a database forces a checkpoint and waits for it,
+// which a test that waited would spend on its own clock; drops in flight together share one
+// checkpoint.
+func dropTestDatabase(name string) {
+	shared.drops.Go(func() {
+		if _, err := shared.admin.Exec(context.Background(), "drop database "+name+" with (force)"); err != nil {
+			shared.dropMu.Lock()
+			shared.dropFails = append(shared.dropFails, fmt.Sprintf("drop isolated database %s: %v", name, err))
+			shared.dropMu.Unlock()
+		}
+	})
+}
+
+// openTestStore returns a store on a migrated database of its own, dropped when t ends. The
+// database carries what every migration left and nothing any test wrote, so a test that wants
+// the current schema and only its own rows takes one: running the whole set on an empty
+// database for that cost a second of Postgres per test (dispatch://INFRA-1075). Only a test
+// about the runner itself migrates, and there from an empty database (openEmptyTestStore).
+func openTestStore(t *testing.T) *Store {
+	t.Helper()
+	name := cloneTestDatabase(t, "dispatch_test_", shared.template)
+	store, err := Open(context.Background(), testDatabaseURLFor(name), WithMaxConns(testPoolSize))
 	if err != nil {
 		t.Fatalf("open isolated database: %v", err)
 	}
+	store.Locking = testLocking
 	t.Cleanup(store.Pool.Close)
 	return store
 }
 
+// openEmptyTestStore returns a store on a database of its own carrying no migration, dropped
+// once t ends. Only a test about the runner itself takes one: every other test wants the
+// current schema and takes a clone of the migrated template (openTestStore).
+func openEmptyTestStore(t *testing.T) *Store {
+	t.Helper()
+	name := cloneTestDatabase(t, "dispatch_empty_test_", "template1")
+	store, err := Open(context.Background(), testDatabaseURLFor(name), WithMaxConns(testPoolSize))
+	if err != nil {
+		t.Fatalf("open isolated database: %v", err)
+	}
+	store.Locking = testLocking
+	t.Cleanup(store.Pool.Close)
+	return store
+}
+
+// testLocking is the lock discipline every store these tests open applies its migrations under,
+// in place of production's five seconds, three attempts and two-second pauses. The runner's
+// bound, its retry and its give-up are one mechanism at any timing, and the tests of them spent
+// nineteen seconds each asleep waiting production's out (dispatch://INFRA-1075). Half a second
+// is far longer than a dial on a loaded machine, so the watch that names the lock's holder still
+// takes its readings inside it (pgmigrate.Locking) and the holder still reaches the error; the
+// attempts stay at production's three, written here rather than read from the constant so that a
+// test of the give-up names the number it proves.
+var testLocking = pgmigrate.Locking{Timeout: 500 * time.Millisecond, Attempts: 3, RetryPause: 150 * time.Millisecond}
+
+// testPoolSize bounds the shared pool of every store these tests open, in place of
+// production's sharedPoolSize, for the reason storetest bounds its own at the same number: the
+// tests of this package run beside each other now, against one Postgres whose max_connections is
+// PostgreSQL's default 100, and a test that fully acquires a 64-connection pool
+// (TestListenerIsServedWhileTheSharedPoolIsFullyAcquired) would leave the tests beside it with
+// none. The pools Pool.separate opens keep their own sizes.
+const testPoolSize = 16
+
 func randomDatabaseSuffix(t *testing.T) string {
 	t.Helper()
-	var bytes [8]byte
-	if _, err := rand.Read(bytes[:]); err != nil {
+	suffix, err := randomSuffix()
+	if err != nil {
 		t.Fatalf("random database suffix: %v", err)
 	}
-	return hex.EncodeToString(bytes[:])
+	return suffix
+}
+
+func randomSuffix() (string, error) {
+	var bytes [8]byte
+	if _, err := rand.Read(bytes[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(bytes[:]), nil
 }
 
 // A connection string that asks for a pool size is refused rather than quietly overridden,
@@ -76,6 +258,7 @@ func randomDatabaseSuffix(t *testing.T) string {
 // first wrong in the dangerous direction - the pool is silently pinned and the refusal never
 // fires - and the last two wrong in the worse one, refusing to boot on a valid password.
 func TestOpenRefusesAConnectionStringThatSetsThePoolSize(t *testing.T) {
+	t.Parallel()
 	base := testDatabaseURL(t)
 	withPoolSize, err := url.Parse(base)
 	if err != nil {
@@ -137,6 +320,7 @@ func TestOpenRefusesAConnectionStringThatSetsThePoolSize(t *testing.T) {
 // time.Local, which is never time.UTC - not even under TZ=UTC, where it is a location of its own
 // named "UTC" - so this holds the connection to the zone rather than to the host's.
 func TestScannedTimestampsCarryUTCWhateverTheHostZone(t *testing.T) {
+	t.Parallel()
 	store := openTestStore(t)
 	ctx := context.Background()
 	// Both wire formats: the pool's own (binary, the statement cache's) and the text one a
@@ -165,6 +349,7 @@ func TestScannedTimestampsCarryUTCWhateverTheHostZone(t *testing.T) {
 }
 
 func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store := openEmptyTestStore(t)
 	if err := store.Migrate(ctx); err != nil {
@@ -416,6 +601,7 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 // author created it, so two pull requests open at once cannot both claim one version;
 // migrationid.Check says why.
 func TestMigrationSetTakesNumbersThenTimestamps(t *testing.T) {
+	t.Parallel()
 	migrations, err := pgmigrate.Load(migrationFiles, "migrations")
 	if err != nil {
 		t.Fatal(err)
@@ -432,6 +618,7 @@ func TestMigrationSetTakesNumbersThenTimestamps(t *testing.T) {
 // Every file in Dispatch's migrations directory reaches the runner; pgmigratetest.CheckEmbedsEveryFile
 // says why that needs a test.
 func TestEveryMigrationFileIsEmbedded(t *testing.T) {
+	t.Parallel()
 	if err := pgmigratetest.CheckEmbedsEveryFile(migrationFiles, "migrations"); err != nil {
 		t.Fatal(err)
 	}
@@ -447,6 +634,7 @@ const censusRequiredFrom = 56
 // Every migration from censusRequiredFrom on declares a census: the count a deployment reads before
 // it applies the migration. One that cannot refuse or rewrite any row declares `select 0` and says why.
 func TestEveryMigrationFromTheCensusRuleOnDeclaresACensus(t *testing.T) {
+	t.Parallel()
 	if err := pgmigratetest.CheckCensusDeclaredFrom(migrationFiles, "migrations", censusRequiredFrom); err != nil {
 		t.Fatal(err)
 	}
@@ -455,6 +643,7 @@ func TestEveryMigrationFromTheCensusRuleOnDeclaresACensus(t *testing.T) {
 // The census's textual reading of which tables a migration touches is held to the real set: every
 // name it finds is a table the set itself creates.
 func TestTouchedTablesOfEveryMigrationAreTablesTheSetCreates(t *testing.T) {
+	t.Parallel()
 	if err := pgmigratetest.CheckTouchedTablesAreKnown(migrationFiles, "migrations"); err != nil {
 		t.Fatal(err)
 	}
@@ -464,6 +653,7 @@ func TestTouchedTablesOfEveryMigrationAreTablesTheSetCreates(t *testing.T) {
 // locks, applied in order to an empty database (pgmigratetest.CheckTouchedTablesAgainstLocks): a
 // statement form the patterns miss fails here, which no reading of names alone can catch.
 func TestTouchedTablesOfEveryMigrationAreTheTablesItLocks(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store := openEmptyTestStore(t)
 	conn, err := pgx.ConnectConfig(ctx, store.Pool.Config().ConnConfig)
@@ -512,6 +702,7 @@ func TestTheBlockEmbeddingMigrationsLockOneTableEach(t *testing.T) {
 // locks (a quoted identifier holding a statement's text, which the patterns read as that
 // statement).
 func TestTheLockAuditRefusesAMissedTableAndAMisreadOne(t *testing.T) {
+	t.Parallel()
 	for name, tc := range map[string]struct{ second, want string }{
 		"a form the patterns do not know": {
 			second: "reindex table things",
@@ -539,6 +730,7 @@ func TestTheLockAuditRefusesAMissedTableAndAMisreadOne(t *testing.T) {
 // DO block makes only when a table holds rows, which on the audit's database it does not, so the
 // table it would write is left unlocked there and is no misread.
 func TestTheLockAuditAcceptsWhatTheCensusReads(t *testing.T) {
+	t.Parallel()
 	const parents = `create table parent (id integer primary key);
 		create table child (id integer primary key, parent_id integer references parent on delete cascade);
 		create table grandchild (id integer primary key, child_id integer references child on delete cascade);
@@ -605,6 +797,7 @@ func auditTwoMigrations(t *testing.T, first, second string) error {
 }
 
 func TestMigrateSkipsVersionRecordedOutsideTheRunner(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store := openEmptyTestStore(t)
 	migrateThrough(t, store, 7)
@@ -719,6 +912,28 @@ func migrateThrough(t *testing.T, store *Store, maxVersion int) {
 	`); err != nil {
 		t.Fatalf("create schema migrations table: %v", err)
 	}
+	// What the database already carries, read in one query. applyMigration checks the same thing
+	// for each migration in a transaction of its own, which a caller walking the set version by
+	// version pays for once per migration already applied, every time round: the test of the
+	// shipped censuses walks a hundred versions and so paid ten thousand of those transactions
+	// (dispatch://INFRA-1075). This helper is a test's setup, never the runner's own skip under
+	// test - TestMigrateCreatesEmptySchemaAndIsIdempotent and
+	// TestMigrateSkipsVersionRecordedOutsideTheRunner hold that.
+	rows, err := store.Pool.Query(ctx, "select version from schema_migrations")
+	if err != nil {
+		t.Fatalf("read the versions already applied: %v", err)
+	}
+	recorded := map[int]bool{}
+	for rows.Next() {
+		var version int
+		if err := rows.Scan(&version); err != nil {
+			t.Fatalf("read the versions already applied: %v", err)
+		}
+		recorded[version] = true
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read the versions already applied: %v", err)
+	}
 	migrations, err := pgmigrate.Load(migrationFiles, "migrations")
 	if err != nil {
 		t.Fatalf("load migrations: %v", err)
@@ -726,6 +941,9 @@ func migrateThrough(t *testing.T, store *Store, maxVersion int) {
 	for _, migration := range migrations {
 		if migration.Version > maxVersion {
 			break
+		}
+		if recorded[migration.Version] {
+			continue
 		}
 		if err := store.applyMigration(ctx, migration); err != nil {
 			t.Fatalf("apply %s: %v", migration.Name, err)
@@ -769,6 +987,7 @@ func seedGraphAt0007(t *testing.T, store *Store) string {
 }
 
 func TestMigrate0015BackfillsIssueRanksByProjectCreationOrder(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store := openEmptyTestStore(t)
 	migrateThrough(t, store, 13)
@@ -824,6 +1043,7 @@ func TestMigrate0015BackfillsIssueRanksByProjectCreationOrder(t *testing.T) {
 }
 
 func TestMigrate0009BackfillsProjectAndRefKeyFrom0007(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store := openEmptyTestStore(t)
 	migrateThrough(t, store, 7)
@@ -877,6 +1097,7 @@ func TestMigrate0009BackfillsProjectAndRefKeyFrom0007(t *testing.T) {
 }
 
 func TestMigrate0009DropsMalformedArtifactReferences(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store := openEmptyTestStore(t)
 	migrateThrough(t, store, 7)
@@ -911,11 +1132,9 @@ func TestMigrate0009DropsMalformedArtifactReferences(t *testing.T) {
 }
 
 func TestMigrateMarksLegacyNonNotifyingEventsPublished(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
-	store := openEmptyTestStore(t)
-	if err := store.Migrate(ctx); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
+	store := openTestStore(t)
 	// A database that stopped at the notify-only outbox: forget the backfill, then record
 	// an event of the kind that outbox never published.
 	if _, err := store.Pool.Exec(ctx, "delete from schema_migrations where version = 4"); err != nil {
@@ -956,6 +1175,7 @@ func TestMigrateMarksLegacyNonNotifyingEventsPublished(t *testing.T) {
 // null where the wire shape is an array. 0031 rewrites them to [] and the check constraint
 // keeps any later writer from putting a null back.
 func TestMigrate0031RewritesNullAskOptionsToEmptyArrays(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store := openEmptyTestStore(t)
 	migrateThrough(t, store, 30)
@@ -999,6 +1219,7 @@ func TestMigrate0031RewritesNullAskOptionsToEmptyArrays(t *testing.T) {
 // answers on the row like any question. 0035 relabels the rows and the ask.* event payloads
 // that carried the old kind, and the check constraint refuses any new action row.
 func TestMigrate0035FoldsActionAsksIntoQuestions(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store := openEmptyTestStore(t)
 	migrateThrough(t, store, 34)
@@ -1055,11 +1276,9 @@ func TestMigrate0035FoldsActionAsksIntoQuestions(t *testing.T) {
 // which go test reports only under -v, and dispatch://LEGION-429 deletes their entries when it
 // adds the check that refuses them.
 func TestMigrate0053RefusesAnApprovalOnAnyAskButAnApprovalAsk(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
-	store := openEmptyTestStore(t)
-	if err := store.Migrate(ctx); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
+	store := openTestStore(t)
 	if _, err := store.Pool.Exec(ctx, `
 		insert into projects (key, name) values ('CORE', 'Core');
 		insert into issues (key, project_key, number, title, created_by, rank)
@@ -1336,6 +1555,7 @@ func assertAskThreadsRepaired(t *testing.T, store *Store, migration string) {
 // ancestry reaches an ask, so the second pass selects an empty set and the turn update, which
 // reads that same set, writes no row.
 func TestAskReplyBackfillsMoveOnlyTheRepliesTheyOwn(t *testing.T) {
+	t.Parallel()
 	for _, backfill := range askReplyBackfills {
 		t.Run(backfill.name, func(t *testing.T) {
 			store := openEmptyTestStore(t)
@@ -1420,6 +1640,7 @@ func applyMigrationFile(t *testing.T, store *Store, name string) {
 // The cyclic row seeds the walk (it carries the ask) and an ordinary reply hangs below it, so
 // the walk both loops and has real work to do.
 func TestAskReplyBackfillsTerminateOnACyclicReplyChain(t *testing.T) {
+	t.Parallel()
 	for _, backfill := range askReplyBackfills {
 		t.Run(backfill.name, func(t *testing.T) {
 			ctx := context.Background()

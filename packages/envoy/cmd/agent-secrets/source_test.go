@@ -40,6 +40,7 @@ import (
 // project, which tells the person which one they write to. A broker from before the `store`
 // field holds them in AWS Secrets Manager.
 func TestASourceNamesTheBrokerAndTheStoreItsSettingsDescribe(t *testing.T) {
+	t.Parallel()
 	for _, row := range []struct {
 		name     string
 		base     string
@@ -76,6 +77,7 @@ func TestASourceNamesTheBrokerAndTheStoreItsSettingsDescribe(t *testing.T) {
 // what tells this CLI's answer from another secrets CLI's for the same name; the secret forms say
 // which broker by host in place of a store rather than guessing one.
 func TestASourceWithNoSettingsNamesTheBrokerItself(t *testing.T) {
+	t.Parallel()
 	src := brokerSource("https://secrets.internal.example")
 	if got := src.String(); got != "the broker AGENT_SECRETS_URL names" {
 		t.Fatalf("source = %q, want the broker AGENT_SECRETS_URL names alone", got)
@@ -96,6 +98,7 @@ func TestASourceWithNoSettingsNamesTheBrokerItself(t *testing.T) {
 // the command's own log sees the source above its first line. The line is quoted wherever that
 // output is, so for every store kind it names no host, account, region or project.
 func TestExecFormNamesItsSourceBeforeItExecs(t *testing.T) {
+	t.Parallel()
 	binary := buildAgentSecrets(t)
 	keyDir := newKeyDir(t)
 	const prefix = "agent-secrets: GRANT_ME from the broker AGENT_SECRETS_URL names"
@@ -159,6 +162,7 @@ func TestExecFormNamesItsSourceBeforeItExecs(t *testing.T) {
 // cause prints as its class alone. A clean URL's messages read as before. No value forges a line
 // with a control byte, raw or escaped.
 func TestNoFormPrintsACredentialTheBrokerURLCarries(t *testing.T) {
+	t.Parallel()
 	binary := buildAgentSecrets(t)
 	keyDir := newKeyDir(t)
 	broker, _ := fakeBroker(t)
@@ -227,6 +231,7 @@ func TestNoFormPrintsACredentialTheBrokerURLCarries(t *testing.T) {
 // request id url.PathEscape would change is refused before any call, naming the id and not the
 // broker's address, while an ordinary id still verifies and is answered.
 func TestAnIDThatWouldNotNameOnePathSegmentIsRefusedByName(t *testing.T) {
+	t.Parallel()
 	binary := buildAgentSecrets(t)
 	key, err := proof.NewKey()
 	if err != nil {
@@ -286,6 +291,7 @@ func TestAnIDThatWouldNotNameOnePathSegmentIsRefusedByName(t *testing.T) {
 // over https and a real server that closes the connection each read as a peer that answered and
 // broke the exchange, with net/http's own cause.
 func TestAPeerThatBrokeTheExchangeIsNamed(t *testing.T) {
+	t.Parallel()
 	binary := buildAgentSecrets(t)
 	keyDir := newKeyDir(t)
 	plain := httptest.NewServer(http.NotFoundHandler())
@@ -312,6 +318,7 @@ func TestAPeerThatBrokeTheExchangeIsNamed(t *testing.T) {
 // to a URL with a query, to another path, or through a malformed Location, and then fails,
 // prints the failure's class alone: net/http's error names the redirect's target.
 func TestARedirectsTargetIsNotPrinted(t *testing.T) {
+	t.Parallel()
 	binary := buildAgentSecrets(t)
 	keyDir := newKeyDir(t)
 	for _, row := range []struct{ location, class string }{
@@ -347,6 +354,7 @@ func TestARedirectsTargetIsNotPrinted(t *testing.T) {
 // configuration does not. Everything the invariant forbids is still forbidden, the host anywhere
 // else in the output included: the exception removes that one URL and then checks the list.
 func TestNoSessionLineNamesAHostOrAStoreID(t *testing.T) {
+	t.Parallel()
 	binary := buildAgentSecrets(t)
 	keyDir := newKeyDir(t)
 	run := func(name string) []string {
@@ -432,6 +440,7 @@ func approveURLOf(args []string, brokerURL string) string {
 // TestWhatAScriptReadsIsUnchanged pins the bytes a script parses: --json stdout is the broker's
 // body verbatim, and each outcome keeps its exit code, whatever the human-read lines say.
 func TestWhatAScriptReadsIsUnchanged(t *testing.T) {
+	t.Parallel()
 	binary := buildAgentSecrets(t)
 	keyDir := newKeyDir(t)
 	broker, _ := fakeBroker(t)
@@ -473,6 +482,7 @@ func TestWhatAScriptReadsIsUnchanged(t *testing.T) {
 // releases no value, each say which broker and store answered, so a refusal is never read as
 // another secrets CLI's answer for the same name.
 func TestExecFormRefusalsNameWhereItLooked(t *testing.T) {
+	t.Parallel()
 	binary := buildAgentSecrets(t)
 	broker, _ := fakeBroker(t)
 	defer broker.Close()
@@ -501,6 +511,7 @@ func TestExecFormRefusalsNameWhereItLooked(t *testing.T) {
 // TestStatusFormsNameTheirSource: self and status report the broker and store this session's
 // secrets come from, beside what they already report.
 func TestStatusFormsNameTheirSource(t *testing.T) {
+	t.Parallel()
 	binary := buildAgentSecrets(t)
 	broker, _ := fakeBroker(t)
 	defer broker.Close()
@@ -521,6 +532,7 @@ func TestStatusFormsNameTheirSource(t *testing.T) {
 // GET /v1/settings leaves every line naming the broker alone - the command still runs, and
 // nothing guesses a store.
 func TestAnAnswerFromABrokerWithNoSettingsRouteStillNamesTheBroker(t *testing.T) {
+	t.Parallel()
 	binary := buildAgentSecrets(t)
 	broker, counters := fakeBroker(t)
 	defer broker.Close()
@@ -553,6 +565,7 @@ func TestAnAnswerFromABrokerWithNoSettingsRouteStillNamesTheBroker(t *testing.T)
 // connection), names the address it tried and the variable that named it, so a session that
 // inherited a stale AGENT_SECRETS_URL reads a stale address rather than a broker that is down.
 func TestABrokerThatCannotBeReachedSaysSo(t *testing.T) {
+	t.Parallel()
 	binary := buildAgentSecrets(t)
 	keyDir := newKeyDir(t)
 
@@ -587,6 +600,7 @@ func TestABrokerThatCannotBeReachedSaysSo(t *testing.T) {
 // exchange, and an error none of those covers worded as no more than a failed request. Each class
 // sends a reader to a different layer: DNS, routing or a listener, TLS or a proxy.
 func TestEveryUnreachableFailureIsClassified(t *testing.T) {
+	t.Parallel()
 	const base = "https://secrets.internal.example"
 	const answered = "answered but the exchange failed"
 	dial := func(errno syscall.Errno) error {
@@ -635,6 +649,7 @@ func TestEveryUnreachableFailureIsClassified(t *testing.T) {
 // to sign, so an unavailable helper or a helper's own refusal must name its socket. A broker was
 // never asked, and adding its source trailer lies about the request path.
 func TestAHelperFailureNamesTheHelperNotTheBroker(t *testing.T) {
+	t.Parallel()
 	binary := buildAgentSecrets(t)
 	socket, _ := fakeHelper(t, helper.Response{
 		Code:  helper.CodeNotASession,

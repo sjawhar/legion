@@ -14,6 +14,7 @@ import (
 // A turn on an ask that was already answered is the failure - it tells a stream consumer the
 // ask is waiting on someone when nobody is expected to act.
 func TestReplyRacingAnAnswerLandsOnOneSideOfTheTransition(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Reply race", "A spec")
 

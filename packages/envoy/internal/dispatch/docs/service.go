@@ -156,6 +156,25 @@ type Service struct {
 	// maxUpdateItems, whose comment states the rule; a test lowers it, and the server's, before
 	// any room opens (shrinkPendingItems).
 	maxPendingItems int
+	// logger is where the service and the replicas it keeps write their lines. Nil is the
+	// package's default logger, read at each line rather than at New, so a test that captures
+	// the default logger after it built its service still sees them (log). A test that must
+	// read its own service's lines beside other tests sets one of its own instead, since
+	// slog.SetDefault is the whole process's and two tests capturing it at once read each
+	// other's.
+	logger *slog.Logger
+	// coldReadTimeout bounds a cold read's fold of the stored history (coldReadTimeout, whose
+	// comment states the rule). New sets it to that constant; the test of the timeout sets a
+	// short one, which is why it is a field and not read from the constant: a package variable
+	// one test swaps is a test no other test of the package may run beside.
+	coldReadTimeout time.Duration
+	// taskProgressBootRetryFirst is how long RunTaskProgressReconciliation waits after its boot
+	// pass before the first retry (taskProgressBootRetryFirst, whose comment states the rule),
+	// and taskProgressRetryBackoff the step one pass's own backoff is a multiple of
+	// (taskProgressRetryBackoffStep). New sets each to its constant; the test of a pass that
+	// gives up and of the retry that counts a row it held sets short ones.
+	taskProgressBootRetryFirst time.Duration
+	taskProgressRetryBackoff   time.Duration
 	// afterEditNoticeIDs runs once an edit-notice sweep has read its due ids, with no lock held,
 	// and before it locks the first. Nil outside tests; tests use it to delete a document in that
 	// window.
@@ -224,8 +243,10 @@ type Service struct {
 	// describe its fork, at names where: "fork" once forkLive has brought the fork up to date,
 	// "margin", "docTree" and "capture" as a margin write (applyMargin) or a read joined to the
 	// write's transaction takes the rendering in place of reading the fork (reuseRendering), and
-	// "publish" just before publishLiveWrite releases the fork. Nil outside tests; tests use it to
-	// compare the rendering with a fresh read and render of the fork.
+	// "commit" where the transaction's commit hands the fork to the room's shadow and the write
+	// lets go of it (Ledger.commit), the last moment at which the rendering describes the fork.
+	// Nil outside tests; tests use it to compare the rendering with a fresh read and render of
+	// the fork.
 	checkRendering func(at string, write *liveWrite)
 	// afterSettleAuthorsTake runs after a settlement has bounded the in-flight credits it lists
 	// and before it reads the tree it will version. Nil outside tests; tests use it to edit the
@@ -757,6 +778,15 @@ func (s *Service) purgeSuppressedPersistence(room string) {
 	delete(s.suppressed, room)
 }
 
+// log is where this service writes: its own logger (Service.logger), or the package default as
+// it stands now.
+func (s *Service) log() *slog.Logger {
+	if s.logger != nil {
+		return s.logger
+	}
+	return slog.Default()
+}
+
 // newServiceHook is nil outside this package's own tests, where the leak check installs it
 // (service_leak_test.go's init). New calls it on every service it builds, which is the only place
 // that sees them all: a service is handed to its test, not to any registry, so nothing else can
@@ -823,6 +853,11 @@ func New(deps Deps) *Service {
 		roomCap:           roomCap,
 		connectionCap:     connectionCap,
 		maxPendingItems:   maxUpdateItems,
+
+		coldReadTimeout: coldReadTimeout,
+
+		taskProgressBootRetryFirst: taskProgressBootRetryFirst,
+		taskProgressRetryBackoff:   taskProgressRetryBackoffStep,
 	}
 	service.catchUps = newRoomCatchUps(service)
 	service.roomSyncSender = newRoomSyncSender(service)
@@ -1083,6 +1118,14 @@ const ShutdownDrainBudget = 9 * time.Second
 // ctx, and is cancelled once ctx ends; either way Shutdown returns only after the queue's worker
 // has, so nothing of it outlives the store's pools, which its caller closes next.
 func (s *Service) Shutdown(ctx context.Context) error {
+	return s.shutdown(ctx, ShutdownDrainBudget)
+}
+
+// shutdown is Shutdown with the drain budget in the call rather than read from the constant, so a
+// test whose work outlasts the budget on purpose spends seconds of its own instead of waiting out
+// production's nine. Nothing outside this package reaches it: every real caller goes through
+// Shutdown, which passes ShutdownDrainBudget.
+func (s *Service) shutdown(ctx context.Context, drainBudget time.Duration) error {
 	// Last, whichever way Shutdown returns: closing a room may yet have something to send. The
 	// awareness relay sends what it still holds - the removals the rooms' closes made, and what
 	// ygo's shutdown drained from the rooms' relay lanes - through the sender, so it closes first.
@@ -1114,7 +1157,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		return true
 	})
 	s.stopAllSettleTimers()
-	drainCtx, cancelDrain := context.WithTimeout(ctx, ShutdownDrainBudget)
+	drainCtx, cancelDrain := context.WithTimeout(ctx, drainBudget)
 	defer cancelDrain()
 	rooms := make([]string, 0, len(loaded))
 	for _, room := range loaded {
@@ -1136,13 +1179,13 @@ func (s *Service) Shutdown(ctx context.Context) error {
 			defer workers.Done()
 			settles := false
 			if err := s.waitForDurableAppends(drainCtx, room.name); err != nil {
-				slog.Warn("dispatch: stop document settlement before durable append drain", "room", room.name, "error", err)
+				s.log().Warn("dispatch: stop document settlement before durable append drain", "room", room.name, "error", err)
 				mu.Lock()
 				drainErr = err
 				mu.Unlock()
 			} else if owes, err := settlementPending(drainCtx, s.store.Pool, room.name); err != nil {
 				// Nothing says the settlement can be skipped, so it runs.
-				slog.Warn("dispatch: read whether the document owes a settlement before shutdown", "room", room.name, "error", err)
+				s.log().Warn("dispatch: read whether the document owes a settlement before shutdown", "room", room.name, "error", err)
 				settles = true
 			} else {
 				// A document whose updates have all been settled would spend the budget
@@ -1157,7 +1200,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 			}
 			if room.connected {
 				if err := s.srv.closeRoom(ctx, room.name, true); err != nil && !errors.Is(err, websocket.ErrRoomNotFound) {
-					slog.Warn("dispatch: close document peers before shutdown", "room", room.name, "error", err)
+					s.log().Warn("dispatch: close document peers before shutdown", "room", room.name, "error", err)
 				}
 			}
 		}()
@@ -1224,16 +1267,16 @@ func (s *Service) roomsOwingSettlement(ctx context.Context, rooms []string) (map
 func (s *Service) reportShutdownSettlements(ctx context.Context, owed map[string]bool, rooms []string, budgetEnded bool) {
 	left, err := s.roomsOwingSettlement(ctx, rooms)
 	if err != nil {
-		slog.Warn("dispatch: read the documents left owing a settlement at shutdown", "error", err)
+		s.log().Warn("dispatch: read the documents left owing a settlement at shutdown", "error", err)
 		return
 	}
 	for _, room := range rooms {
 		switch {
 		case left[room]:
-			slog.Warn("dispatch: document settlement left to resume after shutdown",
+			s.log().Warn("dispatch: document settlement left to resume after shutdown",
 				"room", room, "shutdown_budget_ended", budgetEnded)
 		case owed[room]:
-			slog.Info("dispatch: document settled before shutdown", "room", room)
+			s.log().Info("dispatch: document settled before shutdown", "room", room)
 		}
 	}
 }
@@ -1551,9 +1594,9 @@ func (s *Service) retrySettleLocked(room string, state *roomState, generation ui
 		// Expected, not a fault: the settlement wrote nothing (one that wrote fails the room
 		// instead) because the room it read was replaced first, and the replacement's load arms
 		// the settlement the document still owes.
-		slog.Info("dispatch: document settlement wrote nothing into a replaced room", "room", room, "error", err)
+		s.log().Info("dispatch: document settlement wrote nothing into a replaced room", "room", room, "error", err)
 	default:
-		slog.Error("dispatch: settle document", "room", room, "error", err)
+		s.log().Error("dispatch: settle document", "room", room, "error", err)
 	}
 	if !counted {
 		return
@@ -1790,9 +1833,9 @@ func (s *Service) followUpSettlement(room string, outcome settleOutcome) {
 	case settleRetry:
 		s.retrySettle(room, outcome.generation, outcome.err)
 	case settleOutOfBudget:
-		slog.Warn("dispatch: document settlement stopped at the shutdown budget", "room", room, "error", outcome.err)
+		s.log().Warn("dispatch: document settlement stopped at the shutdown budget", "room", room, "error", outcome.err)
 	case settleRefusedInShutdown:
-		slog.Warn("dispatch: skip shutdown document settlement that has to write into its room", "room", room, "error", outcome.err)
+		s.log().Warn("dispatch: skip shutdown document settlement that has to write into its room", "room", room, "error", outcome.err)
 	case settleEnded, settleRoomFailed, settleReloaded:
 	}
 }
@@ -1912,7 +1955,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	}
 	if err := s.lockSettlementCursor(ctx, tx, room); err != nil {
 		if s.shuttingDown(room) {
-			slog.Warn("dispatch: skip shutdown document settlement while cursor lock is held", "room", room, "error", err)
+			s.log().Warn("dispatch: skip shutdown document settlement while cursor lock is held", "room", room, "error", err)
 			return settleOutcome{}
 		}
 		return stoppedShort(fmt.Errorf("lock document cursor: %w", err))
@@ -1988,7 +2031,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	first, err := s.readSettlementTree(state, doc, room, s.afterSettleAuthorsTake, false)
 	if err != nil {
 		if errors.Is(err, ErrDocSchema) {
-			slog.Error("dispatch: settle document outside Proof schema", "room", room, "error", err)
+			s.log().Error("dispatch: settle document outside Proof schema", "room", room, "error", err)
 			return settleOutcome{}
 		}
 		return stoppedShort(err)
@@ -2068,7 +2111,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		keep(slot, update)
 		if err != nil {
 			if len(slots) == 0 && errors.Is(err, ErrDocSchema) {
-				slog.Error("dispatch: settle document outside Proof schema", "room", room, "error", err)
+				s.log().Error("dispatch: settle document outside Proof schema", "room", room, "error", err)
 				return settleOutcome{}
 			}
 			return abandon(err)
@@ -2212,7 +2255,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	}
 	if err != nil {
 		if len(slots) == 0 && errors.Is(err, ErrDocSchema) {
-			slog.Error("dispatch: settle document outside Proof schema", "room", room, "error", err)
+			s.log().Error("dispatch: settle document outside Proof schema", "room", room, "error", err)
 			return settleOutcome{}
 		}
 		return abandon(err)
@@ -2432,12 +2475,12 @@ func (s *Service) commitSettlement(ctx context.Context, tx pgx.Tx, ledger *Ledge
 // of its room.
 func (s *Service) reloadReplacedRoom(ctx context.Context, room string, state *roomState, generation uint64, live *crdt.Doc, refusal error) {
 	if s.shuttingDown(room) {
-		slog.Warn("dispatch: skip shutdown document settlement from a room whose stored history was replaced; the next process settles it",
+		s.log().Warn("dispatch: skip shutdown document settlement from a room whose stored history was replaced; the next process settles it",
 			"room", room, "error", refusal)
 		return
 	}
 	leftOpen := func(reason string) {
-		slog.Info("dispatch: left open a document room its settlement found on a replaced stored history",
+		s.log().Info("dispatch: left open a document room its settlement found on a replaced stored history",
 			"room", room, "reason", reason, "error", refusal)
 	}
 	state.mu.Lock()
@@ -2478,10 +2521,10 @@ func (s *Service) reloadReplacedRoom(ctx context.Context, room string, state *ro
 	case errors.Is(err, websocket.ErrRoomInUse):
 		leftOpen("another caller is inside the room, which ygo closes no room under; the settlement is armed again")
 	case err != nil:
-		slog.Warn("dispatch: close a document room its settlement found on a replaced stored history; the settlement is armed again",
+		s.log().Warn("dispatch: close a document room its settlement found on a replaced stored history; the settlement is armed again",
 			"room", room, "error", err)
 	case closed:
-		slog.Info("dispatch: closed a document room its settlement found on a replaced stored history; settling it again from the store",
+		s.log().Info("dispatch: closed a document room its settlement found on a replaced stored history; settling it again from the store",
 			"room", room, "error", refusal)
 	default:
 		leftOpen("the room it read was retired or replaced before the close reached it; the settlement is armed again")
@@ -3181,7 +3224,7 @@ func (s *Service) setRoomIssueOpen(ctx context.Context, room string, open, notif
 		persisted := lastActor == nil
 		if lastActor != nil {
 			if err := s.persistLastActor(ctx, room, *lastActor); err != nil {
-				slog.Error("dispatch: record closing document's latest edit source", "room", room, "error", err)
+				s.log().Error("dispatch: record closing document's latest edit source", "room", room, "error", err)
 			} else {
 				persisted = true
 			}
@@ -3216,7 +3259,7 @@ func (s *Service) closeRoomForIssue(ctx context.Context, room string) {
 func (s *Service) restoreLastActor(ctx context.Context, room string, creditSeq uint64) {
 	owed, lastActor, err := readOwedSettlement(ctx, s.store.Pool, room)
 	if err != nil {
-		slog.Error("dispatch: restore a reopened document's latest edit source", "room", room, "error", err)
+		s.log().Error("dispatch: restore a reopened document's latest edit source", "room", room, "error", err)
 		return
 	}
 	if !owed || lastActor == nil {
@@ -3429,7 +3472,7 @@ func (s *Service) awaitRoomRecovery(ctx context.Context, room string) error {
 		// A room that stays failed is otherwise visible only in its callers' 503s, which
 		// reach no server log at all: the refusal is what the server knows about the
 		// failure, so it names the room and the cause it refused for.
-		slog.Warn("dispatch: refuse a transaction's operation on a failed document room",
+		s.log().Warn("dispatch: refuse a transaction's operation on a failed document room",
 			"room", room, "error", failure)
 		return fmt.Errorf("%w: %w", ErrServiceUnavailable, failure)
 	}

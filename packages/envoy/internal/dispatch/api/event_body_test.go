@@ -38,6 +38,7 @@ func eventPayloads(t *testing.T, handler http.Handler, issueKey, eventType strin
 // that fits rides whole and the event says nothing: no reader of an older build sees a key it
 // does not know on an event that carries everything.
 func TestACommentEventCarriesALongBodyInPartAndSaysSo(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "EVB", "Event body", "A spec")
 
@@ -78,6 +79,7 @@ func TestACommentEventCarriesALongBodyInPartAndSaysSo(t *testing.T) {
 
 // A message event carries its body the same way: the first part of a long one, all of a short.
 func TestAMessageEventCarriesALongBodyInPartAndSaysSo(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "EVM", "Event body", "A spec")
 
@@ -107,6 +109,7 @@ func TestAMessageEventCarriesALongBodyInPartAndSaysSo(t *testing.T) {
 // same share: a long body refreshed carries its first part and says so, rather than the whole
 // body no event can hold.
 func TestAnAnchorRefreshCarriesTheCutBody(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "EVA", "Anchor refresh", "The quick brown fox")
 

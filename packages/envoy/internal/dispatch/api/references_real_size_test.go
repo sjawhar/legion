@@ -147,6 +147,7 @@ func newReferenceFixture(t *testing.T) referenceFixture {
 // TestIssueReferencesAtRealSize builds one production-sized referenceFixture and runs its checks
 // in order on it. The latest-versions check writes a new version, so it runs last.
 func TestIssueReferencesAtRealSize(t *testing.T) {
+	t.Parallel()
 	fixture := newReferenceFixture(t)
 	t.Run("MembersCarryTheirDocumentsOwnCreatorAndVersionAuthors", func(t *testing.T) {
 		checkReferenceMembersCarryTheirDocumentsOwnCreatorAndVersionAuthors(t, fixture)

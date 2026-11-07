@@ -64,6 +64,7 @@ func drainOps(reqs <-chan helper.Request) []string {
 // an agentbox before legion-envoy 10 passed, is a usage error in either spelling naming the flag,
 // asking the helper nothing.
 func TestEnrollHelperAsksForASessionKey(t *testing.T) {
+	t.Parallel()
 	binary := buildAgentSecrets(t)
 	lease := time.Now().Add(time.Hour).UTC().Format(time.RFC3339Nano)
 	sock, reqs := fakeHelperByOp(t, map[string]helper.Response{
@@ -102,6 +103,7 @@ func TestEnrollHelperAsksForASessionKey(t *testing.T) {
 // helper nothing, as stage 4a's self-enroll negative (`enroll --runtime-id … --thumbprint …` in a
 // pod) pins against whatever worker image it is given.
 func TestEnrollWithoutHelperNamesHelper(t *testing.T) {
+	t.Parallel()
 	binary := buildAgentSecrets(t)
 	sock, reqs := fakeHelperByOp(t, map[string]helper.Response{})
 	env := []string{"AGENT_SECRETS_HELPER_SOCK=" + sock}

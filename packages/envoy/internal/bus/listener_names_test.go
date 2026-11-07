@@ -9,6 +9,7 @@ import (
 // The listener's durable and role-lane queue are the names cmd/listener spelled itself before they
 // moved here: a space in the machine id becomes a hyphen in both.
 func TestListenerDurableAndQueueKeepTheListenersNames(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct{ machineID, durable, queue string }{
 		{"example-host-a", "listener-example-host-a", "envoy-listener-example-host-a"},
 		{"example host", "listener-example-host", "envoy-listener-example-host"},
@@ -23,6 +24,7 @@ func TestListenerDurableAndQueueKeepTheListenersNames(t *testing.T) {
 }
 
 func TestDispatchNamesKeepDispatchsExistingNames(t *testing.T) {
+	t.Parallel()
 	if got := bus.DispatchDeliveryDurable; got != "delivery-events" {
 		t.Errorf("DispatchDeliveryDurable = %q, want %q", got, "delivery-events")
 	}

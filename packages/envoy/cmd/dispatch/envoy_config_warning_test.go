@@ -25,6 +25,7 @@ func writeConfigFile(t *testing.T, path, contents string) {
 // The server refuses to start on the OpenCode-era user file alone, naming both paths and the move,
 // whatever DISPATCH_SERVER_URL and NATS_URLS say.
 func TestTheServerRefusesTheOldUserFile(t *testing.T) {
+	t.Parallel()
 	home := t.TempDir()
 	oldPath := filepath.Join(home, ".config", "opencode", "envoy.json")
 	userPath := filepath.Join(home, ".config", "legion", "envoy.json")
@@ -44,6 +45,8 @@ func TestTheServerRefusesTheOldUserFile(t *testing.T) {
 
 // A checkout's .opencode/envoy.json is not read: the server starts on the user file and logs one
 // WARN naming the rename.
+// Serial: it swaps process-wide state, the default slog logger it reads that one WARN out of
+// (logtest.SetDefault below), which the whole process shares.
 func TestTheServerWarnsOfTheOldCheckoutFile(t *testing.T) {
 	home := t.TempDir()
 	cwd := t.TempDir()

@@ -22,6 +22,7 @@ import (
 // pending-settlement row and unsettled state stay, because a later repair or restart must still
 // settle the document rather than forget it.
 func TestSettlementSkipsACraftedTreeOutsideTheSchema(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name  string
 		write func(t *testing.T, doc *crdt.Doc, transact func(func(*crdt.Transaction))) error
@@ -97,6 +98,7 @@ func TestSettlementSkipsACraftedTreeOutsideTheSchema(t *testing.T) {
 // read of that tree does, rather than as an internal error. Every other write that marks or unmarks
 // runs on its transaction's fork of the room (applyLive), which no peer's update reaches.
 func TestMarkWalksTellATreeDeepenedSinceTheirReadAsOutsideTheSchema(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	for _, test := range []struct {
 		name  string

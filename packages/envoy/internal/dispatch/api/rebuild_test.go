@@ -21,6 +21,7 @@ import (
 // newer than its latest version, so the route refuses it without deleting any history. The route
 // needs the person scope, which the deployment's shared token does not hold.
 func TestRebuildArtifactRouteNeedsThePersonScopeAndRefusesADocumentThatLoads(t *testing.T) {
+	t.Parallel()
 	handler, database, deps := newTestServer(t, testServerOptions{settle: time.Hour})
 	issue := createArtifactIssue(t, handler)
 	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{
@@ -126,6 +127,7 @@ func newBrokenTestServer(t *testing.T) (http.Handler, *store.Store, *invalidLoad
 // answers; the dashboard offers its rebuild on that code alone. The room it failed recovers, and
 // once the history loads the same read answers the document.
 func TestAHistoryThatCannotLoadReadsAsDocumentUnloadable(t *testing.T) {
+	t.Parallel()
 	handler, _, broken := newBrokenTestServer(t)
 	issue := createArtifactIssue(t, handler)
 	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{
@@ -154,6 +156,7 @@ func TestAHistoryThatCannotLoadReadsAsDocumentUnloadable(t *testing.T) {
 // waits on its agent. Omitting markdown intentionally keeps the latest-version rebuild behavior,
 // including its existing version and approval state.
 func TestRebuildArtifactVersionsSuppliedMarkdownButNotTheLatestVersionSource(t *testing.T) {
+	t.Parallel()
 	handler, database, broken := newBrokenTestServer(t)
 	issue := createArtifactIssue(t, handler)
 	createBrokenDocument := func(t *testing.T, name, markdown string) model.Artifact {
@@ -234,6 +237,7 @@ func TestRebuildArtifactVersionsSuppliedMarkdownButNotTheLatestVersionSource(t *
 // process (migration 20261101181500's trigger, which room sync hears), so the rebuild that follows
 // meets no live room and is refused for the closed issue alone.
 func TestClosedIssueRebuildRefusesBeforeChangingTheDocument(t *testing.T) {
+	t.Parallel()
 	var broken *invalidLoadOnceStore
 	handler, database, deps := newTestServer(t, testServerOptions{
 		settle: time.Hour,
@@ -274,6 +278,7 @@ func TestClosedIssueRebuildRefusesBeforeChangingTheDocument(t *testing.T) {
 // and before the version is written leaves the document's history, versions and events as they
 // were.
 func TestSuppliedRebuildThatFailsBeforeItsVersionLeavesTheDocument(t *testing.T) {
+	t.Parallel()
 	handler, database, broken := newBrokenTestServer(t)
 	issue := createArtifactIssue(t, handler)
 	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{
@@ -308,7 +313,6 @@ func TestSuppliedRebuildThatFailsBeforeItsVersionLeavesTheDocument(t *testing.T)
 	`); err != nil {
 		t.Fatalf("make the version write fail: %v", err)
 	}
-
 	broken.failNextLoad(artifact.ID)
 	rebuilt := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+artifact.ID+"/rebuild", map[string]any{"markdown": "changed\n"}, "alice")
 	if rebuilt.Code != http.StatusInternalServerError {

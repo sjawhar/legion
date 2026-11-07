@@ -1,5 +1,8 @@
 package bus_test
 
+// Every test here captures the default slog handler (captureBusLogs, restart_test.go), a
+// process-wide swap, so none of them is parallel (dispatch://INFRA-1075).
+
 import (
 	"context"
 	"errors"
@@ -32,7 +35,7 @@ func watchedBucket(t *testing.T, client *bus.Client, uri, bucket string) (*kvwat
 	}
 	watcher := kvwatch.New("drain-test", kv, discardingCache{})
 	watcher.Start()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), busWait)
 	defer cancel()
 	if err := watcher.WaitReady(ctx); err != nil {
 		t.Fatalf("wait for the watcher: %v", err)
@@ -47,6 +50,22 @@ func watchedBucket(t *testing.T, client *bus.Client, uri, bucket string) (*kvwat
 		t.Fatalf("consumers before the drain = %v, want the watcher's one", got)
 	}
 	return watcher, consumers
+}
+
+// heldDelivery is a core-NATS handler a test holds inside its delivery: it reports that the
+// delivery reached it, then waits until the test ends. A drain that must find a delivery in its
+// handler finds one for as long as the drain takes, rather than for a span of time a sleep
+// guessed at, and the handler is released before the client is closed (the cleanups run in
+// reverse, and the caller registers the client's close first).
+func heldDelivery(t *testing.T) (func(*natsgo.Msg), <-chan struct{}) {
+	t.Helper()
+	begun := make(chan struct{})
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	return func(*natsgo.Msg) {
+		close(begun)
+		<-release
+	}, begun
 }
 
 // A connection lost while the drain hooks run leaves each watcher's consumer delete unsent, or
@@ -127,6 +146,9 @@ func TestADrainHookLosingTheConnectionWarns(t *testing.T) {
 // is less, so the hooks and the connection's drain always keep it, however long a delivery takes.
 // Of the 600 ms that share is of a 2 s drain, the test asks for half, which leaves the scheduler
 // the other half.
+//
+// Real time, at production's reserve: the drain it measures is of a live NATS connection over
+// TCP, which no synctest bubble can hold.
 func TestASlowDeliveryLeavesTheDrainHooksTheirShare(t *testing.T) {
 	_, uri := testnats.Start(t)
 	client, err := bus.ConnectOwningStream([]string{uri}, bus.WithReplicas(1))
@@ -134,11 +156,8 @@ func TestASlowDeliveryLeavesTheDrainHooksTheirShare(t *testing.T) {
 		t.Fatalf("connect: %v", err)
 	}
 	t.Cleanup(client.Close)
-	started := make(chan struct{})
-	if _, err := client.SubscribeCore("notifications.role.drain-slow", func(*natsgo.Msg) {
-		close(started)
-		time.Sleep(1950 * time.Millisecond)
-	}, "drain-slow"); err != nil {
+	hold, started := heldDelivery(t)
+	if _, err := client.SubscribeCore("notifications.role.drain-slow", hold, "drain-slow"); err != nil {
 		t.Fatalf("subscribe the role lane: %v", err)
 	}
 	if err := client.Conn.Publish("notifications.role.drain-slow", nil); err != nil {
@@ -146,7 +165,7 @@ func TestASlowDeliveryLeavesTheDrainHooksTheirShare(t *testing.T) {
 	}
 	select {
 	case <-started:
-	case <-time.After(5 * time.Second):
+	case <-time.After(busWait):
 		t.Fatal("the delivery never reached its handler")
 	}
 	left := make(chan time.Duration, 1)
@@ -168,6 +187,9 @@ func TestASlowDeliveryLeavesTheDrainHooksTheirShare(t *testing.T) {
 // The listener drains for 13 s, and its deliveries keep the 10 s they had before the drain hooks:
 // a delivery that takes 9.5 s finishes, the drain reports no error, and the hooks still have their
 // 3 s once it has (bus's drainHookReserve).
+//
+// Real time, at production's reserve: the drain it measures is of a live NATS connection over
+// TCP, which no synctest bubble can hold.
 func TestADeliveryKeepsTenSecondsOfTheListenersDrain(t *testing.T) {
 	_, uri := testnats.Start(t)
 	client, err := bus.ConnectOwningStream([]string{uri}, bus.WithReplicas(1))
@@ -189,7 +211,7 @@ func TestADeliveryKeepsTenSecondsOfTheListenersDrain(t *testing.T) {
 	}
 	select {
 	case <-started:
-	case <-time.After(5 * time.Second):
+	case <-time.After(busWait):
 		t.Fatal("the delivery never reached its handler")
 	}
 	type observed struct {
@@ -217,6 +239,9 @@ func TestADeliveryKeepsTenSecondsOfTheListenersDrain(t *testing.T) {
 // A delivery that outlasts the drain's share for deliveries still lets the hooks end the KV
 // watchers, within what is left of the deadline, before the connection closes: closing it with
 // the watchers still subscribed would leave their consumers for the server to time out.
+//
+// Real time, at production's reserve: the drain and the KV watchers it ends are a live NATS
+// connection over TCP, which no synctest bubble can hold.
 func TestAStuckDeliveryStillEndsTheKVWatchers(t *testing.T) {
 	_, uri := testnats.Start(t)
 	logs := captureBusLogs(t)
@@ -228,11 +253,8 @@ func TestAStuckDeliveryStillEndsTheKVWatchers(t *testing.T) {
 	t.Cleanup(client.Close)
 	watcher, consumers := watchedBucket(t, client, uri, "drain_hook_stuck")
 	client.AddDrainHook(watcher.End)
-	started := make(chan struct{})
-	if _, err := client.SubscribeCore("notifications.role.drain-stuck", func(*natsgo.Msg) {
-		close(started)
-		time.Sleep(10 * time.Second)
-	}, "drain-stuck"); err != nil {
+	hold, started := heldDelivery(t)
+	if _, err := client.SubscribeCore("notifications.role.drain-stuck", hold, "drain-stuck"); err != nil {
 		t.Fatalf("subscribe the role lane: %v", err)
 	}
 	if err := client.Conn.Publish("notifications.role.drain-stuck", nil); err != nil {
@@ -240,7 +262,7 @@ func TestAStuckDeliveryStillEndsTheKVWatchers(t *testing.T) {
 	}
 	select {
 	case <-started:
-	case <-time.After(5 * time.Second):
+	case <-time.After(busWait):
 		t.Fatal("the delivery never reached its handler")
 	}
 	watcher.Stop()

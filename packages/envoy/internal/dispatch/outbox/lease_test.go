@@ -59,22 +59,41 @@ func (c *sendCounter) of(event int64) (total, most int) {
 	return total, most
 }
 
-// countingClient is a bus client whose windows count every envelope they send.
+// attempts is how many envelopes were handed to a window in all, whether the window wrote them or
+// answered without writing: how many sends the outbox has tried.
+func (c *sendCounter) attempts() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	total := 0
+	for _, count := range c.sends {
+		total += count
+	}
+	return total
+}
+
+// countingClient is a bus client whose windows count every envelope they send, and run before,
+// when set, ahead of the first of them: a test that must act once the outbox has taken the
+// publisher hold and read its batch acts there rather than on a clock of its own.
 type countingClient struct {
 	*bus.Client
 	counter *sendCounter
+	before  func()
 }
 
 func (c countingClient) WindowUntil(deadline func() time.Time) bus.Sender {
-	return countingSender{Sender: c.Client.WindowUntil(deadline), counter: c.counter}
+	return countingSender{Sender: c.Client.WindowUntil(deadline), counter: c.counter, before: c.before}
 }
 
 type countingSender struct {
 	bus.Sender
 	counter *sendCounter
+	before  func()
 }
 
 func (s countingSender) PublishAsync(item contracts.Envelope) <-chan error {
+	if s.before != nil {
+		s.before()
+	}
 	s.counter.add(item)
 	return s.Sender.PublishAsync(item)
 }
@@ -106,7 +125,7 @@ func startProcess(t *testing.T, name string, database *store.Store, url string, 
 		cancel()
 		select {
 		case <-done:
-		case <-time.After(10 * time.Second):
+		case <-time.After(eventWait):
 			t.Errorf("%s's outbox did not stop", name)
 		}
 	})
@@ -170,6 +189,13 @@ func waitForPublished(t *testing.T, within time.Duration, database *store.Store,
 // An event another process commits - which reaches this one only through the database, not its
 // broker - is claimed at once by the LISTEN on dispatch_events, and a back-off is claimed when it
 // falls due, by the one timer armed to it, with nothing else waking the outbox in between.
+//
+// Serial: it measures the process. What it counts is how often this outbox scanned over a window
+// of wall time, and a parallel test's load lengthens every period inside that window
+// (docs/testing.md).
+//
+// Real time, at production's waits: every scan it counts is a statement on a Postgres pool with
+// a LISTEN connection beside it, which no synctest bubble can hold.
 func TestTheOutboxDoesNotScanWhileIdle(t *testing.T) {
 	database := storetest.Open(t)
 	other := storetest.SecondProcess(t, database)
@@ -255,8 +281,16 @@ func appendBackedOffEvent(t *testing.T, database *store.Store, wait time.Duratio
 
 // Two processes' outboxes on one database: exactly one publishes at every moment, and every event
 // either process writes is sent once, by whichever holds the publisher hold.
+//
+// What the samples have to span is renewals: a holder that stopped renewing, or one whose standby
+// took the name beside it, shows as none or two publishers, so the window below spans several of
+// production's renewal periods.
+//
+// Real time, at publisherHoldOptions: the hold is a Postgres row the two processes renew, and
+// each publishes to a live NATS server, which no synctest bubble can hold.
 func TestOnlyOneOutboxPublishesAtATime(t *testing.T) {
-	_, url := testnats.Start(t)
+	t.Parallel()
+	url := testnats.URL(t)
 	database := storetest.Open(t)
 	seedIssue(t, database, "T-1", nil)
 	counter := &sendCounter{}
@@ -284,7 +318,8 @@ func TestOnlyOneOutboxPublishesAtATime(t *testing.T) {
 // A process that stops gracefully releases the publisher hold, and the other takes it over at once
 // rather than when the hold would have lapsed.
 func TestAStoppedOutboxHandsThePublisherToTheOtherAtOnce(t *testing.T) {
-	_, url := testnats.Start(t)
+	t.Parallel()
+	url := testnats.URL(t)
 	database := storetest.Open(t)
 	seedIssue(t, database, "T-1", nil)
 	counter := &sendCounter{}
@@ -305,10 +340,14 @@ func TestAStoppedOutboxHandsThePublisherToTheOtherAtOnce(t *testing.T) {
 }
 
 // A holder whose NATS connection is cut releases the publisher hold once it has been without NATS
-// for natsLossGrace, and the other process, whose NATS works, takes the hold and publishes what is
-// written after the cut.
+// for the grace it gives a connection that is down, and the other process, whose NATS works, takes
+// the hold and publishes what is written after the cut.
+//
+// Real time, at natsLossGrace: the cut is of a TCP proxy in front of a live NATS server, which no
+// synctest bubble can hold.
 func TestAnOutboxThatLosesNATSReleasesThePublisher(t *testing.T) {
-	_, url := testnats.Start(t)
+	t.Parallel()
+	url := testnats.URL(t)
 	proxy := testnats.StartProxy(t, url)
 	proxied := proxy.URL()
 	database := storetest.Open(t)
@@ -336,8 +375,12 @@ func TestAnOutboxThatLosesNATSReleasesThePublisher(t *testing.T) {
 // hold. It does not take the hold back while its connection stays silent, although the connection
 // still reports itself connected: the other process, whose NATS works, takes it and publishes the
 // event, within 10 s of the silence.
+//
+// Real time, at probeTimeout and holdRetry: the silence is a frozen TCP proxy in front of a live
+// NATS server, which no synctest bubble can hold.
 func TestAnOutboxWhoseNATSGoesSilentGivesThePublisherToTheOther(t *testing.T) {
-	_, url := testnats.Start(t)
+	t.Parallel()
+	url := testnats.URL(t)
 	proxy := testnats.StartProxy(t, url)
 	database := storetest.Open(t)
 	seedIssue(t, database, "T-1", nil)
@@ -370,7 +413,8 @@ func TestAnOutboxWhoseNATSGoesSilentGivesThePublisherToTheOther(t *testing.T) {
 // lapse 6 s on), not one take and one read per event, which would put a write on duty_holds for
 // every event on every standby.
 func TestAStandbyDoesNotTryTheHoldForEveryEventTheHolderWrites(t *testing.T) {
-	_, url := testnats.Start(t)
+	t.Parallel()
+	url := testnats.URL(t)
 	database := storetest.Open(t)
 	seedIssue(t, database, "T-1", nil)
 	counter := &sendCounter{}
@@ -444,6 +488,7 @@ func (p *fenceAfterFirstSend) Deadline() time.Time {
 // deadline has passed it sends nothing more, counts no attempt, writes nothing, and reports the
 // hold lost.
 func TestABatchPastThePublisherHoldsDeadlineSendsAndRecordsNothingMore(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	broker := events.NewBroker()
 	seedIssue(t, database, "T-1", nil)
@@ -497,6 +542,7 @@ func (p *reconnectedQuietly) WindowUntil(deadline func() time.Time) bus.Sender {
 // connection event came: it reads the client's status as the grace ends, keeps the hold and scans,
 // rather than giving the hold up for a loss that is over.
 func TestAHolderConnectedAgainWhenTheGraceEndsKeepsTheHold(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	publisher := &reconnectedQuietly{}
 	outbox := New(Deps{Store: database, Publisher: publisher})
@@ -533,6 +579,9 @@ func TestAHolderConnectedAgainWhenTheGraceEndsKeepsTheHold(t *testing.T) {
 // the hold's loss deadline still ahead. The holder stops that hold's renewal there and then: its
 // Lost is closed and it renews no more, the other's row is left alone, and a take of the hold
 // once it is free again has one renewal running, not two renewing the same row.
+//
+// Serial: it measures the process. It counts the renewal statements sent over a window of wall
+// time, which another test's load stretches (docs/testing.md).
 func TestAHolderWhoseRecordFindsTheHoldAnothersStopsItsRenewal(t *testing.T) {
 	ctx := context.Background()
 	database := storetest.Open(t)

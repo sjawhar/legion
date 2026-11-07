@@ -127,6 +127,7 @@ func runIntake(t *testing.T, intake *Intake) (stop func()) {
 // acknowledged, and a second message of pull request 1 waits behind the first: it starts only
 // once the first has ended.
 func TestAPullRequestHeldOnGitHubHoldsBackOnlyItsOwnMessages(t *testing.T) {
+	t.Parallel()
 	pool, ctx := deliveryTestPool(t)
 	seedDeliverySettings(t, ctx, pool)
 	fake := newFakeGitHub(t)
@@ -167,18 +168,19 @@ func TestAPullRequestHeldOnGitHubHoldsBackOnlyItsOwnMessages(t *testing.T) {
 // with no decode: a comment and a review on a pull request, its checks, an issue and a job event.
 // The pull request's own message is decoded, once.
 func TestSubjectsTheIntakeDoesNotWantAreAcknowledgedWithoutADecode(t *testing.T) {
+	t.Parallel()
 	pool, ctx := deliveryTestPool(t)
 	seedDeliverySettings(t, ctx, pool)
 	var decodes atomic.Int64
-	decode := decodeEnvelope
-	decodeEnvelope = func(data []byte) (contracts.Envelope, error) {
-		decodes.Add(1)
-		return decode(data)
-	}
-	// Before startIntake, so it is restored only once the intake has stopped.
-	t.Cleanup(func() { decodeEnvelope = decode })
 	natsClient := intakeTestClient(t)
-	startIntake(t, newIntake(natsClient, pool, deliveryTestLeases(t, pool), newFakeGitHub(t).newTestClient(), events.NewBroker(), loadedSettingsCache(t, ctx, pool)))
+	intake := newIntake(natsClient, pool, deliveryTestLeases(t, pool), newFakeGitHub(t).newTestClient(), events.NewBroker(), loadedSettingsCache(t, ctx, pool))
+	// This intake's own decode, so the count is of what it decoded and not of what an intake of a
+	// test running beside this one did.
+	intake.decode = func(data []byte) (contracts.Envelope, error) {
+		decodes.Add(1)
+		return decodeEnvelope(data)
+	}
+	startIntake(t, intake)
 	awaitBoundDurable(t, natsClient)
 
 	payload := `{"kind":"comment","action":"created","repo":"acme/widgets","number":"7","author":"octocat"}`
@@ -203,6 +205,7 @@ func TestSubjectsTheIntakeDoesNotWantAreAcknowledgedWithoutADecode(t *testing.T)
 // process to bind the durable is handed it at once rather than after the ack wait; the message in
 // its handler then finishes and is acknowledged by the stopping intake.
 func TestAMessageQueuedBehindItsKeyAtStopIsRedeliveredAtOnce(t *testing.T) {
+	t.Parallel()
 	pool, ctx := deliveryTestPool(t)
 	seedDeliverySettings(t, ctx, pool)
 	fake := newFakeGitHub(t)
@@ -286,6 +289,7 @@ func holdPullRequestOneUntilAbandoned(fake *fakeGitHub) *heldPullRequests {
 // stopping intake gives back reaches the standby only once its handler of that key has ended or
 // given up its GitHub call.
 func TestAHandOverKeepsAPullRequestsMessagesInOrder(t *testing.T) {
+	t.Parallel()
 	pool, ctx := deliveryTestPool(t)
 	seedDeliverySettings(t, ctx, pool)
 	fake := newFakeGitHub(t)
@@ -465,28 +469,30 @@ func TestABindThatReturnsAfterTheSignalStopsByTheBudgetFromTheSignal(t *testing.
 // yet routed when the intake stops, is negatively acknowledged rather than handled, and the next
 // process to bind the durable handles it.
 func TestAMessageInTheClientBufferAtStopIsGivenBack(t *testing.T) {
+	t.Parallel()
 	pool, ctx := deliveryTestPool(t)
 	seedDeliverySettings(t, ctx, pool)
-	// The first decode, the workflow run's in the callback, waits until unblock: the messages
-	// behind it stay in the client's buffer meanwhile.
+	// This intake's first decode, the workflow run's in the callback, waits until unblock: the
+	// messages behind it stay in the client's buffer meanwhile.
 	blocked, unblock := make(chan struct{}), make(chan struct{})
 	var first sync.Once
-	decode := decodeEnvelope
-	decodeEnvelope = func(data []byte) (contracts.Envelope, error) {
+	fake := newFakeGitHub(t)
+	held := holdPullRequestOne(fake)
+	github := fake.newTestClient()
+	natsClient := intakeTestClient(t)
+	intake := newIntake(natsClient, pool, deliveryTestLeases(t, pool), github, events.NewBroker(), loadedSettingsCache(t, ctx, pool))
+	// On this intake rather than on a package variable every intake reads, so the hold is on its
+	// own first message and not on whichever intake of a test running beside this one decodes
+	// first.
+	intake.decode = func(data []byte) (contracts.Envelope, error) {
 		hold := false
 		first.Do(func() { hold = true })
 		if hold {
 			close(blocked)
 			<-unblock
 		}
-		return decode(data)
+		return decodeEnvelope(data)
 	}
-	t.Cleanup(func() { decodeEnvelope = decode })
-	fake := newFakeGitHub(t)
-	held := holdPullRequestOne(fake)
-	github := fake.newTestClient()
-	natsClient := intakeTestClient(t)
-	intake := newIntake(natsClient, pool, deliveryTestLeases(t, pool), github, events.NewBroker(), loadedSettingsCache(t, ctx, pool))
 	stopFirst := runIntake(t, intake)
 	release := sync.OnceFunc(func() { close(unblock) })
 	t.Cleanup(release)
@@ -535,6 +541,7 @@ func TestAMessageInTheClientBufferAtStopIsGivenBack(t *testing.T) {
 // looking it up, as a process taking the durable over after recreating it does; StopDelivering
 // ends that subscription, and a second call returns at once.
 func TestAnIntakeSubscribesAtTheDeliverSubjectItIsGiven(t *testing.T) {
+	t.Parallel()
 	pool, ctx := deliveryTestPool(t)
 	seedDeliverySettings(t, ctx, pool)
 	natsClient := intakeTestClient(t)
@@ -575,6 +582,7 @@ func TestAnIntakeSubscribesAtTheDeliverSubjectItIsGiven(t *testing.T) {
 // back. A subscribe afterwards on the same client, at the deliver subject of the durable created
 // again, as a process that lost and regained the durable does, binds it and handles its messages.
 func TestAStoppedIntakeStaysStoppedAcrossAReconnectAndSubscribesAgain(t *testing.T) {
+	t.Parallel()
 	pool, ctx := deliveryTestPool(t)
 	seedDeliverySettings(t, ctx, pool)
 	natsClient := intakeTestClient(t)
@@ -818,7 +826,7 @@ func TestIntakeKeyWantsOnlyTheSubjectOfTheRepositoryThePayloadNames(t *testing.T
 			if data == nil {
 				data = githubEnvelopeData(t, tc.subject, tc.payload)
 			}
-			key, envelope, wanted := intakeKey(&natsgo.Msg{Subject: tc.subject, Data: data})
+			key, envelope, wanted := intakeKey(&natsgo.Msg{Subject: tc.subject, Data: data}, decodeEnvelope)
 			if wanted != tc.wanted || key != tc.key {
 				t.Fatalf("intakeKey(%s) = key %q, wanted %t; want key %q, wanted %t", tc.subject, key, wanted, tc.key, tc.wanted)
 			}
@@ -868,7 +876,7 @@ func TestTheCopyUnderARepositorysFormerNameRunsNoSecondHandler(t *testing.T) {
 		if err != nil {
 			t.Fatalf("encode the envelope of %s: %v", item.Topic, err)
 		}
-		if key, _, wanted := intakeKey(&natsgo.Msg{Subject: item.Topic, Data: data}); wanted {
+		if key, _, wanted := intakeKey(&natsgo.Msg{Subject: item.Topic, Data: data}, decodeEnvelope); wanted {
 			keys[key]++
 		}
 	}

@@ -140,6 +140,7 @@ func (r *flowRun) project(markID string, record MarkRecord, path marginPath) err
 // row and the margin record; the transaction reads the document once, so the edit never reaches
 // its fork and the kept rendering describes it still.
 func (r *flowRun) anchoredComment(body string, lateEdit bool) error {
+	newCommentID := r.document.commentID(newCommentNumber)
 	var anchored Anchored
 	if err := r.operation("MarkQuote", func() (any, error) {
 		var err error
@@ -175,7 +176,7 @@ func (r *flowRun) anchoredComment(body string, lateEdit bool) error {
 // the root's margin record with the reply in it, the transaction's first document operation.
 func (r *flowRun) reply(body string) error {
 	root := r.document.anchors[replyRoot]
-	if err := insertComment(r.ctx, r.tx, r.ids, replyCommentID, &root.id, flowActor, body, nil, nil, nil, nil, repliedAt); err != nil {
+	if err := insertComment(r.ctx, r.tx, r.ids, r.document.commentID(replyCommentNumber), &root.id, flowActor, body, nil, nil, nil, nil, repliedAt); err != nil {
 		return err
 	}
 	record := root.record()

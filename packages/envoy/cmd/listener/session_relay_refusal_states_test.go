@@ -25,6 +25,7 @@ import (
 // its own resolution succeeded and it is the path that would deliver the message, and none where
 // the resolution failed or the session's own consumer holds the message (fanoutRefusalOutcome).
 func TestARefusalIsReportedOnceWhateverTheSessionsEntrySaid(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name string
 		// beforeTheRefusal leaves the session's entry in the state the fan-out judges the refused

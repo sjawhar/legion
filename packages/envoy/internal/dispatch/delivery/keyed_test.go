@@ -57,8 +57,8 @@ func awaitStart(t *testing.T, starts <-chan keyedItem) keyedItem {
 	select {
 	case item := <-starts:
 		return item
-	case <-time.After(5 * time.Second):
-		t.Fatal("no item started within 5s")
+	case <-time.After(eventWait):
+		t.Fatalf("no item started within %s", eventWait)
 		return keyedItem{}
 	}
 }
@@ -67,6 +67,7 @@ func awaitStart(t *testing.T, starts <-chan keyedItem) keyedItem {
 // an item of another key runs as soon as it is given; once every key's queue is empty no goroutine
 // is left behind.
 func TestAKeyedRunnerRunsOneKeyInOrderAndKeysAtOnce(t *testing.T) {
+	t.Parallel()
 	recorder := &keyedRecorder{gates: map[int]chan struct{}{1: make(chan struct{})}, start: make(chan keyedItem, 8)}
 	runner := newKeyedRunner(recorder.handle)
 
@@ -103,6 +104,7 @@ func TestAKeyedRunnerRunsOneKeyInOrderAndKeysAtOnce(t *testing.T) {
 // stop hands back every item still waiting behind its key, in each key's order, and refuses every
 // later item; the item in its handler runs on, and wait returns once it has ended.
 func TestAStoppedKeyedRunnerHandsBackWhatWaits(t *testing.T) {
+	t.Parallel()
 	recorder := &keyedRecorder{gates: map[int]chan struct{}{1: make(chan struct{})}, start: make(chan keyedItem, 8)}
 	runner := newKeyedRunner(recorder.handle)
 	runner.run("a", keyedItem{"a", 1})

@@ -24,6 +24,7 @@ import (
 // row by then) or queued behind a lock. A write that waits for the in-memory writer slot while
 // holding a lock the slot's holder needs is a cycle Postgres cannot see, so both would hang.
 func TestProjectDocumentUploadAndAConcurrentWriteBothFinish(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name  string
 		write func(f *uploadRaceFixture, ctx context.Context, token string) *httptest.ResponseRecorder
@@ -151,7 +152,7 @@ func (f *uploadRaceFixture) request(ctx context.Context, method, target string, 
 // waits on a database lock.
 func (f *uploadRaceFixture) waitForWriteToEngage(t *testing.T) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(concurrentWait)
 	for {
 		select {
 		case <-f.docs.engaged:
@@ -182,13 +183,13 @@ func awaitWithin(t *testing.T, responses <-chan *httptest.ResponseRecorder, canc
 	select {
 	case response := <-responses:
 		return response
-	case <-time.After(10 * time.Second):
+	case <-time.After(concurrentWait):
 		cancel()
 		select {
 		case <-responses:
-		case <-time.After(10 * time.Second):
+		case <-time.After(concurrentWait):
 		}
-		t.Fatalf("%s did not finish within 10 s", name)
+		t.Fatalf("%s did not finish within %s", name, concurrentWait)
 		return nil
 	}
 }
@@ -217,7 +218,7 @@ func (s *heldAppendStore) waitHeld(t *testing.T) {
 	s.mu.Unlock()
 	select {
 	case <-held:
-	case <-time.After(5 * time.Second):
+	case <-time.After(concurrentWait):
 		t.Fatal("the upload never reached its transactional append")
 	}
 }

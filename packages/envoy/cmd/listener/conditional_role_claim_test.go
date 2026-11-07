@@ -154,6 +154,7 @@ func (r *conditionalClaimRig) holdsRoleTopic(sessionID, role string) bool {
 // A claim naming a revision the role's claim no longer sits at is refused, and the refusal writes
 // nothing: the role keeps its holder and the claimant's record never takes the role's topic.
 func TestAConditionalRoleClaimNamingAnotherRevisionIsRefusedAndWritesNothing(t *testing.T) {
+	t.Parallel()
 	const (
 		role     = "conditional-stale"
 		holder   = "ses_cond_holder"
@@ -206,6 +207,7 @@ func TestAConditionalRoleClaimNamingAnotherRevisionIsRefusedAndWritesNothing(t *
 // A claim naming the revision the bucket holds takes the role, and the role's claim moves to a
 // revision of its own, which the next conditional claim must name instead.
 func TestAConditionalRoleClaimNamingTheCurrentRevisionTakesTheRole(t *testing.T) {
+	t.Parallel()
 	const (
 		role     = "conditional-fresh"
 		holder   = "ses_cond_first"
@@ -241,6 +243,7 @@ func TestAConditionalRoleClaimNamingTheCurrentRevisionTakesTheRole(t *testing.T)
 // unclaimed role, and is refused the moment one exists - the case a scheduler racing another
 // scheduler over a role nobody held must lose rather than overwrite.
 func TestAConditionalRoleClaimAtRevisionZeroTakesOnlyARoleWithNoClaimRecord(t *testing.T) {
+	t.Parallel()
 	const (
 		unclaimed = "conditional-unclaimed"
 		taken     = "conditional-taken"
@@ -295,6 +298,7 @@ func TestAConditionalRoleClaimAtRevisionZeroTakesOnlyARoleWithNoClaimRecord(t *t
 // stay last-claim-wins over a role another session holds, and a soft claim over a live holder
 // still answers the 409 that names it.
 func TestARoleClaimWithNoIfClaimRevisionIsUnchanged(t *testing.T) {
+	t.Parallel()
 	const (
 		hard   = "conditional-absent-hard"
 		soft   = "conditional-absent-soft"
@@ -332,6 +336,7 @@ func TestARoleClaimWithNoIfClaimRevisionIsUnchanged(t *testing.T) {
 // 404 reports the revision it stands at. A claim at that revision then takes the role, and one at
 // 0 - the revision a role with no claim record reports - is refused, because a record does stand.
 func TestALookupOfALapsedHolderReportsItsStandingClaimRevisionWhichThenClaims(t *testing.T) {
+	t.Parallel()
 	const (
 		role     = "conditional-lapsed"
 		lapsed   = "ses_cond_lapsed"

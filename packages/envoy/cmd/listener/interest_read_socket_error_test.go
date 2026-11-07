@@ -72,6 +72,7 @@ func breakInterestReads(t *testing.T, registry *store.Registry) {
 // per-key read of it reaches the bucket. The negative control is both requests asked before the
 // reads break: each answers 200 naming the session.
 func TestAnInterestReadFailingWithARawSocketErrorIsTheBusNotAnswering(t *testing.T) {
+	t.Parallel()
 	const missed = "ses_interest_read_broken_pipe"
 	registry, sessions := setupSessionsTest(t, nil, []string{missed})
 	state := &listenerDeps{registry: registry, sessions: sessions}

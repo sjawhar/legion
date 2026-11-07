@@ -23,6 +23,7 @@ import (
 // helper recorded, and a helper from before credential_dropped, which sets login_refused only for
 // a broker refusal, reads as that refusal.
 func TestNoCredentialReasonNamesWhyTheHelperHoldsNone(t *testing.T) {
+	t.Parallel()
 	const refusal = "the broker refused the launcher credential (expired or revoked, or a proof it could not verify, such as clock skew or an AGENT_SECRETS_URL mismatch)"
 	for _, tc := range []struct {
 		name, state string
@@ -68,6 +69,7 @@ func waitForRecord(t *testing.T, out *syncBuffer, msg string) map[string]any {
 // enrollment before it enrolls again. That revoke cannot run, and the helper says so at ERROR,
 // naming the session, the prior enrollment and why.
 func TestARestartWithNoLoginSaysWhyTheSessionCannotEnroll(t *testing.T) {
+	t.Parallel()
 	state := filepath.Join(t.TempDir(), "sessions.json")
 	pid := recordPrior(t, state, "enr-prior")
 	var out syncBuffer
@@ -91,6 +93,7 @@ func TestARestartWithNoLoginSaysWhyTheSessionCannotEnroll(t *testing.T) {
 // for want of a launcher credential fails, as before, and logs the same ERROR and reason as the
 // helper's own session's enrollment does.
 func TestASessionKeyTheHelperCannotEnrollIsAnError(t *testing.T) {
+	t.Parallel()
 	var out syncBuffer
 	r := newLoggedRig(t, "", slog.New(slog.NewJSONHandler(&out, nil)))
 	if key := r.call(t, Request{Op: "enroll-session-key", RuntimeID: "box-1", Thumbprint: "tp-1"}); key.OK || key.Code != CodeEnrollFailed || key.Error != noCredentialMsg {
@@ -123,6 +126,7 @@ func noErrors(t *testing.T, out *syncBuffer, dropMsg string) {
 // session is short of one: the failure is the ordinary retry WARN naming the broker's refusal, and
 // the retry the login woke enrolls the session with the new credential at once.
 func TestARefusalOfAReplacedCredentialIsAnOrdinaryRetry(t *testing.T) {
+	t.Parallel()
 	var out syncBuffer
 	r := newLoggedRig(t, "", slog.New(slog.NewJSONHandler(&out, nil)))
 	r.login(t)
@@ -180,6 +184,7 @@ func (h *onDrop) Handle(ctx context.Context, rec slog.Record) error {
 // the failure. The helper holds a credential by then, so the line is the ordinary retry WARN, not
 // an ERROR that the session cannot enroll, and the retry the login woke enrolls it at once.
 func TestALoginBetweenARefusalAndItsLineIsAnOrdinaryRetry(t *testing.T) {
+	t.Parallel()
 	var out syncBuffer
 	hook := &onDrop{Handler: slog.NewJSONHandler(&out, nil)}
 	r := newLoggedRig(t, "", slog.New(hook))
@@ -214,8 +219,19 @@ func TestALoginBetweenARefusalAndItsLineIsAnOrdinaryRetry(t *testing.T) {
 // the helper holds no credential keeps retrying its enrollment with a backoff that grows to a
 // minute. The login that installs a credential must wake that retry, so the session can sign
 // within about a second of the login instead of whenever its backoff comes round.
+//
+// This row is the shape of the backoff, so it sets the production one rather than taking the
+// rig's short default: a backoff whose next attempt is due inside the bound below would pass
+// whether or not the login woke anything.
+//
+// Real time, at the production backoff: the rig serves the helper on a real unix socket and pins
+// each caller through SO_PEERPIDFD, which no synctest bubble can hold.
 func TestALoginWakesTheEnrollmentOfASessionRegisteredWithoutACredential(t *testing.T) {
-	r := newRig(t, "")
+	t.Parallel()
+	r := newRig(t, "", func(r *rig) {
+		r.srv.EnrollRetryMin = time.Second
+		r.srv.EnrollRetryMax = time.Minute
+	})
 	if reg := r.call(t, Request{Op: "register"}); !reg.OK || reg.Code != CodeNoCredential {
 		t.Fatalf("register with no credential: %+v", reg)
 	}
@@ -244,6 +260,7 @@ func TestALoginWakesTheEnrollmentOfASessionRegisteredWithoutACredential(t *testi
 // NO_CREDENTIAL in the same case. Every enrollment this fake broker sees fails, so the session
 // never enrolls and the credential alone decides the answer.
 func TestSignAnswersNoCredentialWhileTheHelperHoldsNone(t *testing.T) {
+	t.Parallel()
 	r := newRig(t, "")
 	r.fake.mu.Lock()
 	r.fake.failFirst = failAlways

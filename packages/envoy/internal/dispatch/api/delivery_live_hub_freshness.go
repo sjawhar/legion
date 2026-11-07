@@ -23,11 +23,14 @@ func (h *deliveryHub) applyFreshness(payload string) {
 	}
 	now := h.clock.Now()
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	h.fresh.lastEventAt, h.fresh.lastReconcileAt, h.fresh.lastError = row.LastEventAt, row.LastReconcileAt, row.LastError
 	h.judgeLocked(now)
+	h.mu.Unlock()
 	// The threshold moved with the reconcile time: the worker re-arms its timer.
 	signal(h.wakeWork)
+	// Noted after the verdict was judged and any frame it changed was queued, so a test that
+	// proves a reconcile sends no frame waits for this note rather than for a span of time.
+	h.note(deliveryHubNote{what: "freshness applied"})
 }
 
 // verdictLocked is the freshness verdict as of now.

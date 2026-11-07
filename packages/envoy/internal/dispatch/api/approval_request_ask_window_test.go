@@ -20,6 +20,7 @@ import (
 // owed and no window row to embed, so the ask would be unreachable by meaning until a tick
 // caught up - up to docs.BlockIndexReconcileInterval (30 seconds) after the write.
 func TestAnApprovalRequestLeavesItsAskWindowedAndCurrent(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "APPRW", "Window the request's ask", "A spec")
 

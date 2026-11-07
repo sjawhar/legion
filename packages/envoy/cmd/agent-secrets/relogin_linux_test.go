@@ -34,6 +34,7 @@ import (
 // grant values. Once the broker refuses that credential, login-status exits 1 saying so, and a
 // re-login denied while the helper holds no credential reads denied and exits 1.
 func TestLoginStatusFollowsTheCredentialTheHelperHolds(t *testing.T) {
+	t.Parallel()
 	rig := brokertest.NewRig(t)
 	binary := buildAgentSecrets(t)
 	srv, sock := serveRealHelper(t, rig.URL, rig.Operator)
@@ -126,7 +127,9 @@ func TestLoginStatusFollowsTheCredentialTheHelperHolds(t *testing.T) {
 // the command's exit status and stderr once its poll has read the decision.
 func machineLoginThen(t *testing.T, rig *brokertest.Rig, binary, sock, action string, before func()) (code string, exit int, stderr string) {
 	t.Helper()
-	cmd := exec.Command(binary, "machine", "login")
+	// --poll 20ms: the test decides the login itself a moment after it starts, so the CLI's
+	// production wait for a person to type the code would be pure sleep here.
+	cmd := exec.Command(binary, "machine", "login", "--poll", "20ms")
 	cmd.Env = append(os.Environ(), "AGENT_SECRETS_HELPER_SOCK="+sock, "AGENT_SECRETS_URL="+rig.URL, "AGENT_SECRETS_KEY_DIR=", "AGENT_SECRETS_APPROVE_URL=")
 	var errOut strings.Builder
 	cmd.Stderr = &errOut

@@ -18,6 +18,7 @@ import (
 // only the block readers read it. A `~` written `\&#126;` reads otherwise for a reason of its own
 // (dispatch://INFRA-536) and is left out.
 func TestTildeRunsReadAsTheEngineReadsThem(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		markdown, want string
 		blocks         bool

@@ -16,6 +16,7 @@ import (
 // replays and 1 once one does not, names a mismatch without the document's text, and counts a
 // named document whose versions all record updates below its compaction base as unchecked.
 func TestStoredOrderSubcommandExitCodes(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	run := func(env map[string]string, args ...string) (int, string) {
 		t.Helper()

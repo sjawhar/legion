@@ -19,6 +19,7 @@ import (
 )
 
 func TestConditionalDocumentEditDoesNotOverwriteWriterDuringTableAnchorCheck(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name         string
 		precondition bool
@@ -44,7 +45,9 @@ func TestConditionalDocumentEditDoesNotOverwriteWriterDuringTableAnchorCheck(t *
 			artifactID := createDocument(t, database, "")
 			service := New(Deps{Store: database, Settle: time.Hour})
 			t.Cleanup(func() {
-				shutdown, cancel := context.WithTimeout(context.Background(), time.Second)
+				// Teardown, not a bound this test checks: the drain takes as long as the
+				// loaded machine takes, so it gets roomWait like this file's other waits.
+				shutdown, cancel := context.WithTimeout(context.Background(), roomWait(t))
 				defer cancel()
 				if err := service.Shutdown(shutdown); err != nil {
 					t.Errorf("shutdown service: %v", err)
@@ -136,7 +139,7 @@ func TestConditionalDocumentEditDoesNotOverwriteWriterDuringTableAnchorCheck(t *
 			}()
 			select {
 			case <-browserMutated:
-			case <-time.After(2 * time.Second):
+			case <-time.After(roomWait(t)):
 				t.Fatal("browser writer did not mutate the live tree")
 			}
 			if err := gate.Commit(context.Background()); err != nil {
@@ -216,7 +219,7 @@ func documentTokenForTest(t *testing.T, service *Service, artifactID, markdown s
 
 func waitForAsksQueryLock(t *testing.T, database *store.Store) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(roomWait(t))
 	for time.Now().Before(deadline) {
 		var waiting int
 		if err := database.Pool.QueryRow(context.Background(), `
@@ -239,7 +242,7 @@ func awaitRaceResult(t *testing.T, result <-chan error) error {
 	select {
 	case err := <-result:
 		return err
-	case <-time.After(10 * time.Second):
+	case <-time.After(roomWait(t)):
 		t.Fatal("conditional edit did not complete")
 		return nil
 	}

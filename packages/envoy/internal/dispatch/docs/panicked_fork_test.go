@@ -42,6 +42,7 @@ func openingText(doc *crdt.Doc, prefix string) *crdt.YXmlText {
 // its version. Every version the transaction writes is the document it commits, and the room holds
 // that document. Warm and cold.
 func TestAPanickedWriteLeavesNoForkForTheTransactionsLaterWrites(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newForkReadsRoom(t)
 	checks := checkRenderings(service)
 	for _, mode := range forkReadsModes {

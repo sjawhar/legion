@@ -65,7 +65,7 @@ func (s *Service) IndexDocumentReferences(ctx context.Context, artifactID string
 	}
 	rendered := ledgerFrom(ctx).writtenRendering(artifactID)
 	if rendered.tree != nil && rendered.markdown != markdown {
-		slog.Warn("dispatch: a document version left its reference excerpts and blocks to the reconciliation: the tree its transaction wrote does not render as the version's markdown",
+		s.log().Warn("dispatch: a document version left its reference excerpts and blocks to the reconciliation: the tree its transaction wrote does not render as the version's markdown",
 			"artifact", artifactID, "version", version)
 		rendered = renderedTree{}
 	}
@@ -75,7 +75,7 @@ func (s *Service) IndexDocumentReferences(ctx context.Context, artifactID string
 	// block-index reconciliation (RunBlockIndexReconciliation) indexes the blocks and the
 	// mentions they hold out of the request.
 	if blocks := len(rendered.offsets); rendered.tree != nil && blocks > deferBlockIndexBlocks {
-		slog.Info("dispatch: a document version left its blocks to the block-index reconciliation: it holds more blocks than a write indexes in its own request",
+		s.log().Info("dispatch: a document version left its blocks to the block-index reconciliation: it holds more blocks than a write indexes in its own request",
 			"artifact", artifactID, "version", version, "blocks", blocks, "bound", deferBlockIndexBlocks)
 		rendered = renderedTree{}
 	}
@@ -250,12 +250,12 @@ func (s *Service) markStaleExcerpts(ctx context.Context) bool {
 	marked, err := refs.MarkStaleExcerpts(ctx, s.store.Pool)
 	if err != nil {
 		if ctx.Err() == nil {
-			slog.Error("dispatch: mark stale reference excerpts", "error", err)
+			s.log().Error("dispatch: mark stale reference excerpts", "error", err)
 		}
 		return false
 	}
 	if marked > 0 {
-		slog.Info("dispatch: marked stale reference excerpts owed", "mentions", marked)
+		s.log().Info("dispatch: marked stale reference excerpts owed", "mentions", marked)
 	}
 	return true
 }
@@ -267,13 +267,13 @@ func (s *Service) markStaleExcerpts(ctx context.Context) bool {
 func (s *Service) reconcileExcerptPass(ctx context.Context, schedule excerptSchedule) time.Time {
 	documents, full, err := s.reconcileReferenceExcerpts(ctx, schedule.retryBase)
 	if documents > 0 {
-		slog.Info("dispatch: reconciled reference excerpts", "documents", documents)
+		s.log().Info("dispatch: reconciled reference excerpts", "documents", documents)
 	}
 	switch {
 	case ctx.Err() != nil:
 		return time.Time{}
 	case err != nil:
-		slog.Error("dispatch: reconcile reference excerpts", "error", err)
+		s.log().Error("dispatch: reconcile reference excerpts", "error", err)
 		return time.Now().Add(schedule.retryBase)
 	case full:
 		return time.Now()
@@ -283,7 +283,7 @@ func (s *Service) reconcileExcerptPass(ctx context.Context, schedule excerptSche
 		if ctx.Err() != nil {
 			return time.Time{}
 		}
-		slog.Error("dispatch: reconcile reference excerpts", "error", err)
+		s.log().Error("dispatch: reconcile reference excerpts", "error", err)
 		return time.Now().Add(schedule.retryBase)
 	}
 	return next
@@ -314,7 +314,7 @@ func (s *Service) reconcileReferenceExcerpts(ctx context.Context, retryBase time
 	deferDocument := func(document refs.ExcerptDrift) {
 		if err := refs.DeferExcerpts(ctx, s.store.Pool, document.FromID, document.Version, retryBase, referenceExcerptRetryCeiling); err != nil {
 			if ctx.Err() == nil {
-				slog.Error("dispatch: reference excerpt reconciliation could not defer a document; the next batch reads it again",
+				s.log().Error("dispatch: reference excerpt reconciliation could not defer a document; the next batch reads it again",
 					"artifact", document.FromID, "error", err)
 			}
 			return
@@ -328,10 +328,10 @@ func (s *Service) reconcileReferenceExcerpts(ctx context.Context, retryBase time
 		case ctx.Err() != nil:
 			return documents, false, ctx.Err()
 		case errors.Is(err, ErrDocumentUnloadable), errors.Is(err, ErrDocOutsideSchema):
-			slog.Warn("dispatch: reference excerpt reconciliation cannot read the document; its mentions keep the document's name",
+			s.log().Warn("dispatch: reference excerpt reconciliation cannot read the document; its mentions keep the document's name",
 				"artifact", document.FromID, "error", err)
 		case err != nil:
-			slog.Error("dispatch: reference excerpt reconciliation deferred a document it could not read",
+			s.log().Error("dispatch: reference excerpt reconciliation deferred a document it could not read",
 				"artifact", document.FromID, "error", err)
 			deferDocument(document)
 			continue
@@ -345,7 +345,7 @@ func (s *Service) reconcileReferenceExcerpts(ctx context.Context, retryBase time
 			if ctx.Err() != nil {
 				return documents, false, ctx.Err()
 			}
-			slog.Error("dispatch: reference excerpt reconciliation deferred a document it could not record",
+			s.log().Error("dispatch: reference excerpt reconciliation deferred a document it could not record",
 				"artifact", document.FromID, "error", err)
 			deferDocument(document)
 			continue
@@ -357,7 +357,7 @@ func (s *Service) reconcileReferenceExcerpts(ctx context.Context, retryBase time
 			// recorded here owes nothing, and NextExcerptRetry drops rows of documents that owe
 			// nothing.
 			if err := refs.ClearExcerptBackoff(ctx, s.store.Pool, document.FromID); err != nil && ctx.Err() == nil {
-				slog.Error("dispatch: reference excerpt reconciliation could not clear a document's backoff",
+				s.log().Error("dispatch: reference excerpt reconciliation could not clear a document's backoff",
 					"artifact", document.FromID, "error", err)
 			}
 		}

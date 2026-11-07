@@ -156,6 +156,7 @@ func TestBlockChecksSpendNoSpanBudgetForEachBlock(t *testing.T) {
 // in each row, does, where written with its spans each row would read back two cells wide; a
 // two-cell header over one body cell spanning both does not.
 func TestAReadBackReadsATableInItsShapeWhenItsRowsHoldAsManyCells(t *testing.T) {
+	t.Parallel()
 	if err := ReadBackBlock(spanTable([][2]int{{2, 1}}, [][2]int{{2, 1}})).Shape; err != nil {
 		t.Errorf("a header cell over a body cell, each spanning two columns: %v, want the table's shape", err)
 	}
@@ -216,6 +217,7 @@ func headerWidth(markdown string) int {
 // The browser editor draws a colspan past 1000 as 1000, as HTML caps it, so a cell claiming more
 // is written across 1000 columns, even in a table whose widest row would let the grid reach past.
 func TestRenderWritesAColspanAsWideAsTheEditorDraws(t *testing.T) {
+	t.Parallel()
 	header := &Node{Type: "table_header_row"}
 	for range 1500 {
 		header.Children = append(header.Children, spanCell("table_header", 1, 1))
@@ -234,6 +236,7 @@ func TestRenderWritesAColspanAsWideAsTheEditorDraws(t *testing.T) {
 // A span reaches the renderer as the live Yjs tree holds it, where a peer's update decodes an
 // integer as an int64, so a colspan read from one is written across the columns it spans.
 func TestRenderWritesASpanAsAPeersUpdateCarriesIt(t *testing.T) {
+	t.Parallel()
 	source := crdt.New()
 	fragment := source.GetXmlFragment("prosemirror")
 	tree := &Node{Type: "doc", Children: []*Node{spanTable([][2]int{{1, 1}, {1, 1}}, [][2]int{{2, 1}})}}
@@ -270,6 +273,7 @@ func TestRenderWritesASpanAsAPeersUpdateCarriesIt(t *testing.T) {
 // is two cells to both. The renderer writes the fixture's markdown but for its last row, whose
 // first cell `even run \` it writes with the one backslash, before the space that ends the cell.
 func TestRenderWritesTableCellPipesAsTheBrowserEditorReadsThem(t *testing.T) {
+	t.Parallel()
 	fx := fixtureNamed(t, "table-cell-pipes")
 	tree, err := FromJSON(fx.PMJSON)
 	if err != nil {
@@ -310,6 +314,7 @@ func TestRenderWritesTableCellPipesAsTheBrowserEditorReadsThem(t *testing.T) {
 // run of backslashes, none included, text holding a backslash before a `|`, and code ending in a
 // backslash that a `|` outside it follows read back as they are.
 func TestRenderWritesACodePipeAfterAnOddRunOfBackslashesAsTextAfterTheCode(t *testing.T) {
+	t.Parallel()
 	code, strong := Mark{Type: "inlineCode"}, Mark{Type: "strong", Attrs: Attrs{"marker": "*"}}
 	authored := Mark{Type: "proofAuthored", Attrs: Attrs{"by": "human:alice"}}
 	text := func(value string, marks ...Mark) *Node { return &Node{Type: "text", Text: value, Marks: marks} }
@@ -397,6 +402,7 @@ func TestRenderWritesACodePipeAfterAnOddRunOfBackslashesAsTextAfterTheCode(t *te
 // write instead. A table inside a quote is found too. Code whose `|` an even run of backslashes
 // stands before, none included, and text holding a backslash before a `|`, are not found.
 func TestTableCodePipesNamesTheCellAndWhatToWriteInstead(t *testing.T) {
+	t.Parallel()
 	code := Mark{Type: "inlineCode"}
 	text := func(value string, marks ...Mark) []*Node { return []*Node{{Type: "text", Text: value, Marks: marks}} }
 	for _, test := range []struct {
@@ -466,6 +472,7 @@ func TestTableCodePipesNamesTheCellAndWhatToWriteInstead(t *testing.T) {
 // TableCodePipes finds every such code span of a document-level block, in document order: each
 // table of a quote, and a cell holding two spans twice, each with its own text.
 func TestTableCodePipesFindsEverySpanInDocumentOrder(t *testing.T) {
+	t.Parallel()
 	doc, err := Parse("> | Cmd | Note |\n> | --- | --- |\n> | run | x |\n>\n> text\n>\n> | Key |\n> | --- |\n> | y |\n")
 	if err != nil {
 		t.Fatal(err)

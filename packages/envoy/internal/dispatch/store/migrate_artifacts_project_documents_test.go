@@ -14,6 +14,7 @@ const artifactsProjectDocumentsVersion = 91
 // an agent conversation's file, migrates to this one, keeps all three rows, and indexes only the
 // project document, under the predicate the copy lookups use.
 func TestMigrationIndexesAProjectsUnlinkedDocuments(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store := openEmptyTestStore(t)
 	if err := store.migrate(ctx, migrationsThrough(t, artifactsProjectDocumentsVersion-1)); err != nil {

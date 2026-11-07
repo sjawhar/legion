@@ -5,6 +5,7 @@ package helper
 
 import (
 	"bufio"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -36,12 +37,39 @@ type Server struct {
 	// cmd/agent-secrets-helper sets leasetime.HelperMinRenew, the wait the broker's lease bound
 	// counts this renewer by, and a test sets a shorter one to drive the loop in real time.
 	MinRenew time.Duration
+	// EnrollRetryMin and EnrollRetryMax are the first and the longest wait of the retry that
+	// enrolls a session and revokes a lapsed enrollment, and RevokeRetry the one wait of the
+	// bounded revoke a retired session's enrollment goes to. Each falls back to the production
+	// constant below when it is zero, so only a caller that sets one changes anything. A test
+	// drives these loops through a fake or a local broker that answers at once, where the
+	// production waits are the whole of its clock, and sets short ones on its own Server
+	// (dispatch://INFRA-1075).
+	EnrollRetryMin time.Duration
+	EnrollRetryMax time.Duration
+	RevokeRetry    time.Duration
 	// dormantGraceNS is DefaultDormantGrace unless SetDormantGrace names another: how long a
 	// named session's identity is kept for it to come back to before SweepDormant revokes it.
 	// Atomic, because a test sets it while the Server's own goroutines (retire, Recover's log
 	// line) read it — a plain field there is a data race, and `go test -race` caught it.
 	dormantGraceNS atomic.Int64
 }
+
+// The waits a Server that sets none of its own retry durations uses: a session's enrollment and
+// a lapsed enrollment's revoke retry from a second out to a minute, and the bounded revoke tries
+// three times two seconds apart.
+const (
+	defaultEnrollRetryMin = time.Second
+	defaultEnrollRetryMax = time.Minute
+	defaultRevokeRetry    = 2 * time.Second
+)
+
+func (s *Server) enrollRetryMin() time.Duration {
+	return cmp.Or(s.EnrollRetryMin, defaultEnrollRetryMin)
+}
+func (s *Server) enrollRetryMax() time.Duration {
+	return cmp.Or(s.EnrollRetryMax, defaultEnrollRetryMax)
+}
+func (s *Server) revokeRetry() time.Duration { return cmp.Or(s.RevokeRetry, defaultRevokeRetry) }
 
 // Serve accepts until ctx ends. Each connection carries one request.
 func (s *Server) Serve(ctx context.Context, ln *net.UnixListener) error {
@@ -958,7 +986,7 @@ func (s *Server) enrollLoop(ctx context.Context, sess *Session) {
 		pass := sess.identity().Generation
 		// A login wakes the retry, so a session registered before it enrolls within about a second
 		// rather than when a backoff of up to a minute comes round.
-		enrolled := retryUntilStop(ctx, sess.stop, s.Broker.CredentialInstalled, 0, time.Second, time.Minute, func(attempt int, err error, delay time.Duration, retrying bool) {
+		enrolled := retryUntilStop(ctx, sess.stop, s.Broker.CredentialInstalled, 0, s.enrollRetryMin(), s.enrollRetryMax(), func(attempt int, err error, delay time.Duration, retrying bool) {
 			if renamed {
 				return
 			}
@@ -1061,7 +1089,7 @@ const (
 func (s *Server) confirmInherited(ctx context.Context, sess *Session, pass identity) (time.Time, confirmation) {
 	var lease time.Time
 	outcome := confirmStopped
-	kept := retryUntilStop(ctx, sess.stop, s.Broker.CredentialInstalled, 0, time.Second, time.Minute, func(attempt int, err error, delay time.Duration, retrying bool) {
+	kept := retryUntilStop(ctx, sess.stop, s.Broker.CredentialInstalled, 0, s.enrollRetryMin(), s.enrollRetryMax(), func(attempt int, err error, delay time.Duration, retrying bool) {
 		switch {
 		case errors.Is(err, errRenamed):
 			outcome = confirmMoved
@@ -1185,7 +1213,7 @@ func (s *Server) renewLoop(ctx context.Context, sess *Session, lease time.Time, 
 // again, since the session's key went with it. ctx done means the whole daemon is exiting, and
 // nothing further is attempted.
 func (s *Server) revokeLapsed(ctx context.Context, sess *Session, id string) bool {
-	revoked := retryUntilStop(ctx, sess.stop, s.Broker.CredentialInstalled, 0, time.Second, time.Minute, func(attempt int, err error, delay time.Duration, retrying bool) {
+	revoked := retryUntilStop(ctx, sess.stop, s.Broker.CredentialInstalled, 0, s.enrollRetryMin(), s.enrollRetryMax(), func(attempt int, err error, delay time.Duration, retrying bool) {
 		if s.lacksCredential(err) {
 			s.Log.Error("session cannot enroll: revoking its lapsed enrollment first needs a launcher credential, and the helper holds none; run: agent-secrets machine login, and have a human approve it",
 				"runtime_id", sess.RuntimeID(), "enrollment_id", id, "why", s.Broker.noCredentialReason(), "in", delay)
@@ -1353,7 +1381,7 @@ func (s *Server) SweepLoop(ctx context.Context, every time.Duration) {
 // revoke is the bounded revoke: three tries, 2 s apart, then the lease is the fallback. It uses
 // revokeOnce, so an enrollment of another operator counts as done here too.
 func (s *Server) revoke(ctx context.Context, id string) {
-	retryUntilStop(ctx, nil, nil, 3, 2*time.Second, 2*time.Second, func(attempt int, err error, delay time.Duration, retrying bool) {
+	retryUntilStop(ctx, nil, nil, 3, s.revokeRetry(), s.revokeRetry(), func(attempt int, err error, delay time.Duration, retrying bool) {
 		if !retrying {
 			s.Log.Warn("revoke failed; the lease lapses on its own", "enrollment_id", id, "error", err)
 		}

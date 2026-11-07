@@ -18,6 +18,7 @@ import (
 // connection event that woke it before the connection was connected: about 5 over the outage and
 // nats.go's reconnect wait of up to 1.1 s, where a 10 ms poll would pass some 300 times.
 func TestAPublishWaitingForAReconnectWakesOnTheReconnect(t *testing.T) {
+	t.Parallel()
 	const outage = 2 * time.Second
 	server, url := testnats.Start(t)
 	client, err := Connect([]string{url})
@@ -30,10 +31,10 @@ func TestAPublishWaitingForAReconnectWakesOnTheReconnect(t *testing.T) {
 	client.mu.Unlock()
 
 	server.Stop(t)
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(busWait)
 	for client.Connected() {
 		if time.Now().After(deadline) {
-			t.Fatal("the client still reads connected 5s after its server stopped")
+			t.Fatalf("the client still reads connected %s after its server stopped", busWait)
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
@@ -57,14 +58,14 @@ func TestAPublishWaitingForAReconnectWakesOnTheReconnect(t *testing.T) {
 	select {
 	case <-reconnected:
 		reconnectedAt = time.Now()
-	case <-time.After(10 * time.Second):
-		t.Fatal("the client did not reconnect within 10s of its server starting again")
+	case <-time.After(busWait):
+		t.Fatalf("the client did not reconnect within %s of its server starting again", busWait)
 	}
 	var result outcome
 	select {
 	case result = <-published:
-	case <-time.After(5 * time.Second):
-		t.Fatal("the publish did not return within 5s of the reconnect")
+	case <-time.After(busWait):
+		t.Fatalf("the publish did not return within %s of the reconnect", busWait)
 	}
 	if result.err != nil {
 		t.Fatalf("the publish waiting through the reconnect answered %v, want nil", result.err)
@@ -85,6 +86,7 @@ func TestAPublishWaitingForAReconnectWakesOnTheReconnect(t *testing.T) {
 // ends. A publish waiting for the reconnect still returns once the connection is connected: its
 // wait reads the connection's own status again every reconnectRecheck, with the event still queued.
 func TestAPublishWaitingForAReconnectWhoseEventIsDelayedStillReturns(t *testing.T) {
+	t.Parallel()
 	server, url := testnats.Start(t)
 	client, err := Connect([]string{url})
 	if err != nil {
@@ -104,10 +106,10 @@ func TestAPublishWaitingForAReconnectWhoseEventIsDelayedStillReturns(t *testing.
 	t.Cleanup(func() { close(release) })
 
 	server.Stop(t)
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(busWait)
 	for client.Connected() {
 		if time.Now().After(deadline) {
-			t.Fatal("the client still reads connected 5s after its server stopped")
+			t.Fatalf("the client still reads connected %s after its server stopped", busWait)
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
@@ -122,8 +124,8 @@ func TestAPublishWaitingForAReconnectWhoseEventIsDelayedStillReturns(t *testing.
 	select {
 	case <-reconnected:
 		reconnectedAt = time.Now()
-	case <-time.After(10 * time.Second):
-		t.Fatal("the client did not reconnect within 10s of its server starting again")
+	case <-time.After(busWait):
+		t.Fatalf("the client did not reconnect within %s of its server starting again", busWait)
 	}
 	select {
 	case err := <-published:

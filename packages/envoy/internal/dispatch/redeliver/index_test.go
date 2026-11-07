@@ -20,6 +20,7 @@ import (
 // by matching keys with it rather than by deriving the days, hours and minutes a decomposition
 // should hold, which would only restate pendingFilters.
 func TestPendingFiltersCoverTheWindowWithoutOverlapping(t *testing.T) {
+	t.Parallel()
 	base := time.Date(2025, 3, 14, 9, 26, 53, 0, time.UTC)
 	day := time.Date(2025, 3, 14, 0, 0, 0, 0, time.UTC)
 	for _, tc := range []struct {

@@ -79,6 +79,7 @@ func compareBlockLinks(t *testing.T, stage string, got []model.BlockLink, want [
 // are exactly its two, newest first, each dated by the version that wrote it; the links back are
 // exactly the spec's one.
 func TestBlockLinksListLinksFromBlocksOfOneDocumentToBlocksOfAnother(t *testing.T) {
+	t.Parallel()
 	handler, database := blockIndexHandler(t)
 	createReferenceAPIProject(t, handler, "CORE")
 	holdIt := ":::callout{#hold-it kind=\"note\" title=\"\"}\nHold it.\n:::"
@@ -145,6 +146,7 @@ func TestBlockLinksListLinksFromBlocksOfOneDocumentToBlocksOfAnother(t *testing.
 // A document's blocks can link to one another: the links from a document to itself are those.
 // A document with none answers an empty list, never null.
 func TestBlockLinksListALinkWithinOneDocument(t *testing.T) {
+	t.Parallel()
 	handler, database := blockIndexHandler(t)
 	createReferenceAPIProject(t, handler, "CORE")
 	issue, blockRef := createShipItSpec(t, handler, "CORE")
@@ -178,6 +180,7 @@ func TestBlockLinksListALinkWithinOneDocument(t *testing.T) {
 // Each end must name a document: a block, an issue or no reference at all is 400, and a document
 // that does not exist is 404.
 func TestBlockLinksRefuseAnEndThatIsNotADocument(t *testing.T) {
+	t.Parallel()
 	handler, _ := blockIndexHandler(t)
 	createReferenceAPIProject(t, handler, "CORE")
 	issue, blockRef := createShipItSpec(t, handler, "CORE")

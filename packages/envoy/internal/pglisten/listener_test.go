@@ -45,7 +45,11 @@ func newListenerProbe() *listenerProbe {
 }
 
 // listener is a Listener that dials with dial and reports to the probe, at its defaults
-// otherwise.
+// otherwise but for the backoff: a test here that loses a connection is about what the listener
+// does next, not about how long it waits first, and the default's first wait is a second plus up
+// to half of it again, which each such test slept through. What that wait is for every caller
+// that sets none is RedialBackoff's own test, and the test of a listener returning while it
+// backs off sets a wait of its own.
 func (p *listenerProbe) listener(dial func(context.Context) (*pgx.Conn, error)) *Listener {
 	return &Listener{
 		Dial:     p.dialing(dial),
@@ -57,6 +61,7 @@ func (p *listenerProbe) listener(dial func(context.Context) (*pgx.Conn, error)) 
 			}
 		},
 		OnNotify: p.notify,
+		Backoff:  func(int) time.Duration { return 20 * time.Millisecond },
 	}
 }
 
@@ -170,6 +175,7 @@ func waitBackendGone(t *testing.T, database *store.Store, pid uint32, within tim
 }
 
 func TestTheListenerReconnectsAfterItsBackendIsKilled(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	probe := newListenerProbe()
 	runListener(t, probe, probe.listener(database.Pool.Listener))
@@ -300,7 +306,11 @@ func databaseAddress(database *store.Store) string {
 // A healthy connection the listener has been idle on for several idle periods is pinged, not
 // replaced: one dial, one OnConnected, the backend's last statement the ping, and a notification
 // still reaches OnNotify on it.
+//
+// Real time, at the idle period and ping timeout this sets: both are waits on a live Postgres
+// connection, which no synctest bubble can hold.
 func TestTheListenerKeepsAHealthyIdleConnection(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	probe := newListenerProbe()
 	listener := probe.listener(database.Pool.Listener)
@@ -331,7 +341,10 @@ func TestTheListenerKeepsAHealthyIdleConnection(t *testing.T) {
 	}
 }
 
+// Real time, at the idle period and ping timeout this sets: the half-open connection is a real
+// one behind a blinding TCP proxy, which no synctest bubble can hold.
 func TestTheListenerReplacesAHalfOpenConnection(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	proxy := newBlindingProxy(t, databaseAddress(database))
 	probe := newListenerProbe()
@@ -358,6 +371,7 @@ func TestTheListenerReplacesAHalfOpenConnection(t *testing.T) {
 // OnNotify gets each of the listener's three channels' payloads exactly as sent, in the order
 // sent, and nothing from a channel the listener does not listen on.
 func TestTheListenerPassesEachPayloadUnchanged(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	probe := newListenerProbe()
 	runListener(t, probe, probe.listener(database.Pool.Listener))
@@ -391,6 +405,7 @@ func TestTheListenerPassesEachPayloadUnchanged(t *testing.T) {
 // A listener listens on the channels it names and no others, and needs no OnConnected: a caller
 // with nothing to catch up after a LISTEN leaves it nil (Listener.OnConnected).
 func TestAListenerOnOneChannelWithoutAnOnConnectedHearsThatChannelAlone(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	probe := newListenerProbe()
 	listener := &Listener{
@@ -438,6 +453,7 @@ func TestAListenerOnOneChannelWithoutAnOnConnectedHearsThatChannelAlone(t *testi
 // notifies delivery_changes and delivery_freshness (migration 0100) and an event insert
 // dispatch_events (migration 0107).
 func TestTheListenerHearsTheTriggersItListensFor(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	probe := newListenerProbe()
 	runListener(t, probe, probe.listener(database.Pool.Listener))
@@ -566,7 +582,11 @@ func TestTheListenerBacksOffFromOneSecondToThirtyWithJitter(t *testing.T) {
 // Without the check the first notification called a nil func, and the panic took the whole
 // process with it - the delivery hub's listener and the event stream relay's included, since
 // they run in it.
+//
+// Real time, at the idle period and ping timeout this sets: both are waits on a live Postgres
+// connection, which no synctest bubble can hold.
 func TestAListenerWithNoOnNotifyDropsItsNotificationsAndDoesNotPanic(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	probe := newListenerProbe()
 	listener := probe.listener(database.Pool.Listener)

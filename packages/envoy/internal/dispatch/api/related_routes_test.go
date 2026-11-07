@@ -58,6 +58,7 @@ func relatedOwners(suggestions testSuggestions) []string {
 // A title through GET finds the item holding its rare words and none of the thirty sharing only
 // a common one, and the check leaves no row behind.
 func TestRelatedRouteGetWithATitleFindsTheRareWordMatchAndWritesNothing(t *testing.T) {
+	t.Parallel()
 	handler, database, _ := newTestServer(t, testServerOptions{})
 	createSuggestionProject(t, handler, "RGET")
 	for index := range 30 {
@@ -80,6 +81,7 @@ func TestRelatedRouteGetWithATitleFindsTheRareWordMatchAndWritesNothing(t *testi
 // A spec longer than a URL may carry goes through POST, is checked whole (the rare words sit at
 // its end) and writes nothing; the same text through GET is over the search cap.
 func TestRelatedRoutePostChecksALongSpec(t *testing.T) {
+	t.Parallel()
 	handler, database, _ := newTestServer(t, testServerOptions{})
 	createSuggestionProject(t, handler, "RPOST")
 	target := createSearchIssue(t, handler, "RPOST", "Brewing records", "Our zymurgy fermentation log.")
@@ -112,6 +114,7 @@ func TestRelatedRoutePostChecksALongSpec(t *testing.T) {
 // the items; another issue holding the words is still listed. An issue that is not the project's
 // is refused.
 func TestRelatedRouteExcludeIssueLeavesItsOwnItemsOut(t *testing.T) {
+	t.Parallel()
 	handler, database, _ := newTestServer(t, testServerOptions{})
 	createSuggestionProject(t, handler, "REXCL")
 	createSuggestionProject(t, handler, "ROTHER")
@@ -151,6 +154,7 @@ func TestRelatedRouteExcludeIssueLeavesItsOwnItemsOut(t *testing.T) {
 // keywords_only skips the meaning search a configured embedder would otherwise answer: the result
 // says it searched by keywords only because that was asked for, and the text is never embedded.
 func TestRelatedRouteKeywordsOnlySkipsMeaning(t *testing.T) {
+	t.Parallel()
 	const title, text = "Nightly backups overrun their window", "Nightly snapshots finish late"
 	embedder := &fakeEmbedder{vectors: map[string][]float32{
 		issueEmbeddingText(title, ""): angledVector(0.9, 2),
@@ -190,6 +194,7 @@ func TestRelatedRouteKeywordsOnlySkipsMeaning(t *testing.T) {
 // The bare path, as the deployment's production check GETs it, answers 200 with a check not made
 // for a blank text; an unknown project is 404 as on every {key} route.
 func TestRelatedRouteBareGetIsNotMadeAndAnUnknownProjectIs404(t *testing.T) {
+	t.Parallel()
 	handler, database, _ := newTestServer(t, testServerOptions{})
 	createSuggestionProject(t, handler, "RBARE")
 	createSearchIssue(t, handler, "RBARE", "Zymurgy ledger drifts", "")
@@ -278,6 +283,7 @@ func sameTiming(got, want model.RelatedCheckTiming) bool {
 // project and source kind filters narrow it. A check whose request ended first (cancelled) is
 // neither completed nor skipped for time.
 func TestRelatedChecksRouteCountsAndPercentilesOverTheWindow(t *testing.T) {
+	t.Parallel()
 	handler, database, _ := newTestServer(t, testServerOptions{})
 	createSuggestionProject(t, handler, "REC")
 	createSuggestionProject(t, handler, "RECB")
@@ -363,6 +369,7 @@ func TestRelatedChecksRouteCountsAndPercentilesOverTheWindow(t *testing.T) {
 // A source kind the table does not hold, or a bound that is not a time or ends the window before
 // it starts, is refused.
 func TestRelatedChecksRouteRefusesABadFilter(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	for _, query := range []string{
 		"source_kind=comment",

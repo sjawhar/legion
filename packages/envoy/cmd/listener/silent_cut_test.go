@@ -37,6 +37,7 @@ func disconnectedUnderName(output, name string) bool {
 // the cut within seconds whether or not that call site carries the option, and would prove
 // nothing.
 func TestTheListenersNATSClientReportsASilentCutWithinSeconds(t *testing.T) {
+	t.Parallel()
 	server, uri := testnats.Start(t)
 	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), uri, "silent-cut")
 	listener.waitHealthy(t)

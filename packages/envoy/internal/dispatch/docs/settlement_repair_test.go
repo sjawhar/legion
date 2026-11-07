@@ -26,6 +26,7 @@ import (
 // browser edits in between keeps the edit, and the stored document and the version the settlement
 // writes hold both (LEGION-479).
 func TestSettlementRepairKeepsAnEditMadeAfterItsRead(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, ":::ask{#ask-block urgency=\"med\" multiple=\"false\" state=\"open\"}\nShip it?\n:::\n\nContext before.\n")
@@ -54,6 +55,7 @@ func TestSettlementRepairKeepsAnEditMadeAfterItsRead(t *testing.T) {
 // before it versions writes the version of the document as it stands, the edit included, rather
 // than of the tree its stamp read (LEGION-479).
 func TestSettlementStampVersionKeepsAnEditMadeAfterItsRead(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "before")
@@ -83,6 +85,7 @@ func TestSettlementStampVersionKeepsAnEditMadeAfterItsRead(t *testing.T) {
 // replacement: its version is read from the document it held, which would never get the repair.
 // The settlement the replacement's load arms versions the document with the repair (LEGION-479).
 func TestSettlementWhoseRoomWasReplacedLeavesTheDocumentToTheReplacement(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, ":::ask{#ask-block urgency=\"med\" multiple=\"false\" state=\"open\"}\nShip it?\n:::\n\nContext before.\n")
@@ -99,7 +102,7 @@ func TestSettlementWhoseRoomWasReplacedLeavesTheDocumentToTheReplacement(t *test
 		// This raw ygo close stands in for the idle sweep, which can evict the idle room between
 		// settlement's read and repair because no Server.Apply holds it then.
 		go func() { _ = service.srv.Server.CloseRoom(room, true) }()
-		deadline := time.Now().Add(5 * time.Second)
+		deadline := time.Now().Add(roomWait(t))
 		for service.srv.GetDoc(room) == held {
 			if time.Now().After(deadline) {
 				t.Error("the room was never closed")
@@ -127,6 +130,7 @@ func TestSettlementWhoseRoomWasReplacedLeavesTheDocumentToTheReplacement(t *test
 // edit's author too: the edit's own settlement finds the document already versioned and writes no
 // version that could credit them (LEGION-479).
 func TestSettlementRepairCreditsTheAuthorOfAnEditItsVersionHolds(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, ":::ask{#ask-block urgency=\"med\" multiple=\"false\" state=\"open\"}\nShip it?\n:::\n\nContext before.\n")
@@ -161,6 +165,7 @@ func TestSettlementRepairCreditsTheAuthorOfAnEditItsVersionHolds(t *testing.T) {
 // from - while that version renders - is not in the version, so the version does not credit its
 // author. The version the edit's own settlement writes holds it and credits them (LEGION-479).
 func TestSettlementRepairCreditsNoAuthorOfAnEditMadeWhileItsVersionRenders(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, ":::ask{#ask-block urgency=\"med\" multiple=\"false\" state=\"open\"}\nShip it?\n:::\n\nContext before.\n")
@@ -224,6 +229,7 @@ func latestVersionAuthors(t *testing.T, service *Service, artifactID string) []m
 // the edit's own append - and the edit's own settlement finds the document already versioned
 // (LEGION-479).
 func TestSettlementStoresAnEditItsRepairedVersionHoldsBeforeTheRepair(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, ":::ask{#ask-block urgency=\"med\" multiple=\"false\" state=\"open\"}\nShip it?\n:::\n\nContext before.\n")
@@ -274,6 +280,7 @@ func requireLatestVersionMarkdown(t *testing.T, service *Service, artifactID, wa
 // scheduled. The repair's transaction, which changed nothing, still reports an update; its slot is
 // finished with that update and the room's persistence worker consumes it (LEGION-479).
 func TestSettlementRepairOfAnAskAPeerDeletedWritesNothing(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, ":::ask{#ask-block urgency=\"med\" multiple=\"false\" state=\"open\"}\nShip it?\n:::\n\nContext.\n")
@@ -320,6 +327,7 @@ func latestVersionNumber(t *testing.T, service *Service, artifactID string) int 
 // persistence worker at the next update it is handed, and every later update of the room with it
 // (LEGION-479).
 func TestSettlementReleasesTheSlotOfAStampTheDocumentNoLongerNeeds(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "before")
@@ -358,6 +366,7 @@ func TestSettlementReleasesTheSlotOfAStampTheDocumentNoLongerNeeds(t *testing.T)
 // content change, for which the next settlement would version a document nobody edited
 // (LEGION-479).
 func TestBackfillStoresNothingForAStampTheDocumentNoLongerNeeds(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before")
 	seedUnidentifiedProofDocument(t, database, artifactID, "before")
@@ -401,7 +410,7 @@ func TestBackfillStoresNothingForAStampTheDocumentNoLongerNeeds(t *testing.T) {
 		tree.Children[0].Attrs[pmdoc.BlockIDAttr] = "marker"
 		return tree
 	})
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), roomWait(t))
 	defer cancel()
 	if err := service.waitForPendingUpdates(ctx, artifactID); err != nil {
 		t.Fatalf("wait for the room's updates to reach persistence: %v", err)
@@ -418,6 +427,7 @@ func TestBackfillStoresNothingForAStampTheDocumentNoLongerNeeds(t *testing.T) {
 // room, and the room's persistence worker is handed each on its own. Both are held from it and
 // released once each reaches it (LEGION-479).
 func TestSettlementThatStampsAndRepairsReleasesItsSlots(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, ":::ask{#ask-block urgency=\"med\" multiple=\"false\" state=\"open\"}\nShip it?\n:::\n")
@@ -447,6 +457,7 @@ func TestSettlementThatStampsAndRepairsReleasesItsSlots(t *testing.T) {
 // settlement holds, waits for the repair's commit to reach the room's persistence rather than
 // retiring the room's worker under it (roomServer, LEGION-498).
 func TestARoomThatFailsWhileASettlementCommitsIntoItRecovers(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	pause := pauseRepairCommits(service)
@@ -486,6 +497,7 @@ func TestARoomThatFailsWhileASettlementCommitsIntoItRecovers(t *testing.T) {
 // the settlement has. Shutdown's settlement is refused its broadcast once the room is shutting
 // down and fails the room, whose unstored updates its browsers send again when they reconnect.
 func TestASecondWriterIntoARoomClosingUnderASettlementsRepairReturns(t *testing.T) {
+	t.Parallel()
 	for _, closer := range []struct {
 		name  string
 		close func(service *Service, artifactID string) error
@@ -550,7 +562,7 @@ func TestASecondWriterIntoARoomClosingUnderASettlementsRepairReturns(t *testing.
 			}{{"the settlement", settled}, {"the second writer", written}, {"the room's close", closed}} {
 				select {
 				case <-step.done:
-				case <-time.After(10 * time.Second):
+				case <-time.After(roomWait(t)):
 					service.purgeSuppressedPersistence(artifactID)
 					endRoomLockHolders(t, service)
 					t.Fatalf("deadlock: %s never returned once the room closed under the settlement's repair commit", step.name)
@@ -580,7 +592,7 @@ func owedStamp(t *testing.T, service *Service, artifactID string) uint64 {
 	seedServiceText(t, service, artifactID, "before")
 	settleCurrentGeneration(t, service, artifactID)
 	editLiveTree(t, service, artifactID, appendUnidentifiedBlocks(t, "added"))
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), roomWait(t))
 	defer cancel()
 	if err := service.waitForPendingUpdates(ctx, artifactID); err != nil {
 		t.Fatalf("wait for the edit to reach persistence: %v", err)
@@ -621,7 +633,7 @@ func settleUnderPause(t *testing.T, service *Service, pause *repairCommitPause, 
 	case <-pause.held:
 	case <-settled:
 		t.Fatal("the settlement returned without committing into the room")
-	case <-time.After(10 * time.Second):
+	case <-time.After(roomWait(t)):
 		t.Fatal("the settlement never committed into the room")
 	}
 	return settled
@@ -796,7 +808,7 @@ func appendUnidentifiedBlocks(t *testing.T, markdown string) func(*pmdoc.Node) *
 // so the worker it holds lets the test's shutdown finish.
 func requireNoSuppressedSlots(t *testing.T, service *Service, room, when string) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(roomWait(t))
 	for {
 		service.suppressMu.Lock()
 		queued := len(service.suppressed[room])

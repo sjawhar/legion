@@ -87,6 +87,18 @@ func claimHandler(t *testing.T, live *liveRegistry) (http.Handler, *store.Store,
 	return handler, database, deps
 }
 
+// claimWalkHandler is claimHandler whose legion-label walk runs sql in place of the production
+// statement, and the server behind it, so a test can put the production statement back part-way
+// through by clearing the seam (server.legionStatusSQL).
+func claimWalkHandler(t *testing.T, live *liveRegistry, sql string) (http.Handler, *server) {
+	t.Helper()
+	handler, _, _, served := newRegisteredTestServer(t, testServerOptions{
+		envoyURL:        claimListener(t, live, nil).URL,
+		legionStatusSQL: sql,
+	})
+	return handler, served
+}
+
 // awaitLookup waits for the listener lookup a gated test is expecting.
 func awaitLookup(t *testing.T, lookups <-chan int, want int) {
 	t.Helper()
@@ -95,7 +107,7 @@ func awaitLookup(t *testing.T, lookups <-chan int, want int) {
 		if got != want {
 			t.Fatalf("listener lookup %d, want lookup %d", got, want)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(concurrentWait):
 		t.Fatalf("the request never took listener lookup %d", want)
 	}
 }
@@ -178,6 +190,7 @@ func claimEvents(t *testing.T, handler http.Handler, key string) []claimEventRow
 }
 
 func TestClaimRefusesALiveHolderAndPassesOnWhenThatSessionEnds(t *testing.T) {
+	t.Parallel()
 	live := &liveRegistry{}
 	live.set("session-one", "session-two")
 	handler, _, _ := claimHandler(t, live)
@@ -257,6 +270,7 @@ func TestClaimRefusesALiveHolderAndPassesOnWhenThatSessionEnds(t *testing.T) {
 // has no session to message, so it names the person; and only POST /claim takes {force: true},
 // so a release refusal never points at a force that route does not have.
 func TestClaimRefusalNamesTheHolderAndOnlyWhatTheRouteOffers(t *testing.T) {
+	t.Parallel()
 	live := &liveRegistry{}
 	live.set("session-one")
 	lookups := make(chan int, 8)
@@ -310,6 +324,7 @@ func TestClaimRefusalNamesTheHolderAndOnlyWhatTheRouteOffers(t *testing.T) {
 }
 
 func TestClaimRecordsTheRequestsOwnActor(t *testing.T) {
+	t.Parallel()
 	live := &liveRegistry{}
 	live.set("session-one")
 	handler, _, _ := claimHandler(t, live)
@@ -361,6 +376,7 @@ func TestClaimRecordsTheRequestsOwnActor(t *testing.T) {
 // The claim and the status are separate records: one names the session implementing the issue,
 // the other is how humans track where work has got to.
 func TestClaimAndStatusMoveIndependently(t *testing.T) {
+	t.Parallel()
 	live := &liveRegistry{}
 	live.set("session-one")
 	handler, _, _ := claimHandler(t, live)
@@ -429,6 +445,7 @@ func labelledIssueKey(t *testing.T, handler http.Handler, project, title string,
 // runs only its daemon writes the status, so both routes have to say so — on the issue's own
 // label whatever case it was typed in, and on a child that carries no label of its own.
 func TestClaimAnswersWhoOwnsTheIssuesStatus(t *testing.T) {
+	t.Parallel()
 	live := &liveRegistry{}
 	live.set("session-one")
 	handler, _, _ := claimHandler(t, live)
@@ -498,22 +515,18 @@ func TestClaimAnswersWhoOwnsTheIssuesStatus(t *testing.T) {
 // TestClaimSurvivesAFailingLegionLabelWalk: the walk that answers who owns the status runs inside
 // the claim's own transaction, so its failure once rolled back a claim that had otherwise
 // succeeded. A claim is what stops two sessions working one issue; the advisory answer is not.
-// The failure is forced by pointing legionManagedStatusSQL at a statement Postgres refuses.
+// The failure is forced by pointing this server's legion-label walk (server.legionStatusSQL) at
+// a statement Postgres refuses.
 func TestClaimSurvivesAFailingLegionLabelWalk(t *testing.T) {
+	t.Parallel()
 	live := &liveRegistry{}
 	live.set("session-one")
-	handler, _, _ := claimHandler(t, live)
+	// The statement is this server's alone, not the package's, so this test runs beside the
+	// package's parallel ones. The package's other seam, server.adviceQueryHook, is not used
+	// instead because it fires from computeWriteAdvice (write_advice.go) and never reaches
+	// claimWrite, and a hook that exists only for this test has no business in the claim path.
+	handler, _ := claimWalkHandler(t, live, `select from no_such_relation_for_the_legion_walk`)
 	key := claimIssueKey(t, handler, "triage")
-
-	// Swapping a package-level statement is safe only because no test in internal/dispatch/api
-	// calls t.Parallel, so no other test's walk can read the broken one before the cleanup puts
-	// it back; a test added here that does call t.Parallel breaks this one. The package's
-	// purpose-built seam, server.adviceQueryHook, is not used instead because it fires from
-	// computeWriteAdvice (write_advice.go) and never reaches claimWrite, and a hook that exists
-	// only for this test has no business in the claim path.
-	healthy := legionManagedStatusSQL
-	legionManagedStatusSQL = `select from no_such_relation_for_the_legion_walk`
-	t.Cleanup(func() { legionManagedStatusSQL = healthy })
 
 	claimed := bearerRequest(t, handler, http.MethodPost, "/api/v1/issues/"+key+"/claim", map[string]any{
 		"actor": claimActorBody("session-one", "Implementer"),
@@ -547,18 +560,15 @@ func TestClaimSurvivesAFailingLegionLabelWalk(t *testing.T) {
 // the same predicate (issue_claim.go, write_advice.go).
 //
 // The statement below stands in for a walk that hangs, as the test above stands in for one
-// Postgres refuses, under the same package-level swap and the same no-t.Parallel constraint. It
-// sleeps ten times the bound, so what ends it is the bound; nothing in this test races a Go
-// timer against the database, and nothing asserts on elapsed time.
+// Postgres refuses, through the same per-server seam. It sleeps ten times the bound, so what
+// ends it is the bound; nothing in this test races a Go timer against the database, and nothing
+// asserts on elapsed time.
 func TestClaimSurvivesAHangingLegionLabelWalk(t *testing.T) {
+	t.Parallel()
 	live := &liveRegistry{}
 	live.set("session-one")
-	handler, _, _ := claimHandler(t, live)
+	handler, served := claimWalkHandler(t, live, `select count(*) > 0 from (select pg_sleep(5)) slow where $1 <> ''`)
 	key := claimIssueKey(t, handler, "triage")
-
-	healthy := legionManagedStatusSQL
-	legionManagedStatusSQL = `select count(*) > 0 from (select pg_sleep(5)) slow where $1 <> ''`
-	t.Cleanup(func() { legionManagedStatusSQL = healthy })
 
 	claimed := bearerRequest(t, handler, http.MethodPost, "/api/v1/issues/"+key+"/claim", map[string]any{
 		"actor": claimActorBody("session-one", "Implementer"),
@@ -581,7 +591,9 @@ func TestClaimSurvivesAHangingLegionLabelWalk(t *testing.T) {
 	if issue := decodeBody[claimedIssue](t, read); issue.Claim == nil || issue.Claim.Actor.ID != "session-one" {
 		t.Fatalf("the issue holds no claim after a hanging walk: %s", read.Body.String())
 	}
-	legionManagedStatusSQL = healthy
+	// Back to the production statement, which this server alone ran the stand-in for, so the
+	// release below answers at once rather than waiting the bound out a second time.
+	served.legionStatusSQL = ""
 	released := bearerRequest(t, handler, http.MethodDelete, "/api/v1/issues/"+key+"/claim", map[string]any{
 		"actor": claimActorBody("session-one", "Implementer"),
 	})
@@ -627,6 +639,7 @@ func releasedHolder(t *testing.T, handler http.Handler, key string) string {
 }
 
 func TestClaimReleaseBelongsToItsHolderAHumanOrAnEndedSession(t *testing.T) {
+	t.Parallel()
 	live := &liveRegistry{}
 	live.set("session-one", "session-two")
 	handler, _, _ := claimHandler(t, live)
@@ -682,6 +695,7 @@ func TestClaimReleaseBelongsToItsHolderAHumanOrAnEndedSession(t *testing.T) {
 }
 
 func TestClosingAnIssueReleasesItsClaimAndAClosedIssueTakesNone(t *testing.T) {
+	t.Parallel()
 	live := &liveRegistry{}
 	live.set("session-one")
 	handler, _, _ := claimHandler(t, live)
@@ -737,6 +751,7 @@ func TestClosingAnIssueReleasesItsClaimAndAClosedIssueTakesNone(t *testing.T) {
 }
 
 func TestClaimIsOnEveryIssueRead(t *testing.T) {
+	t.Parallel()
 	live := &liveRegistry{}
 	live.set("session-one")
 	handler, _, _ := claimHandler(t, live)
@@ -772,6 +787,7 @@ func TestClaimIsOnEveryIssueRead(t *testing.T) {
 // must notice under the lock and redo the cycle rather than apply a verdict about a session
 // that no longer holds the issue.
 func TestClaimRedoesTheCycleWhenTheHolderChangesBeforeTheLock(t *testing.T) {
+	t.Parallel()
 	live := &liveRegistry{}
 	live.set("session-one", "session-two", "session-three")
 	release := make(chan struct{})
@@ -843,6 +859,7 @@ func TestClaimRedoesTheCycleWhenTheHolderChangesBeforeTheLock(t *testing.T) {
 // another live session in between, the locked decision must not read that session's absence
 // from the stale list as "ended" and take a live agent's work without force.
 func TestClaimNeverTakesALiveHoldersClaimFoundAfterTheSnapshot(t *testing.T) {
+	t.Parallel()
 	live := &liveRegistry{}
 	live.set("session-one", "session-two")
 	release := make(chan struct{})
@@ -911,6 +928,7 @@ func currentHolder(t *testing.T, handler http.Handler, key string) string {
 // CLAIM_CONTENDED and never ISSUE_CLAIMED, the wording claims nothing about liveness (nothing
 // was checked), and the claim the row shows rides along.
 func TestContendedClaimAnswerNamesNoLiveness(t *testing.T) {
+	t.Parallel()
 	live := &liveRegistry{}
 	listener := claimListener(t, live, nil)
 	handler, _, deps := newTestServer(t, testServerOptions{envoyURL: listener.URL})
@@ -955,6 +973,7 @@ func TestContendedClaimAnswerNamesNoLiveness(t *testing.T) {
 // lookup of their own (a human release and a claim of a free issue are both decided without
 // one).
 func TestContendedClaimEndsTheCycleAtTheBound(t *testing.T) {
+	t.Parallel()
 	// One holder change per attempt the bound allows, each made while that attempt's lookup is
 	// held open. A later lookup is never held: a cycle that judged a third time would answer
 	// from it rather than hang.
@@ -1025,7 +1044,9 @@ func TestContendedClaimEndsTheCycleAtTheBound(t *testing.T) {
 // session the row now shows: the write must redo its cycle rather than read the snapshot it
 // never took as "nobody is live" and take a running session's claim.
 func TestClaimJudgedAgainstNobodyNeverTakesALiveHoldersClaim(t *testing.T) {
+	t.Parallel()
 	t.Run("a stale self-release", func(t *testing.T) {
+		t.Parallel()
 		live := &liveRegistry{}
 		live.set("session-one", "session-two")
 		handler, database, deps := claimHandler(t, live)
@@ -1044,6 +1065,7 @@ func TestClaimJudgedAgainstNobodyNeverTakesALiveHoldersClaim(t *testing.T) {
 	})
 
 	t.Run("a claim judged against nobody", func(t *testing.T) {
+		t.Parallel()
 		live := &liveRegistry{}
 		live.set("session-one", "session-two")
 		handler, database, deps := claimHandler(t, live)
@@ -1101,7 +1123,7 @@ func whileTheRowIsHeld(
 	select {
 	case response := <-answered:
 		return response
-	case <-time.After(10 * time.Second):
+	case <-time.After(concurrentWait):
 		t.Fatal("the request never answered once the row was free")
 		return nil
 	}
@@ -1112,6 +1134,10 @@ func whileTheRowIsHeld(
 // a time after their start. Neither moves updated_at back below that stamp, and each answers the
 // value the row holds, which a read after it returns too.
 func TestAClaimWriteThatWaitedNeverMovesUpdatedAtBackward(t *testing.T) {
+	// No t.Parallel: this test holds a transaction, a row lock or an advisory lock open on
+	// purpose. The event log's safe horizon is proven from pg_snapshot_xmin, the oldest
+	// transaction id running anywhere on the instance (internal/dispatch/events,
+	// horizon.go), so a hold here stalls every parallel test reading that feed.
 	for _, write := range []struct {
 		name   string
 		method string
@@ -1188,6 +1214,7 @@ func TestAClaimWriteThatWaitedNeverMovesUpdatedAtBackward(t *testing.T) {
 // statement's clock keeps it through a PATCH, a claim and a release, as it does through an event
 // (TestEventDoesNotMoveIssueUpdatedAtBackward).
 func TestAnIssueWriteKeepsAnUpdatedAtAheadOfItsClock(t *testing.T) {
+	t.Parallel()
 	live := &liveRegistry{}
 	live.set("session-one")
 	handler, database, _ := claimHandler(t, live)

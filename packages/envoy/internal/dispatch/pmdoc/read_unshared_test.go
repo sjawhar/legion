@@ -476,6 +476,7 @@ func itemsCases() []itemsCase {
 }
 
 func TestReadUnsharedReadsWhatReadReads(t *testing.T) {
+	t.Parallel()
 	entries, err := os.ReadDir(filepath.Join("testdata", "corpus"))
 	if err != nil {
 		t.Fatal(err)
@@ -532,6 +533,7 @@ func updatedDoc(t *testing.T, tree *Node) *crdt.Doc {
 // A run's text is a string of its own, never a string item's, which an item split leaves a slice
 // of the string it split.
 func TestReadUnsharedTextOwnsItsString(t *testing.T) {
+	t.Parallel()
 	split := crdt.NewContentString("abc")
 	right := split.Splice(1).(*crdt.ContentString)
 	valid, err := ReadUnshared(itemsDoc(contentItem(split), formatItem("strong", map[string]any{}), contentItem(right)).GetXmlFragment("prosemirror"))

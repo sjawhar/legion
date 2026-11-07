@@ -16,6 +16,7 @@ import (
 // there. Those whitespace-only lines are code, so they spread no list. Each row is what the engine
 // reads in its markdown (checkCodeAndSpread).
 func TestIndentedCodeKeepsTheWhitespaceLinesTheEngineKeeps(t *testing.T) {
+	t.Parallel()
 	checkCodeAndSpread(t, []codeAndSpreadRow{
 		// Code text.
 		{name: "top level", markdown: "          x\n        \n       \nx\n", codes: []string{"      x\n    \n   "}},

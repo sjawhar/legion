@@ -17,6 +17,7 @@ import (
 // browser's socket (loadTree) and the fork a write of a document no room holds makes (coldFork).
 // Each refusal is still an invalid update.
 func TestAHistoryThatDoesNotDecodeIsRefusedNamingItsReasonOnce(t *testing.T) {
+	t.Parallel()
 	row := newProofHistory(t, 101).write("A first paragraph.\n\nA second paragraph, longer than the first.\n")
 	service, _ := newTestService(t)
 	for _, test := range []struct {

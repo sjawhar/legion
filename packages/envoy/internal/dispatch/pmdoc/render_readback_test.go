@@ -3,9 +3,6 @@ package pmdoc
 import (
 	"encoding/json"
 	"math/rand/v2"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -15,38 +12,27 @@ import (
 // headless engine (gen/differential.ts), each short table body row padded as Parse pads it.
 func engineReadings(t *testing.T, markdowns []string) []*Node {
 	t.Helper()
-	if _, err := exec.LookPath("bun"); err != nil {
-		if os.Getenv("CI") == "" {
-			t.Skip("bun is not on PATH; the engine's reading is required in CI")
-		}
-		t.Fatalf("bun is required in CI: %v", err)
-	}
-	dir := t.TempDir()
-	var lines []string
+	lines := make([]string, len(markdowns))
 	for index, markdown := range markdowns {
-		line, _ := json.Marshal(map[string]any{"id": index, "md": markdown})
-		lines = append(lines, string(line))
-	}
-	in, out := filepath.Join(dir, "in.jsonl"), filepath.Join(dir, "out.jsonl")
-	if err := os.WriteFile(in, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if output, err := genScript("differential.ts", in, out, "md").CombinedOutput(); err != nil {
-		t.Fatalf("differential.ts: %v\n%s", err, output)
-	}
-	raw, err := os.ReadFile(out)
-	if err != nil {
-		t.Fatal(err)
-	}
-	readings := make([]*Node, 0, len(markdowns))
-	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
-		var read struct {
-			MD *diffReading `json:"md"`
-		}
-		if err := json.Unmarshal([]byte(line), &read); err != nil {
+		line, err := json.Marshal(map[string]any{"id": index, "md": markdown})
+		if err != nil {
 			t.Fatal(err)
 		}
-		readings = append(readings, diffTree(read.MD))
+		lines[index] = string(line)
+	}
+	read := genLines(t, "differential.ts", lines, "md")
+	if len(read) != len(markdowns) {
+		t.Fatalf("differential.ts answered %d of %d markdowns", len(read), len(markdowns))
+	}
+	readings := make([]*Node, 0, len(markdowns))
+	for index, line := range read {
+		var answer struct {
+			MD *diffReading `json:"md"`
+		}
+		if err := json.Unmarshal([]byte(line), &answer); err != nil {
+			t.Fatalf("differential.ts output line %d: %v\n%s", index, err, line)
+		}
+		readings = append(readings, diffTree(answer.MD))
 	}
 	return readings
 }
@@ -57,6 +43,7 @@ func engineReadings(t *testing.T, markdowns []string) []*Node {
 // sjawhar/legion#1563 misreads, and the markdown whose reading both parsers must give the
 // rendering back as.
 func TestRenderReadsBackInBothParsersAsTheEditorShowsIt(t *testing.T) {
+	t.Parallel()
 	parsed := func(markdown string) *Node {
 		doc, err := Parse(markdown)
 		if err != nil {
@@ -258,6 +245,7 @@ func TestRenderReadsBackInBothParsersAsTheEditorShowsIt(t *testing.T) {
 // of a URL, so only the URL is linked, a URL after a quote is linked as one after a space, and a
 // scheme or `www` reads in any case - and every write must render it as written.
 func TestBareURLMarkdownComesBackFromAWriteAsWritten(t *testing.T) {
+	t.Parallel()
 	type form struct{ name, before, after string }
 	forms := []form{{"paragraph", "", "\n"}, {"table cell", "| a | b |\n| --- | --- |\n| x | ", " |\n"}}
 	tests := []struct{ name, cell string }{
@@ -316,6 +304,7 @@ func TestBareURLMarkdownComesBackFromAWriteAsWritten(t *testing.T) {
 // with an address only the tokenizer reads (`http://localhost`), the run is written again with
 // every bare URL explicit and that address's colon escaped, a scheme's URL as an autolink.
 func TestAWWWLinkTheBareTextWouldLoseIsWrittenAsALink(t *testing.T) {
+	t.Parallel()
 	link := func(text string) *Node {
 		return &Node{Type: "text", Text: text, Marks: []Mark{{Type: "link", Attrs: Attrs{"href": "http://" + text, "title": nil}}}}
 	}
@@ -380,6 +369,7 @@ func TestAWWWLinkTheBareTextWouldLoseIsWrittenAsALink(t *testing.T) {
 // scheme's colon. The plain texts a person types in the browser editor, which has no autolink
 // input rule, are written and read back alike by both too.
 func TestURLReadingsAgreeWithTheEngine(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		markdown    string
 		writtenAsIs bool
@@ -473,6 +463,7 @@ func TestURLReadingsAgreeWithTheEngine(t *testing.T) {
 // a task item's text opens with is escaped only where the engine opens an HTML block at it, and
 // those rows are also written back exactly as they are.
 func TestALinkReadFromABareAddressAfterPunctuationIsWrittenBack(t *testing.T) {
+	t.Parallel()
 	markdowns := []string{
 		"x;https://x.test/(a)> b\n",
 		"\\(http://x.test/a>b\\_\n",
@@ -625,6 +616,7 @@ func rendersBackInBothParsers(t *testing.T, names []string, trees []*Node) {
 // - paragraph text, a link's and an image's title, an image's address and alt text, a footnote
 // label and a table cell - and Go must read it as the engine does.
 func TestEveryEscapeAndReferenceReadsAsTheEngineReadsIt(t *testing.T) {
+	t.Parallel()
 	sites := []struct {
 		name  string
 		place func(row string) (string, bool)
@@ -674,6 +666,7 @@ func TestEveryEscapeAndReferenceReadsAsTheEngineReadsIt(t *testing.T) {
 // feed beside a break, at a paragraph's end, in marked, linked, heading and table text, in code and
 // in an alt text, and Go must read it as the engine does.
 func TestALineFeedAReferenceNamesReadsAsTheEngineReadsIt(t *testing.T) {
+	t.Parallel()
 	markdowns := []string{
 		"a&#10;b\n",
 		"a&#10;\nb\n",
@@ -701,6 +694,7 @@ func TestALineFeedAReferenceNamesReadsAsTheEngineReadsIt(t *testing.T) {
 // not and ones HTML decodes without their `;`, and words and punctuation that open no link and no
 // block, and Go must read it as the engine does. The seeds are fixed, so a failure reproduces.
 func TestGeneratedEscapesAndReferencesReadAsTheEngineReadsThem(t *testing.T) {
+	t.Parallel()
 	words := []string{"a", "x", "Plain", "end", "AT", "T", "2024", " ", " "}
 	pieces := [][]string{
 		{`\`, `\\`, "&", "&#", "&#x", "&#X", ";"},
@@ -733,6 +727,7 @@ func TestGeneratedEscapesAndReferencesReadAsTheEngineReadsThem(t *testing.T) {
 // and in the editor as its character. Every name the engine itself loads (gen/entity-names.ts) is
 // read as a paragraph of its own, and Go must read it as the engine does, which decodes each.
 func TestEveryNameTheEngineKnowsReadsAsTheEngineReadsIt(t *testing.T) {
+	t.Parallel()
 	raw := genResult(t, "entity-names.ts")
 	names := strings.Fields(string(raw))
 	if len(names) <= 2000 {
@@ -762,6 +757,7 @@ func TestEveryNameTheEngineKnowsReadsAsTheEngineReadsIt(t *testing.T) {
 // title and address hold an escaped reference must likewise render to markdown that reads back as
 // its own reading.
 func TestReferencesInEveryValueRenderAndReadBackInBothParsers(t *testing.T) {
+	t.Parallel()
 	values := []string{"&amp;", "&copy x", "&#38 y", "&#128;", `a\&amp;b`, "&#00000065;", "&foo;"}
 	parsed := func(markdown string) *Node {
 		doc, err := Parse(markdown)
@@ -824,6 +820,7 @@ func TestReferencesInEveryValueRenderAndReadBackInBothParsers(t *testing.T) {
 // an address, an `&` opening no reference in a title, and text whose `&amp;` spells `&amp;` keep
 // their spelling.
 func TestReferenceSpellingsThatReadBackRenderUnchanged(t *testing.T) {
+	t.Parallel()
 	for _, markdown := range []string{"[a](u \"&foo;\")\n", "![a](u&foo;)\n", "[a](u \"AT&T\")\n", "Plain &amp;amp; end.\n"} {
 		doc, err := Parse(markdown)
 		if err != nil {
@@ -840,6 +837,7 @@ func TestReferenceSpellingsThatReadBackRenderUnchanged(t *testing.T) {
 // table and in a cell, in the plain and the angle form; Go must read it as the engine does, a write
 // of it must be accepted, and its rendering must read back as its reading in both parsers.
 func TestAnImageAddressEndingInABackslashRendersAndReadsBack(t *testing.T) {
+	t.Parallel()
 	markdowns := []string{
 		"![a](u\\\\)\n",
 		"![a](u\\\\\\\\)\n",

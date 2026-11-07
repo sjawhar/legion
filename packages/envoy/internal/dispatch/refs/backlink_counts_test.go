@@ -500,6 +500,7 @@ func backlinkExclusionCases(toKind string) [][]string {
 // must not count, so each position filter the count carries is one the view disagrees with the
 // moment it goes.
 func TestBacklinkCountsReadArmByArmAgreeWithTheView(t *testing.T) {
+	t.Parallel()
 	fixture := newBacklinkFixture(t)
 	ctx := context.Background()
 	pool := fixture.database.Pool
@@ -562,6 +563,7 @@ func TestBacklinkCountsReadArmByArmAgreeWithTheView(t *testing.T) {
 // A node kind with no arms declared is refused rather than counted from its mention arms alone,
 // and every kind this build resolves is declared, so no node a list shows is counted short.
 func TestBacklinkCountsRefuseANodeKindWithNoDeclaredArms(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	ctx := context.Background()
 	if _, err := BacklinkCounts(ctx, database.Pool, "pull_request", []string{"x"}, nil); err == nil {
@@ -574,11 +576,11 @@ func TestBacklinkCountsRefuseANodeKindWithNoDeclaredArms(t *testing.T) {
 	}
 }
 
-// planSettings is what every plan below is read under. Sequential scans off alone is not enough:
-// the planner can still hash or merge a whole relation into a join, reading it under a node that
-// carries no index condition, which is the unkeyed read this test exists to catch. With the two
-// join strategies that can do that off as well, what is left is the nested loop over an index
-// each arm is written for.
+// planSettings is what every plan below is read under. Sequential scans off alone is not
+// enough: the planner can still hash or merge a whole relation into a join, reading it under a
+// node that carries no index condition, which is the unkeyed read this test exists to catch.
+// With the two join strategies that can do that off as well, what is left is the nested loop
+// over an index each arm is written for.
 var planSettings = []string{
 	"set local enable_seqscan = off",
 	"set local enable_hashjoin = off",
@@ -590,8 +592,16 @@ var planSettings = []string{
 // values) and under a generic plan alike. The generic plan is the one at risk: it cannot assume
 // what an address parameter holds, so an arm whose index depends on the bound value loses it
 // there, and a fixture this small never reaches a generic plan on its own
-// (api.TestListIssueAsksOpenQueryUsesAsksOpenIndex says why), so the mode is forced.
+// (api.TestListIssueAsksOpenQueryUsesAsksOpenIndex says why), so the mode is forced. The
+// statistics are the fixture's other half: every plan below is read on a clone of the migrated
+// template, whose tables no migration analysed (pg_class.reltuples = -1, where the planner
+// assumes a table of ten pages), which is the state every test of this package is handed and
+// the one its claim is about. A database whose tables had been analysed empty (reltuples = 0)
+// read every mention arm as `Index Only Scan on block_refs using block_refs_pkey` carrying no
+// condition at all, which is how this test failed in CI run 41897075339, back when a test
+// could be handed a database the test before it had written in (dispatch://INFRA-1075).
 func TestBacklinkCountStatementReadsEveryArmThroughAnIndex(t *testing.T) {
+	t.Parallel()
 	fixture := newBacklinkFixture(t)
 	ctx := context.Background()
 	connection, err := fixture.database.Pool.Acquire(ctx)
@@ -642,7 +652,8 @@ func TestBacklinkCountStatementReadsEveryArmThroughAnIndex(t *testing.T) {
 	}
 }
 
-// customPlan is the plan Postgres builds for statement knowing the values bound to it.
+// customPlan is the plan Postgres builds for statement knowing the values bound to it, under
+// the same setting the generic plan is read under.
 func customPlan(t *testing.T, connection *pgxpool.Conn, statement string, args []any) json.RawMessage {
 	t.Helper()
 	ctx := context.Background()
@@ -732,6 +743,7 @@ var graphViewArms = []graphViewArm{
 // nodeLoaders resolves, which is what makes BacklinkCounts' source filter on the refs arm alone
 // exact.
 func TestTheGraphViewGainsNoArmTheBacklinkCountDoesNotKnow(t *testing.T) {
+	t.Parallel()
 	fixture := newBacklinkFixture(t)
 	var definition string
 	if err := fixture.database.Pool.QueryRow(context.Background(),

@@ -22,6 +22,7 @@ import (
 // on a lock. A caller that needs a connection of its own opens it elsewhere - the document
 // rooms pool - and a caller that only needs to read does it through its transaction.
 func TestPoolRefusesASecondConnectionInsideATransaction(t *testing.T) {
+	t.Parallel()
 	database := openTestStore(t)
 	// The health probe reads the applied schema version, so the database must have one.
 	if err := database.Migrate(context.Background()); err != nil {
@@ -94,6 +95,7 @@ func TestPoolRefusesASecondConnectionInsideATransaction(t *testing.T) {
 // An open cursor is a held connection too: pgx hands it back when the rows close, so work
 // inside the loop competes with the caller's own cursor for the pool.
 func TestPoolRefusesASecondConnectionInsideAnOpenCursor(t *testing.T) {
+	t.Parallel()
 	database := openTestStore(t)
 	ctx := WithTransactionTracking(context.Background())
 
@@ -158,6 +160,7 @@ func TestPoolRefusesASecondConnectionInsideAnOpenCursor(t *testing.T) {
 // of whatever holds a connection by then - here a transaction opened after the drain, which
 // would otherwise be free to take a second connection and wedge the pool.
 func TestClosingADrainedCursorLeavesALaterHolderMarked(t *testing.T) {
+	t.Parallel()
 	database := openTestStore(t)
 	ctx := WithTransactionTracking(context.Background())
 
@@ -189,6 +192,7 @@ func TestClosingADrainedCursorLeavesALaterHolderMarked(t *testing.T) {
 // pool's, and takes the room's advisory lock on it. A second connection under that is the same
 // deadlock, so the same refusal covers it.
 func TestPoolRefusesASecondConnectionWhileOneIsHeld(t *testing.T) {
+	t.Parallel()
 	database := openTestStore(t)
 	ctx, release := HoldsConnection(context.Background())
 
@@ -207,6 +211,7 @@ func TestPoolRefusesASecondConnectionWhileOneIsHeld(t *testing.T) {
 // mark of its own, so one read's open cursor does not refuse the other, while each is still
 // refused a second connection of its own, and a caller already holding one is refused them all.
 func TestConcurrentReadsEachHoldOneConnection(t *testing.T) {
+	t.Parallel()
 	database := openTestStore(t)
 	ctx := WithTransactionTracking(context.Background())
 
@@ -285,6 +290,7 @@ func TestAConcurrentWorkerKeepsAMarkOfItsOwn(t *testing.T) {
 // the property is the same at any size, and holding sixty-four server connections while the
 // other packages' tests share the server would push a default Postgres past its hundred.
 func TestListenerIsServedWhileTheSharedPoolIsFullyAcquired(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	config := openTestStore(t).Pool.Config().Copy()
 	config.MaxConns = 4
@@ -312,7 +318,7 @@ func TestListenerIsServedWhileTheSharedPoolIsFullyAcquired(t *testing.T) {
 	}
 
 	for round := range 2 {
-		waitCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		waitCtx, cancel := context.WithTimeout(ctx, eventWait)
 		listener, err := database.Pool.Listener(waitCtx)
 		if err != nil {
 			cancel()
@@ -464,6 +470,7 @@ func TestHealthyAnswersWhileCloseWaitsForAConnectionInUse(t *testing.T) {
 // diagnosis's single-row read are still served. Queued behind the shared pool, the observation
 // holds back every live reader of the event log for as long as the requests ahead of it take.
 func TestHorizonIsServedWhileTheSharedPoolIsFullyAcquired(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	config := openTestStore(t).Pool.Config().Copy()
 	config.MaxConns = 4
@@ -495,7 +502,7 @@ func TestHorizonIsServedWhileTheSharedPoolIsFullyAcquired(t *testing.T) {
 		t.Fatalf("open the horizon pool: %v", err)
 	}
 	for round := range 2 {
-		waitCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		waitCtx, cancel := context.WithTimeout(ctx, eventWait)
 		batch := &pgx.Batch{}
 		batch.Queue(`begin`)
 		batch.Queue(`select pg_snapshot_xmin(pg_current_snapshot())::text, pg_current_xact_id()::text`)

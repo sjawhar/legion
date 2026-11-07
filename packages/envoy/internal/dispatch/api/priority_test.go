@@ -15,6 +15,7 @@ type priorityIssue struct {
 }
 
 func TestIssuePriorityCreatePatchClearAndEvent(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key": "CORE", "name": "Core",
@@ -77,6 +78,7 @@ func TestIssuePriorityCreatePatchClearAndEvent(t *testing.T) {
 }
 
 func TestIssuePriorityRejectsInvalidInputsOnCreateAndPatch(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key": "CORE", "name": "Core",
@@ -111,6 +113,7 @@ func TestIssuePriorityRejectsInvalidInputsOnCreateAndPatch(t *testing.T) {
 // Rank is the only order: priority is a badge and a filter, never a sort key, so the
 // List and the Board (whose columns keep the list's order) agree even when priorities are set.
 func TestListIssuesOrdersByRankRegardlessOfPriority(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key": "CORE", "name": "Core",
@@ -175,6 +178,7 @@ func TestListIssuesOrdersByRankRegardlessOfPriority(t *testing.T) {
 // The priority filter is what makes an owner's P0/P1 audit one call: repeated values union, "none"
 // matches an issue with no priority, and it composes with the pinned list's own filter.
 func TestListIssuesFiltersByPriority(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	for _, project := range []string{"CORE", "OTHER"} {
 		if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
@@ -231,6 +235,7 @@ func TestListIssuesFiltersByPriority(t *testing.T) {
 }
 
 func TestInboxOrdersOpenAsksByIssuePriority(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key": "CORE", "name": "Core",

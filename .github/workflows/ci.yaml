@@ -1851,11 +1851,17 @@ jobs:
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
+        # The settings these tests need, as the server's own command line, so it starts with them
+        # and no step has to restart it; envoy-go's own service says what each of them buys and
+        # why this container can do without durability (dispatch://INFRA-1075). The agentsecrets
+        # contract tests here drive brokertest.NewRig, which clones a database a test, and a clone
+        # and its drop are what force the checkpoints.
+        command: postgres -c fsync=off -c full_page_writes=off -c synchronous_commit=off -c max_connections=500 -c max_prepared_transactions=20
         options: >-
           --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
-          --health-interval 10s
+          --health-interval 1s
           --health-timeout 5s
-          --health-retries 5
+          --health-retries 50
     env:
       # One service for all three: the Go daemon's unit tests' Postgres, the broker rig its
       # agentsecrets contract tests drive (brokertest.NewRig skips without
@@ -1882,6 +1888,22 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      # The settings the service's command: asks for, read back from the server itself; envoy-go's
+      # own read-back step says why a command is worth reading back.
+      - name: Read the disposable service's settings back
+        run: |
+          id="${{ job.services.postgres.id }}"
+          failed=
+          read_back=
+          for want in fsync=off full_page_writes=off synchronous_commit=off max_connections=500 max_prepared_transactions=20; do
+            setting=${want%%=*}
+            value=$(docker exec "$id" psql -U postgres -Atc "show $setting")
+            read_back="$read_back $setting=$value"
+            [ "$value" = "${want#*=}" ] || { echo "::error::the Postgres service reports $setting=$value, not ${want#*=}"; failed=1; }
+          done
+          echo "$id:$read_back"
+          [ -z "$failed" ] || exit 1
 
       - name: Setup Bun
         uses: ./.github/actions/setup-bun
@@ -1989,6 +2011,9 @@ jobs:
 
       - name: Test ci-ok's report and the check-run post (a stand-in gh)
         run: .github/scripts/ci-ok-report.test.sh
+
+      - name: Test the go test -json reader the envoy-go measurement is read through
+        run: .github/scripts/go-test-times.test.sh
 
       - name: Test the race memory sampler
         run: .github/scripts/race_memory.test.sh
@@ -3298,8 +3323,10 @@ jobs:
     # 2 minutes the unit step's own 20 is 23; after the unit step, which runs strictly fewer
     # packages than the 35 minutes it measured before the race lane's left it and so cannot
     # exceed that, natslive's default 10 and the bus matrix's own 5 are 53, and the shell tests'
-    # 7 and the integration step's 5 are less.
-    timeout-minutes: 60
+    # 7 and the integration step's 5 are less. 53, then, is the bound, and this job is held to it
+    # rather than to the 60 it carried when the unit step ran the whole module in two 20-minute
+    # runs.
+    timeout-minutes: 53
     services:
       postgres:
         # ghcr.io/cybermonklabs/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
@@ -3307,11 +3334,52 @@ jobs:
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
+        # The settings these tests need, as the server's own command line, so it starts with them
+        # and no step has to restart it (jobs.<job_id>.services.<service_id>.command overrides the
+        # image's CMD, and the runner passes it as the arguments after the image name in its
+        # `docker create`). The read-back step below holds the server to every one of them.
+        #
+        # This job's Postgres is a container that dies with it, so nothing it holds has to
+        # survive a crash: fsync, full_page_writes and synchronous_commit are off, which is what
+        # makes a forced checkpoint cheap. It is the top wait of the unit step otherwise - a
+        # sample of pg_stat_activity beside it found IPC/CheckpointDone and IPC/CheckpointStart
+        # outweighing every other wait event of an ACTIVE backend together by five times (run
+        # 42035294257), because `create database … strategy file_copy` forces two and a drop forces
+        # one. The harness changes no server setting, so a developer's own Postgres keeps its
+        # durability (dispatch://INFRA-1075).
+        #
+        # The tests of this job run at the same time, each with a pool of its own, and the image's
+        # default max_connections is 100, which several package binaries at once exhaust (`FATAL:
+        # sorry, too many clients already`). 500 is above the worst case the job can reach: eight
+        # package binaries (`go test -p 8`), each running its tests at the runner's four cores,
+        # each test store bounded at 16 connections (storetest's testPoolSize).
+        #
+        # max_prepared_transactions is raised with it, from the image's default of 0, because a
+        # server that can prepare no transaction makes the event log's floor test skip, and a skip
+        # is a pass that proves nothing:
+        # TestNoPreparedTransactionHoldsAnEventIDAndTheFloorTrailsOneAnyway prepares a transaction
+        # holding the lock an insert into events takes, which is the one writer pg_locks shows with
+        # no backend pid (dispatch://INFRA-1075).
+        command: postgres -c fsync=off -c full_page_writes=off -c synchronous_commit=off -c max_connections=500 -c max_prepared_transactions=20
+        # --shm-size: a service container gets 64 MB of /dev/shm by default, and Postgres puts a
+        # parallel worker's shared memory there. With the module's packages running at once the
+        # seed's HNSW build failed on it ("could not resize shared memory segment … No space left
+        # on device", job 127148899326), which is the container's limit rather than the server's
+        # (dispatch://INFRA-1075).
+        #
+        # --health-interval is a second rather than ten, and --health-retries 50 rather than 5,
+        # which is the same 50 s a slow start was given before: docker runs the first health
+        # check an interval after the container starts, so at ten this server was reported
+        # healthy at 14 s where it had been ready at about 1, and the job's first step waited
+        # that out (run 42307926510, "Initialize containers", 22 s of which 15 s was the wait).
+        # A `pg_isready` a second for the job's length is one short exec of the service
+        # container, which no step of this job is measured against (dispatch://INFRA-1075).
         options: >-
+          --shm-size=1g
           --health-cmd "pg_isready -U postgres"
-          --health-interval 10s
+          --health-interval 1s
           --health-timeout 5s
-          --health-retries 5
+          --health-retries 50
     env:
       DISPATCH_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
       BROKER_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
@@ -3332,14 +3400,26 @@ jobs:
           cache: false
       # go-envoy-test: this job builds and runs the test binary of every package of the envoy
       # module, a set no other job builds, so it keeps a family of its own and saves it below.
+      #
+      # The key carries packages/envoy/go.sum's hash, and the save below runs when the restore
+      # was not an exact hit, so a push to main whose dependencies moved writes the cache again.
+      # Without the hash the key was the same for every commit at one Go version, the save was
+      # skipped on every exact hit, and the cache was therefore never written again after the
+      # first push at that version: run 42307926510 restored 918 MB on an exact hit and the step
+      # after it still printed `go: downloading github.com/aws/aws-sdk-go-v2 ...`, and compiled
+      # what it downloaded (dispatch://INFRA-1075). The first restore-key is that Go version's
+      # newest cache, so a changed go.sum starts from the nearest older one rather than from
+      # nothing; the second, off main only, reaches across a Go version bump as it did before.
       - id: go-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          key: go-envoy-test-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
-          restore-keys: ${{ github.ref != 'refs/heads/main' && format('go-envoy-test-{0}-', runner.os) || '' }}
+          key: go-envoy-test-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('packages/envoy/go.sum') }}
+          restore-keys: |
+            go-envoy-test-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}-
+            ${{ github.ref != 'refs/heads/main' && format('go-envoy-test-{0}-', runner.os) || '' }}
       - name: Check Go formatting
         run: |
           unformatted=$(gofmt -l .)
@@ -3360,6 +3440,25 @@ jobs:
       - name: Postgres service version
         run: |
           docker exec "${{ job.services.postgres.id }}" psql -U postgres -Atc "select current_setting('server_version_num'), coalesce((select default_version from pg_available_extensions where name = 'vector'), 'no vector')"
+      # The settings the service's command: asks for, read back from the server itself, because a
+      # command the runner does not pass through leaves the server up on the image's defaults
+      # rather than failing: the job would then refuse connections under load, skip the event
+      # log's floor test, and pay for the forced checkpoints it meant to make cheap. A setting the
+      # server itself refuses never reaches this step - postgres exits and the service's health
+      # check fails the job before its first step.
+      - name: Read the disposable service's settings back
+        run: |
+          id="${{ job.services.postgres.id }}"
+          failed=
+          read_back=
+          for want in fsync=off full_page_writes=off synchronous_commit=off max_connections=500 max_prepared_transactions=20; do
+            setting=${want%%=*}
+            value=$(docker exec "$id" psql -U postgres -Atc "show $setting")
+            read_back="$read_back $setting=$value"
+            [ "$value" = "${want#*=}" ] || { echo "::error::the Postgres service reports $setting=$value, not ${want#*=}"; failed=1; }
+          done
+          echo "$id:$read_back"
+          [ -z "$failed" ] || exit 1
       # Every image the tests here start: testnats.Image and testnats.HubImage, which the
       # natslive step below runs the two-image matrix on, and tests3.Image, pulled first for the
       # reason the action gives.
@@ -3381,18 +3480,66 @@ jobs:
       # run did: run beside the other package binaries, its Postgres-backed tests and the
       # room-memory measurements queue their per-test database cleanup on the service's one
       # checkpointer, and the API's live-feed and delivery-hub tests wait for the event log's safe
-      # horizon, which any open transaction on this job's Postgres delays. The three -run lists are
+      # horizon, which any open transaction on this job's Postgres delays. The one -run list is
       # derived in .github/scripts/ci_job_reads.py from the race lane's own packages and those
       # files' //go:build !race and raceEnabled, so a test added to either and missing here fails
       # the ci-filters job naming this step. Measured over three runs on a two-vCPU pod: the bus
       # under a tenth of a second, the API 8 to 10 s, the documents package 92 to 127 s, so 10
       # minutes each is ample.
+      #
+      # One go test over the three packages rather than one per package: go builds the three test
+      # binaries together and runs each package's tests as soon as its own binary is linked, so
+      # the documents package's tests run beside the API package's build instead of after it.
+      # Three commands in a row cost 96 s for 44 s of tests - 40 s of them the API package's
+      # build, with nothing running beside it (run 42307926510, dispatch://INFRA-1075). Each
+      # package measures its own process's heap or allocations, so running them at the same time
+      # changes no number any of them asserts on.
       - name: Test what the race build cannot run at all or at full size
         run: |
-          go test -count=1 -timeout 10m -run '^(TestHoldsSeedAllocatesAtMostOneCopyPerDecoding)$' ./internal/bus
-          go test -count=1 -timeout 10m -run '^(TestCopyLockComesBeforeEveryPendingRowAndEvent|TestCopyLockOrderGuardFollowsTheLockTakers|TestEveryKeyedWriteCommitsInsideATransactionTheMarkHooks|TestTheKeyedWriteGuardSeesWhatItGuards)$' ./internal/dispatch/api
-          go test -count=1 -timeout 10m -run '^(TestARoomFedOnlyByAgentWritesKeepsMemoryWithinTheBound|TestRenderReuseARandomisedEditStorm|TestRenderReuseAReplicaReplaysTheRoomsFormattingExactly|TestUploadsOverOpenAnchorsKeepMemoryWithinTheBound|TestUploadsToARoomInUseKeepMemoryWithinTheBound)$' ./internal/dispatch/docs
+          go test -count=1 -timeout 10m -run '^(TestARoomFedOnlyByAgentWritesKeepsMemoryWithinTheBound|TestCopyLockComesBeforeEveryPendingRowAndEvent|TestCopyLockOrderGuardFollowsTheLockTakers|TestEveryKeyedWriteCommitsInsideATransactionTheMarkHooks|TestHoldsSeedAllocatesAtMostOneCopyPerDecoding|TestRenderReuseARandomisedEditStorm|TestRenderReuseAReplicaReplaysTheRoomsFormattingExactly|TestTheKeyedWriteGuardSeesWhatItGuards|TestUploadsOverOpenAnchorsKeepMemoryWithinTheBound|TestUploadsToARoomInUseKeepMemoryWithinTheBound)$' ./internal/bus ./internal/dispatch/api ./internal/dispatch/docs
         working-directory: packages/envoy
+      # The unit step below, the natslive step and the integration step each write their `go test
+      # -json` stream to a file under $RUNNER_TEMP/go-test-json, which the upload step below
+      # publishes as one artifact per run attempt. .github/scripts/go-test-times.py ranks the
+      # tests and packages of such a stream, and compares two of them, which is how this job's
+      # time is measured (dispatch://INFRA-1075). The stream is a file rather than the log because
+      # `go test -json` is verbose: each of those steps replays the package result lines to the
+      # log, and the whole stream only when it failed, so a green log reads as it did and a red
+      # one carries every failing test's output. -count=1 keeps the restored build cache from
+      # replaying a stored result as `(cached)`.
+      #
+      # The API package used to run first and on its own in this job, because the per-test
+      # database clone and drop of every other package queued on the service's one checkpointer
+      # beside it; it runs in envoy-go-race-api now, and the plain run this job keeps of it is the
+      # race-impossible step above. The server above writes nothing durable either way, so a
+      # clone's two forced checkpoints and its drop's one cost little and that queue sets no
+      # step's time here any more.
+      # -p 8 rather than go test's default of GOMAXPROCS, and -parallel 12 rather than its default
+      # of GOMAXPROCS as well, because these tests wait far more than they compute: a profile of
+      # the API package spends 2.19 per cent of its wall time on this process's CPU, and the
+      # document service's spends 583 s of CPU over 1,867 s of wall. Four lanes on a four-core
+      # runner would be four waits at a time, not four workers. The two numbers are bounded by
+      # what the runner's own Postgres can serve beside them, which is why max_connections is
+      # raised above, and by the race lanes' memory, which is why those jobs set their own
+      # (envoy-go-race-docs). Twelve is measured rather than chosen: at twenty-four the step went
+      # 749 s to 1,105 s and ten tests of the document service and the outbox failed on their own
+      # deadlines, the runner's four cores being the bound once the waits overlap (run
+      # 42035294257, dispatch://INFRA-1075). Both were measured while the API and documents
+      # packages were still in this call; the race lane runs them now, so the call they bound is
+      # a lighter one.
+      #
+      # internal/dispatch/routes is in that call too, and had a Postgres service of its own until
+      # this change. Its tests read the event log's safe horizon, which is instance-wide by
+      # design: it rests on pg_snapshot_xmin, so a transaction running anywhere on the instance
+      # holds it back, another package's `create database … template` among them
+      # (internal/dispatch/events/horizon.go, "Safe horizon"). On a durable server those clones
+      # held it back long enough to take the package red - "event horizon held back by an open
+      # transaction … query=create database dispatch_test_… template dispatch_template_…" (run
+      # 41868325451) - and that is the cost this service no longer pays: a clone here writes
+      # nothing durable and ends within the wait the tests already allow. A second instance comes
+      # back only if a run shows those waits failing or the package missing its bar in this call
+      # (dispatch://INFRA-1075).
+      #
       # Everything the three race jobs run is left out here, since they run it under the detector,
       # and so is internal/integration, which the integration step below tests. The pattern is
       # built in .github/scripts/ci_job_reads.py from the same list those jobs' own steps are built
@@ -3401,7 +3548,15 @@ jobs:
       # service's) now among the ones the lane runs, so its 20 minutes are ample.
       - name: Unit test envoy Go package
         run: |
-          go list ./... | grep -Ev '/integration|/internal/dispatch/delivery($|/)|/internal/dispatch/store($|/)|/internal/bus$|/cmd/listener$|/internal/store$|/internal/session$|/internal/kvwatch($|/)|/internal/dispatch/api$|/internal/dispatch/docs$' | xargs go test -count=1 -timeout 20m
+          mkdir -p "$RUNNER_TEMP/go-test-json"
+          s=0
+          go list ./... | grep -Ev '/integration|/internal/dispatch/delivery($|/)|/internal/dispatch/store($|/)|/internal/bus$|/cmd/listener$|/internal/store$|/internal/session$|/internal/kvwatch($|/)|/internal/dispatch/api$|/internal/dispatch/docs$' | xargs go test -json -count=1 -p 8 -parallel 12 -timeout 20m > "$RUNNER_TEMP/go-test-json/unit.json" || s=$?
+          if [ "$s" -eq 0 ]; then
+            jq -rj 'select(.Action == "build-output" or (.Action == "output" and .Test == null)) | .Output' "$RUNNER_TEMP/go-test-json/unit.json"
+          else
+            jq -rj 'select(.Action == "build-output" or .Action == "output") | .Output' "$RUNNER_TEMP/go-test-json/unit.json"
+          fi
+          exit $s
         working-directory: packages/envoy
       # agentloop's live proof makes a real model call, so it sits behind a build tag and CI
       # never runs it. Vetting it keeps it compiling as the package changes.
@@ -3429,10 +3584,18 @@ jobs:
       # the step instead of running -run "", which matches every test.
       - name: Test the container-backed NATS matrix (natslive)
         run: |
+          mkdir -p "$RUNNER_TEMP/go-test-json"
           rig=$(../../.github/scripts/go-tagged-tests.sh natslive ./internal/testnats)
-          go test -count=1 -tags natslive -run "$rig" ./internal/testnats/
           cap=$(../../.github/scripts/go-tagged-tests.sh natslive ./internal/bus)
-          go test -count=1 -timeout 5m -tags natslive -run "$cap" -v ./internal/bus/
+          s=0
+          { go test -json -count=1 -tags natslive -run "$rig" ./internal/testnats/ &&
+            go test -json -count=1 -timeout 5m -tags natslive -run "$cap" -v ./internal/bus/; } > "$RUNNER_TEMP/go-test-json/natslive.json" || s=$?
+          if [ "$s" -eq 0 ]; then
+            jq -rj 'select(.Action == "build-output" or (.Action == "output" and .Test == null)) | .Output' "$RUNNER_TEMP/go-test-json/natslive.json"
+          else
+            jq -rj 'select(.Action == "build-output" or .Action == "output") | .Output' "$RUNNER_TEMP/go-test-json/natslive.json"
+          fi
+          exit $s
         working-directory: packages/envoy
       - name: Isolation test for dev-broker.sh (fakes docker/go/curl; no real Postgres or network)
         run: bash scripts/dev-broker.test.sh
@@ -3463,19 +3626,53 @@ jobs:
           bash deploy/scripts/autodeploy_test.sh
         working-directory: packages/envoy
       - name: Integration test envoy (a real NATS server, in the test process)
-        run: go test ./internal/integration/ -timeout 300s -count=1
+        run: |
+          mkdir -p "$RUNNER_TEMP/go-test-json"
+          s=0
+          go test -json -count=1 -timeout 300s ./internal/integration/ > "$RUNNER_TEMP/go-test-json/integration.json" || s=$?
+          if [ "$s" -eq 0 ]; then
+            jq -rj 'select(.Action == "build-output" or (.Action == "output" and .Test == null)) | .Output' "$RUNNER_TEMP/go-test-json/integration.json"
+          else
+            jq -rj 'select(.Action == "build-output" or .Action == "output") | .Output' "$RUNNER_TEMP/go-test-json/integration.json"
+          fi
+          exit $s
         working-directory: packages/envoy
+      # Always, because a red attempt's times are the ones a reader needs, and one artifact per
+      # attempt because a run's artifacts are listed per run, not per attempt, and a download by
+      # name picks one of several of that name without saying so
+      # (docs/solutions/github/run-download-by-name-picks-one-of-several-same-named-artifacts.md).
+      - name: Upload the go test -json streams
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: envoy-go-test-json-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/go-test-json/
+          if-no-files-found: warn
       - name: Build envoy services
         run: go build ./cmd/dispatch ./cmd/listener
         working-directory: packages/envoy
-      # The release's archives (release-envoy-listener.yaml), THIRD_PARTY_NOTICES included.
+      # The release's archives (release-envoy-listener.yaml), THIRD_PARTY_NOTICES included. One
+      # architecture's build and notices run beside the other's and nothing of either is the
+      # other's input, so the step is as long as the slower of the two rather than their sum
+      # (5.0 s and 5.5 s of a 10 s step, run 42307926510, dispatch://INFRA-1075). The archives
+      # are written after both, in the target list's order, so the listing below reads as it
+      # did. Under the runner's `bash -e` a failed `wait` ends the step, so an architecture that
+      # did not build still fails it.
       - name: Pack envoy binaries
         run: |
+          pids=()
           for arch in $(jq -r '.envoy[]' ../../.github/go-release-targets.json); do
             out="../../out/pr-artifacts/envoy-$arch"
             mkdir -p "$out"
-            GOOS=linux GOARCH=$arch go build -buildvcs=false -o "$out/envoy-listener" ./cmd/listener
-            GOOS=linux GOARCH=$arch ../../scripts/go-third-party-notices.sh "$out/THIRD_PARTY_NOTICES" ./cmd/listener
+            (
+              GOOS=linux GOARCH=$arch go build -buildvcs=false -o "$out/envoy-listener" ./cmd/listener
+              GOOS=linux GOARCH=$arch ../../scripts/go-third-party-notices.sh "$out/THIRD_PARTY_NOTICES" ./cmd/listener
+            ) &
+            pids+=("$!")
+          done
+          for pid in "${pids[@]}"; do wait "$pid"; done
+          for arch in $(jq -r '.envoy[]' ../../.github/go-release-targets.json); do
+            out="../../out/pr-artifacts/envoy-$arch"
             tar czf "../../out/pr-artifacts/legion-envoy-$arch.tar.gz" -C "$out" envoy-listener THIRD_PARTY_NOTICES
             tar tzvf "../../out/pr-artifacts/legion-envoy-$arch.tar.gz"
           done
@@ -3656,11 +3853,15 @@ jobs:
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
+        # The settings these tests need, as the server's own command line, so it starts with them
+        # and no step has to restart it; envoy-go's own service says what each of them buys and
+        # why this container can do without durability (dispatch://INFRA-1075).
+        command: postgres -c fsync=off -c full_page_writes=off -c synchronous_commit=off -c max_connections=500 -c max_prepared_transactions=20
         options: >-
           --health-cmd "pg_isready -U postgres"
-          --health-interval 10s
+          --health-interval 1s
           --health-timeout 5s
-          --health-retries 5
+          --health-retries 50
     env:
       DISPATCH_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
     steps:
@@ -3671,9 +3872,47 @@ jobs:
         with:
           go-version-file: packages/envoy/go.mod
           cache: false
+      # The settings the service's command: asks for, read back from the server itself; envoy-go's
+      # own read-back step says why a command is worth reading back.
+      - name: Read the disposable service's settings back
+        run: |
+          id="${{ job.services.postgres.id }}"
+          failed=
+          read_back=
+          for want in fsync=off full_page_writes=off synchronous_commit=off max_connections=500 max_prepared_transactions=20; do
+            setting=${want%%=*}
+            value=$(docker exec "$id" psql -U postgres -Atc "show $setting")
+            read_back="$read_back $setting=$value"
+            [ "$value" = "${want#*=}" ] || { echo "::error::the Postgres service reports $setting=$value, not ${want#*=}"; failed=1; }
+          done
+          echo "$id:$read_back"
+          [ -z "$failed" ] || exit 1
+      # The `go test -json` stream goes to a file the upload step below publishes, as every test
+      # step of envoy-go does and for the same reason: .github/scripts/go-test-times.py ranks the
+      # packages and tests of such a stream, and this lane's per-package times are what the next
+      # change to it is measured against (dispatch://INFRA-1075). The log keeps the package result
+      # lines of a green run and the whole stream of a red one, race report included. -count=1
+      # keeps a restored build cache from replaying a stored result as `(cached)`.
       - name: Race-test delivery, the store, the bus, the listener, the registry store, the session cache and kvwatch
-        run: go test -count=1 -race -timeout 30m ./internal/dispatch/delivery/... ./internal/dispatch/store/... ./internal/bus/ ./cmd/listener/ ./internal/store/ ./internal/session/ ./internal/kvwatch/...
+        run: |
+          mkdir -p "$RUNNER_TEMP/go-test-json"
+          s=0
+          go test -json -race -count=1 -timeout 30m ./internal/dispatch/delivery/... ./internal/dispatch/store/... ./internal/bus/ ./cmd/listener/ ./internal/store/ ./internal/session/ ./internal/kvwatch/... > "$RUNNER_TEMP/go-test-json/race.json" || s=$?
+          if [ "$s" -eq 0 ]; then
+            jq -rj 'select(.Action == "build-output" or (.Action == "output" and .Test == null)) | .Output' "$RUNNER_TEMP/go-test-json/race.json"
+          else
+            jq -rj 'select(.Action == "build-output" or .Action == "output") | .Output' "$RUNNER_TEMP/go-test-json/race.json"
+          fi
+          exit $s
         working-directory: packages/envoy
+      # Always, and one artifact per run attempt, for the reasons envoy-go's own upload step gives.
+      - name: Upload the go test -json stream
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: envoy-go-race-test-json-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/go-test-json/
+          if-no-files-found: warn
 
       - name: Report ci-ok when this is the run's last job
         if: always()
@@ -3699,11 +3938,20 @@ jobs:
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
+        # The settings these tests need, as the server's own command line, so it starts with them
+        # and no step has to restart it; envoy-go's own service says what each of them buys and
+        # why this container can do without durability (dispatch://INFRA-1075).
+        #
+        # max_prepared_transactions is this package's in particular: its
+        # TestNoPreparedTransactionHoldsAnEventIDAndTheFloorTrailsOneAnyway prepares a transaction
+        # holding the lock an insert into events takes, which is the one writer pg_locks shows
+        # with no backend pid. The image's default is 0, and the test refuses to skip in CI.
+        command: postgres -c fsync=off -c full_page_writes=off -c synchronous_commit=off -c max_connections=500 -c max_prepared_transactions=20
         options: >-
           --health-cmd "pg_isready -U postgres"
-          --health-interval 10s
+          --health-interval 1s
           --health-timeout 5s
-          --health-retries 5
+          --health-retries 50
     env:
       DISPATCH_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
       # The broker's store, which the package's contract tests open (brokerstoretest.Open in
@@ -3718,9 +3966,42 @@ jobs:
         with:
           go-version-file: packages/envoy/go.mod
           cache: false
+      # The settings the service's command: asks for, read back from the server itself; envoy-go's
+      # own read-back step says why a command is worth reading back.
+      - name: Read the disposable service's settings back
+        run: |
+          id="${{ job.services.postgres.id }}"
+          failed=
+          read_back=
+          for want in fsync=off full_page_writes=off synchronous_commit=off max_connections=500 max_prepared_transactions=20; do
+            setting=${want%%=*}
+            value=$(docker exec "$id" psql -U postgres -Atc "show $setting")
+            read_back="$read_back $setting=$value"
+            [ "$value" = "${want#*=}" ] || { echo "::error::the Postgres service reports $setting=$value, not ${want#*=}"; failed=1; }
+          done
+          echo "$id:$read_back"
+          [ -z "$failed" ] || exit 1
+      # The stream, the log and -count=1 are envoy-go-race's, for the reason its own step gives.
       - name: Race-test the Dispatch API
-        run: go test -count=1 -race -timeout 30m ./internal/dispatch/api/
+        run: |
+          mkdir -p "$RUNNER_TEMP/go-test-json"
+          s=0
+          go test -json -race -count=1 -timeout 30m ./internal/dispatch/api/ > "$RUNNER_TEMP/go-test-json/race-api.json" || s=$?
+          if [ "$s" -eq 0 ]; then
+            jq -rj 'select(.Action == "build-output" or (.Action == "output" and .Test == null)) | .Output' "$RUNNER_TEMP/go-test-json/race-api.json"
+          else
+            jq -rj 'select(.Action == "build-output" or .Action == "output") | .Output' "$RUNNER_TEMP/go-test-json/race-api.json"
+          fi
+          exit $s
         working-directory: packages/envoy
+      # Always, and one artifact per run attempt, for the reasons envoy-go's own upload step gives.
+      - name: Upload the go test -json stream
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: envoy-go-race-api-test-json-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/go-test-json/
+          if-no-files-found: warn
 
       - name: Report ci-ok when this is the run's last job
         if: always()
@@ -3754,11 +4035,15 @@ jobs:
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
+        # The settings these tests need, as the server's own command line, so it starts with them
+        # and no step has to restart it; envoy-go's own service says what each of them buys and
+        # why this container can do without durability (dispatch://INFRA-1075).
+        command: postgres -c fsync=off -c full_page_writes=off -c synchronous_commit=off -c max_connections=500 -c max_prepared_transactions=20
         options: >-
           --health-cmd "pg_isready -U postgres"
-          --health-interval 10s
+          --health-interval 1s
           --health-timeout 5s
-          --health-retries 5
+          --health-retries 50
     # Load-bearing, not boilerplate: this package's TestMain is storetest.Main
     # (internal/dispatch/docs/persistence_test.go:19), and storetest.Open skips every test that
     # opens the store when DISPATCH_TEST_DATABASE_URL is unset
@@ -3786,6 +4071,21 @@ jobs:
             ~/.cache/go-build
           key: go-envoy-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
           restore-keys: ${{ github.ref != 'refs/heads/main' && format('go-envoy-{0}-', runner.os) || '' }}
+      # The settings the service's command: asks for, read back from the server itself; envoy-go's
+      # own read-back step says why a command is worth reading back.
+      - name: Read the disposable service's settings back
+        run: |
+          id="${{ job.services.postgres.id }}"
+          failed=
+          read_back=
+          for want in fsync=off full_page_writes=off synchronous_commit=off max_connections=500 max_prepared_transactions=20; do
+            setting=${want%%=*}
+            value=$(docker exec "$id" psql -U postgres -Atc "show $setting")
+            read_back="$read_back $setting=$value"
+            [ "$value" = "${want#*=}" ] || { echo "::error::the Postgres service reports $setting=$value, not ${want#*=}"; failed=1; }
+          done
+          echo "$id:$read_back"
+          [ -z "$failed" ] || exit 1
       # Under the sampler, not bare: the race detector maps about four bytes of shadow memory per
       # byte of heap, and this package's race binary asked for more than the runner's 16 GiB,
       # which has no swap. The kernel killed this step three times with no output at all, which
@@ -3798,8 +4098,28 @@ jobs:
       # out, so the log still carries the --- FAIL lines and the package's own line. -count=1
       # because the job restores the Go build cache above, and a cached pass must not stand in
       # for a run.
+      #
+      # -parallel 2 rather than go test's default of GOMAXPROCS, which is four here, is what
+      # holds the peak under that limit: this package's memory is what its parallel cases hold at
+      # once. At four slots the sampler read a peak of 14,189,716 kB. Its highest sample,
+      # 14,174,324 kB at 738.6 s, had TestAMarginWriteMatchesTheWholeDocumentWrite's
+      # generated-390KiB and generated-600KiB cases running together beside
+      # TestReadsOfALiveDocumentRunBesideItsPeers; the plateau before them, 11,555,172 kB, had
+      # the four parallel passes of TestACaptureNeverReusesARenderingTheForkHasMovedPast; and
+      # before any of those cases ran the step stood at 5,101,120 kB (run 42342555091, job
+      # 128313251577). Each such case holds a document of hundreds of kilobytes with the whole
+      # update history it writes, which the detector shadows at about four bytes a byte, so the
+      # nine gigabytes those two families added are two slots' worth more than this limit has
+      # room for. Two slots were measured rather than chosen: those same three families under
+      # this sampler at -parallel 2 peaked at 1,534,288 kB, and the rest of the package at
+      # -parallel 2 reached 6,240,116 kB, so even added as though nothing were reused they stay
+      # under 8388608 kB. What it costs is this step's own time, about twice the 965 s the run
+      # above spent at four slots, which the -timeout 60m below and the job's 70 minutes hold.
+      # No -p beside it: one package is one build lane, so go test's package parallelism has
+      # nothing to divide. No GOMEMLIMIT either: two slots leave the heap it would bound below
+      # the 2 GiB this step once set, so it would only make the detector's work slower.
       - name: Race-test the document service
-        run: RACE_MEM_LIMIT_KB=8388608 ../../.github/scripts/race_memory.py go test -json -race -count=1 -timeout 60m ./internal/dispatch/docs/
+        run: RACE_MEM_LIMIT_KB=8388608 ../../.github/scripts/race_memory.py go test -json -race -count=1 -parallel 2 -timeout 60m ./internal/dispatch/docs/
         working-directory: packages/envoy
 
       - name: Report ci-ok when this is the run's last job
@@ -3840,11 +4160,17 @@ jobs:
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
+        # The settings these tests need, as the server's own command line, so it starts with them
+        # and no step has to restart it; envoy-go's own service says what each of them buys and
+        # why this container can do without durability (dispatch://INFRA-1075). This job runs the
+        # document service's own package, as envoy-go-race-docs does, so it takes that job's
+        # service settings with it.
+        command: postgres -c fsync=off -c full_page_writes=off -c synchronous_commit=off -c max_connections=500 -c max_prepared_transactions=20
         options: >-
           --health-cmd "pg_isready -U postgres"
-          --health-interval 10s
+          --health-interval 1s
           --health-timeout 5s
-          --health-retries 5
+          --health-retries 50
     # Load-bearing, not boilerplate: this package's TestMain is storetest.Main
     # (internal/dispatch/docs/persistence_test.go:19), and storetest.Open skips every test that
     # opens the store when DISPATCH_TEST_DATABASE_URL is unset
@@ -3872,6 +4198,21 @@ jobs:
             ~/.cache/go-build
           key: go-envoy-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
           restore-keys: ${{ github.ref != 'refs/heads/main' && format('go-envoy-{0}-', runner.os) || '' }}
+      # The settings the service's command: asks for, read back from the server itself; envoy-go's
+      # own read-back step says why a command is worth reading back.
+      - name: Read the disposable service's settings back
+        run: |
+          id="${{ job.services.postgres.id }}"
+          failed=
+          read_back=
+          for want in fsync=off full_page_writes=off synchronous_commit=off max_connections=500 max_prepared_transactions=20; do
+            setting=${want%%=*}
+            value=$(docker exec "$id" psql -U postgres -Atc "show $setting")
+            read_back="$read_back $setting=$value"
+            [ "$value" = "${want#*=}" ] || { echo "::error::the Postgres service reports $setting=$value, not ${want#*=}"; failed=1; }
+          done
+          echo "$id:$read_back"
+          [ -z "$failed" ] || exit 1
       # -v, because the package's leak check prints its line from TestMain after the tests have
       # run: go test in package-list mode buffers the test binary's own output and drops it when
       # the package passes, so without -v a green run would carry the `ok` line and nothing else,
@@ -3910,11 +4251,16 @@ jobs:
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
+        # The settings these tests need, as the server's own command line, so it starts with them
+        # and no step has to restart it; envoy-go's own service says what each of them buys and
+        # why this container can do without durability (dispatch://INFRA-1075). The harness clones
+        # a database a test here too, and a clone and its drop are what force the checkpoints.
+        command: postgres -c fsync=off -c full_page_writes=off -c synchronous_commit=off -c max_connections=500 -c max_prepared_transactions=20
         options: >-
           --health-cmd "pg_isready -U postgres"
-          --health-interval 10s
+          --health-interval 1s
           --health-timeout 5s
-          --health-retries 5
+          --health-retries 50
     env:
       DISPATCH_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
     steps:
@@ -3925,6 +4271,21 @@ jobs:
         with:
           go-version-file: packages/envoy/go.mod
           cache: false
+      # The settings the service's command: asks for, read back from the server itself; envoy-go's
+      # own read-back step says why a command is worth reading back.
+      - name: Read the disposable service's settings back
+        run: |
+          id="${{ job.services.postgres.id }}"
+          failed=
+          read_back=
+          for want in fsync=off full_page_writes=off synchronous_commit=off max_connections=500 max_prepared_transactions=20; do
+            setting=${want%%=*}
+            value=$(docker exec "$id" psql -U postgres -Atc "show $setting")
+            read_back="$read_back $setting=$value"
+            [ "$value" = "${want#*=}" ] || { echo "::error::the Postgres service reports $setting=$value, not ${want#*=}"; failed=1; }
+          done
+          echo "$id:$read_back"
+          [ -z "$failed" ] || exit 1
       - name: Memory tests of the Dispatch server
         run: |
           pattern=$(../../.github/scripts/go-tagged-tests.sh memory ./cmd/dispatch)
@@ -3964,11 +4325,16 @@ jobs:
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
+        # The settings these tests need, as the server's own command line, so it starts with them
+        # and no step has to restart it; envoy-go's own service says what each of them buys and
+        # why this container can do without durability (dispatch://INFRA-1075). The harness clones
+        # a database a test here too, and a clone and its drop are what force the checkpoints.
+        command: postgres -c fsync=off -c full_page_writes=off -c synchronous_commit=off -c max_connections=500 -c max_prepared_transactions=20
         options: >-
           --health-cmd "pg_isready -U postgres"
-          --health-interval 10s
+          --health-interval 1s
           --health-timeout 5s
-          --health-retries 5
+          --health-retries 50
     env:
       DISPATCH_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
     steps:
@@ -3979,6 +4345,21 @@ jobs:
         with:
           go-version-file: packages/envoy/go.mod
           cache: false
+      # The settings the service's command: asks for, read back from the server itself; envoy-go's
+      # own read-back step says why a command is worth reading back.
+      - name: Read the disposable service's settings back
+        run: |
+          id="${{ job.services.postgres.id }}"
+          failed=
+          read_back=
+          for want in fsync=off full_page_writes=off synchronous_commit=off max_connections=500 max_prepared_transactions=20; do
+            setting=${want%%=*}
+            value=$(docker exec "$id" psql -U postgres -Atc "show $setting")
+            read_back="$read_back $setting=$value"
+            [ "$value" = "${want#*=}" ] || { echo "::error::the Postgres service reports $setting=$value, not ${want#*=}"; failed=1; }
+          done
+          echo "$id:$read_back"
+          [ -z "$failed" ] || exit 1
       - name: Two-process tests of the Dispatch server
         run: |
           pattern=$(../../.github/scripts/go-tagged-tests.sh multiprocess ./cmd/dispatch)
@@ -4086,11 +4467,16 @@ jobs:
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
+        # The settings these tests need, as the server's own command line, so it starts with them
+        # and no step has to restart it; envoy-go's own service says what each of them buys and
+        # why this container can do without durability (dispatch://INFRA-1075). The harness clones
+        # a database a test here too, and a clone and its drop are what force the checkpoints.
+        command: postgres -c fsync=off -c full_page_writes=off -c synchronous_commit=off -c max_connections=500 -c max_prepared_transactions=20
         options: >-
           --health-cmd "pg_isready -U postgres"
-          --health-interval 10s
+          --health-interval 1s
           --health-timeout 5s
-          --health-retries 5
+          --health-retries 50
     env:
       BROKER_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
     steps:
@@ -4101,6 +4487,21 @@ jobs:
         with:
           go-version-file: packages/envoy/go.mod
           cache: false
+      # The settings the service's command: asks for, read back from the server itself; envoy-go's
+      # own read-back step says why a command is worth reading back.
+      - name: Read the disposable service's settings back
+        run: |
+          id="${{ job.services.postgres.id }}"
+          failed=
+          read_back=
+          for want in fsync=off full_page_writes=off synchronous_commit=off max_connections=500 max_prepared_transactions=20; do
+            setting=${want%%=*}
+            value=$(docker exec "$id" psql -U postgres -Atc "show $setting")
+            read_back="$read_back $setting=$value"
+            [ "$value" = "${want#*=}" ] || { echo "::error::the Postgres service reports $setting=$value, not ${want#*=}"; failed=1; }
+          done
+          echo "$id:$read_back"
+          [ -z "$failed" ] || exit 1
       - name: Two-process tests of the secrets broker
         run: |
           pattern=$(../../.github/scripts/go-tagged-tests.sh multiprocess ./cmd/broker)

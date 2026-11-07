@@ -12,6 +12,7 @@ import (
 // it closes the database pool, so a wait that skipped them would close the pool under a worker
 // still writing.
 func TestTheBackgroundWaitHoldsForWorkARequestLeftRunning(t *testing.T) {
+	t.Parallel()
 	served := register(http.NewServeMux(), t.Context(), Deps{})
 	started, release := make(chan struct{}), make(chan struct{})
 	served.detached.goDetached(func() {
@@ -33,7 +34,7 @@ func TestTheBackgroundWaitHoldsForWorkARequestLeftRunning(t *testing.T) {
 	close(release)
 	select {
 	case <-waited:
-	case <-time.After(10 * time.Second):
+	case <-time.After(concurrentWait):
 		t.Fatal("the background wait never returned once the detached worker ended")
 	}
 }
@@ -42,6 +43,7 @@ func TestTheBackgroundWaitHoldsForWorkARequestLeftRunning(t *testing.T) {
 // until the socket ends: production shutdown waits for it before it closes the database pool,
 // which a subscription still reading would otherwise lose under it.
 func TestTheBackgroundWaitHoldsForAnOpenLiveSocket(t *testing.T) {
+	t.Parallel()
 	rig := newLiveSocketRig(t, testServerOptions{}, nil)
 	client := rig.dial(t, asUser("alice"))
 	rig.sockets(t, 1)
@@ -59,7 +61,7 @@ func TestTheBackgroundWaitHoldsForAnOpenLiveSocket(t *testing.T) {
 	_ = client.conn.Close()
 	select {
 	case <-waited:
-	case <-time.After(10 * time.Second):
+	case <-time.After(concurrentWait):
 		t.Fatal("the background wait never returned once the live socket closed")
 	}
 }
@@ -67,6 +69,7 @@ func TestTheBackgroundWaitHoldsForAnOpenLiveSocket(t *testing.T) {
 // The background wait holds for the event stream relay, which an events subscription starts and
 // which runs on the server's lifetime after its last subscriber leaves, until that lifetime ends.
 func TestTheBackgroundWaitHoldsForTheEventStreamRelay(t *testing.T) {
+	t.Parallel()
 	rig := newLiveSocketRig(t, testServerOptions{}, nil)
 	client := rig.dial(t, withBearer("agent-token"))
 	subscribeEvents(t, client, "events", nil)
@@ -78,11 +81,12 @@ func TestTheBackgroundWaitHoldsForTheEventStreamRelay(t *testing.T) {
 // The background wait holds for the delivery hub, which a delivery view starts and which runs on
 // the server's lifetime after its last view closes, until that lifetime ends.
 func TestTheBackgroundWaitHoldsForTheDeliveryHub(t *testing.T) {
+	t.Parallel()
 	rig := newLiveSocketRig(t, testServerOptions{}, nil)
 	seedHubSettings(t, rig.database)
 	client := rig.dial(t, asUser("alice"))
 	client.send(t, deliverySubscribe("p", presetView(deliveryLiveTimeline, 7, "")))
-	client.snapshot(t, 10*time.Second, "p")
+	client.snapshot(t, eventFeedWait, "p")
 	_ = client.conn.Close()
 	rig.sockets(t, 0)
 	requireBackgroundWaitHoldsUntilTheLifetimeEnds(t, rig, "the delivery hub")
@@ -106,7 +110,7 @@ func requireBackgroundWaitHoldsUntilTheLifetimeEnds(t *testing.T, rig *liveSocke
 	rig.stop()
 	select {
 	case <-waited:
-	case <-time.After(10 * time.Second):
+	case <-time.After(concurrentWait):
 		t.Fatalf("the background wait never returned once the server's lifetime ended (%s)", what)
 	}
 }
@@ -116,6 +120,7 @@ func requireBackgroundWaitHoldsUntilTheLifetimeEnds(t *testing.T, rig *liveSocke
 // the test that built it, and the background wait would never return once a subscription had
 // started the relay.
 func TestRegisterRefusesANilLifetime(t *testing.T) {
+	t.Parallel()
 	defer func() {
 		refusal, ok := recover().(string)
 		if !ok || !strings.Contains(refusal, "the lifetime parameter is required") {

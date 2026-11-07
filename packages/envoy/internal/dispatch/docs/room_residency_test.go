@@ -44,6 +44,10 @@ import (
 // a document neither wrote, which reads back with no block at all once each kept a block the other
 // replaced. Every load of the room is checked against the writes its earlier instances took
 // (watchRoomLoads), and the document the store holds at the end is the last one written.
+//
+// It runs on its own because it measures this process: its readers and writers run for a window of
+// three to thirty seconds and the evidence is how many rounds and writes they made in it, which
+// every parallel test's share of the cores would take from.
 func TestAHealthyRoomUnderWritesIsNeverRefused(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
@@ -190,7 +194,7 @@ func TestAHealthyRoomUnderWritesIsNeverRefused(t *testing.T) {
 		t.Fatalf("%d rounds of reads and versions, %d sockets and %d writes, too few to say anything", rounds.Load(), sockets.Load(), result.writes)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), roomWait(t))
 	defer cancel()
 	if err := service.waitForPendingUpdates(ctx, artifactID); err != nil {
 		t.Fatalf("wait for the room's updates to reach persistence: %v", err)
@@ -218,6 +222,7 @@ func TestAHealthyRoomUnderWritesIsNeverRefused(t *testing.T) {
 // and the store holds both writes' text. The write here waits inside its Apply while the peer
 // leaves and a read loads the room again (roomIdleTimeout).
 func TestAWriteInsideApplyOutlivesTheRoomsLastPeer(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "before")
@@ -260,7 +265,7 @@ func TestAWriteInsideApplyOutlivesTheRoomsLastPeer(t *testing.T) {
 	// The server has handled the departure, and whatever it does when a room's last peer leaves,
 	// once the socket's handler returns (Service.ServeHTTP removes the connection after that).
 	state := service.room(artifactID)
-	for deadline := time.Now().Add(5 * time.Second); ; {
+	for deadline := time.Now().Add(roomWait(t)); ; {
 		state.mu.Lock()
 		connected := len(state.connected)
 		state.mu.Unlock()
@@ -283,7 +288,7 @@ func TestAWriteInsideApplyOutlivesTheRoomsLastPeer(t *testing.T) {
 		t.Fatalf("second write: %v", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), roomWait(t))
 	defer cancel()
 	if err := service.waitForPendingUpdates(ctx, artifactID); err != nil {
 		t.Fatalf("wait for the room's updates to reach persistence: %v", err)
@@ -313,6 +318,7 @@ func TestAWriteInsideApplyOutlivesTheRoomsLastPeer(t *testing.T) {
 // a room its last browser left (roomIdleTimeout), and the document reads back what the API wrote.
 // An agent's edit of a document no room holds loads none at all (publishLiveWrite).
 func TestARoomOnlyTheAPITouchesLeavesWithinTheIdleTimeout(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	// Production waits roomIdleTimeout; two seconds keeps the test short, and ygo then sweeps
@@ -417,6 +423,15 @@ func (w *roomLoads) count() int {
 	return w.loads
 }
 
+// minPeerWrites and minProjections are the rounds TestTheUpdateObserverNeverRendersAWriteHalfWay
+// judges on: fewer than these says nothing about an observer under concurrent writes, whatever
+// the renders showed. They are dispatch://INFRA-985's numbers and are unchanged; what changed is
+// that the test waits for them rather than counting what a two-second window held.
+const (
+	minPeerWrites  = 20
+	minProjections = 5
+)
+
 // The room's update observer renders a copy of the room brought up to date under the room's lock
 // (renderedReplica), never the live tree. ygo fires the observer once the transaction has released
 // the document's lock, so another writer can be integrating into the live tree while a render walks
@@ -425,6 +440,9 @@ func (w *roomLoads) count() int {
 // been. Two writers stand in for two browser peers (ygo applies a peer's update in that peer's
 // goroutine and fires the observer there), and a third is the service projecting comment records.
 // Under -race the walk of the live tree is a data race with the other writers.
+// It runs on its own because it swaps process-wide state: it captures the default logger
+// (logtest.SetDefault) to read the WARN a torn walk logs, which any other test logging beside it
+// would be given.
 func TestTheUpdateObserverNeverRendersAWriteHalfWay(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
@@ -446,13 +464,32 @@ func TestTheUpdateObserverNeverRendersAWriteHalfWay(t *testing.T) {
 	}
 	ctx := context.Background()
 	bob := model.Actor{Kind: "user", ID: "bob"}
-	deadline := time.Now().Add(2 * time.Second)
+	// The three run until the test has the rounds it judges on - minPeerWrites peer writes and
+	// minProjections projections - rather than for a window of wall clock. A window counts what
+	// the machine managed in it, and these two rounds cost wildly different things: a peer write
+	// is an in-memory Apply of a few milliseconds, while a projection's transaction also stores
+	// every peer append the room's persistence has not stored yet (recordLiveOperation's
+	// flushThrough), so it costs what Postgres charges for that backlog. On a runner where every
+	// package of the module tests against one Postgres a projection round measured 0.7 to 3.4
+	// seconds against the peers' 9 ms, and a two-second window held three of them rather than
+	// five: what the window measured was the machine's CPU-to-Postgres ratio, not this property
+	// (dispatch://INFRA-1075, run 42239459430). The numbers it judges on are unchanged; only the
+	// way it decides it has seen them is. The deadline is the package's own bound on a room's
+	// work, so only a room that stopped reaches it, and the check after the wait is the one that
+	// reports it.
+	deadline := time.Now().Add(roomWait(t))
 	failures := make(chan error, 3)
 	var writes, projections atomic.Int64
+	// running is what every one of the three loops runs under: it stops them all at the first
+	// round that completes the set, so the writers stop with the projections they were made to
+	// run beside rather than at a clock of their own.
+	running := func() bool {
+		return (writes.Load() < minPeerWrites || projections.Load() < minProjections) && time.Now().Before(deadline)
+	}
 	var writers sync.WaitGroup
 	peer := func(first int) {
 		defer writers.Done()
-		for round := first; time.Now().Before(deadline); round++ {
+		for round := first; running(); round++ {
 			tree := trees[round%len(trees)]
 			var updateErr error
 			err := service.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
@@ -471,11 +508,21 @@ func TestTheUpdateObserverNeverRendersAWriteHalfWay(t *testing.T) {
 	go peer(1)
 	go func() {
 		defer writers.Done()
-		for round := 0; time.Now().Before(deadline); round++ {
+		for round := 0; running(); round++ {
+			// The peers' counter before and after this projection: a projection counted here is
+			// one the writers were writing through, which is the whole point of counting them.
+			// The first is exempt, since a peer's first Apply can still be loading the room
+			// when the projection beside it starts.
+			beside := writes.Load()
 			if err := joinedProjectMark(service, artifactID, fmt.Sprintf("projection-%d", round), MarkRecord{
 				Kind: "comment", By: "user:bob", CreatedAt: time.Now().UTC().Format(time.RFC3339Nano), Text: "note",
 			}, bob); err != nil {
 				failures <- fmt.Errorf("projection %d: %w", round, err)
+				return
+			}
+			if round > 0 && writes.Load() == beside {
+				failures <- fmt.Errorf("projection %d ran with no peer write landing beside it (%d writes before it and after): it rendered a document nobody was writing",
+					round, beside)
 				return
 			}
 			projections.Add(1)
@@ -486,7 +533,7 @@ func TestTheUpdateObserverNeverRendersAWriteHalfWay(t *testing.T) {
 	for err := range failures {
 		t.Fatal(err)
 	}
-	if writes.Load() < 20 || projections.Load() < 5 {
+	if writes.Load() < minPeerWrites || projections.Load() < minProjections {
 		t.Fatalf("%d peer writes and %d projections, too few to say anything", writes.Load(), projections.Load())
 	}
 
@@ -642,6 +689,7 @@ func TestAnEvictedRoomsLoadRecordGoesWithIt(t *testing.T) {
 // read: a link reading back with the target the reader wrote, an answered ask with the choice it
 // wrote.
 func TestEditingALiveReadsTreeChangesNoLaterRead(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, `:::ask{#ask-1}
@@ -716,7 +764,7 @@ func newRetiringRoomService(t *testing.T) (*Service, *store.Store) {
 		Settle:    time.Hour,
 	})
 	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), roomWait(t))
 		defer cancel()
 		if err := service.Shutdown(ctx); err != nil {
 			t.Logf("shutdown document service: %v", err)
@@ -735,6 +783,7 @@ func newRetiringRoomService(t *testing.T) (*Service, *store.Store) {
 // goroutine. The test pauses the publish's commit in an observer, asks for the close there, and
 // lets the commit go on.
 func TestAPublishSurvivesACloseOfItsRoomAskedForWhileItRuns(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name string
 		peer bool
@@ -839,7 +888,7 @@ func TestAPublishSurvivesACloseOfItsRoomAskedForWhileItRuns(t *testing.T) {
 			case <-committed:
 			case err := <-written:
 				t.Fatalf("the write finished (%v) without publishing through the room", err)
-			case <-time.After(10 * time.Second):
+			case <-time.After(roomWait(t)):
 				t.Fatal("the write's publish never reached the room")
 			}
 			live := service.srv.GetDoc(artifactID)
@@ -865,7 +914,7 @@ func TestAPublishSurvivesACloseOfItsRoomAskedForWhileItRuns(t *testing.T) {
 				if err != nil {
 					t.Fatalf("write: %v", err)
 				}
-			case <-time.After(10 * time.Second):
+			case <-time.After(roomWait(t)):
 				t.Fatal("the committed write's publish never returned once it was let go")
 			}
 			select {
@@ -881,7 +930,7 @@ func TestAPublishSurvivesACloseOfItsRoomAskedForWhileItRuns(t *testing.T) {
 			}
 			// The publish's slot does not outlive it: every later room of the document persists
 			// behind the slots queued under its name.
-			for deadline := time.Now().Add(5 * time.Second); ; {
+			for deadline := time.Now().Add(roomWait(t)); ; {
 				service.suppressMu.Lock()
 				queued := len(service.suppressed[artifactID])
 				service.suppressMu.Unlock()
@@ -904,6 +953,7 @@ func TestAPublishSurvivesACloseOfItsRoomAskedForWhileItRuns(t *testing.T) {
 // commit returns either way. The longer the document, the longer its room's update observer
 // renders, and the wider that window.
 func TestAWriteSurvivesItsIssueClosingAsItPublishes(t *testing.T) {
+	t.Parallel()
 	markdown := func(paragraphs int, tag string) string {
 		var text strings.Builder
 		for index := range paragraphs {
@@ -914,6 +964,8 @@ func TestAWriteSurvivesItsIssueClosingAsItPublishes(t *testing.T) {
 	alice := model.Actor{Kind: "user", ID: "alice"}
 	for _, paragraphs := range []int{20, 50, 200} {
 		t.Run(fmt.Sprintf("%d paragraphs", paragraphs), func(t *testing.T) {
+			// Each length runs on a service and a database of its own.
+			t.Parallel()
 			service, database := newRetiringRoomService(t)
 			ctx := context.Background()
 			const trials = 40
@@ -949,7 +1001,7 @@ func TestAWriteSurvivesItsIssueClosingAsItPublishes(t *testing.T) {
 					if err != nil {
 						t.Errorf("trial %d: commit: %v", trial, err)
 					}
-				case <-time.After(10 * time.Second):
+				case <-time.After(roomWait(t)):
 					hung++
 					continue
 				}

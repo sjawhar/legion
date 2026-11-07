@@ -16,6 +16,7 @@ import (
 )
 
 func TestAnswerBlockAskWritesItsServerStateIntoTheDocument(t *testing.T) {
+	t.Parallel()
 	var documentService *docs.Service
 	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
@@ -52,6 +53,7 @@ func TestAnswerBlockAskWritesItsServerStateIntoTheDocument(t *testing.T) {
 }
 
 func TestSearchAskBlockOptionDescription(t *testing.T) {
+	t.Parallel()
 	var documentService *docs.Service
 	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: 20 * time.Millisecond})
@@ -70,7 +72,10 @@ func TestSearchAskBlockOptionDescription(t *testing.T) {
 	if edited.Code != http.StatusOK {
 		t.Fatalf("write ask block: status=%d body=%s", edited.Code, edited.Body.String())
 	}
-	deadline := time.Now().Add(time.Second)
+	// Thirty seconds rather than one: this waits for the settlement to reach the inbox, an
+	// event, and under the race detector with every package of the module beside it a second was
+	// not enough (run 42061247130). It returns in milliseconds on an idle server.
+	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		inbox := dispatchRequest(t, handler, http.MethodGet, "/api/v1/inbox", nil, "alice")
 		if inbox.Code != http.StatusOK {
@@ -110,6 +115,7 @@ func TestSearchAskBlockOptionDescription(t *testing.T) {
 }
 
 func TestAskBlockWithoutOptionsSettles(t *testing.T) {
+	t.Parallel()
 	var documentService *docs.Service
 	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: 20 * time.Millisecond})
@@ -128,7 +134,7 @@ func TestAskBlockWithoutOptionsSettles(t *testing.T) {
 	if edited.Code != http.StatusOK {
 		t.Fatalf("write no-option ask: status=%d body=%s", edited.Code, edited.Body.String())
 	}
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(concurrentWait)
 	for time.Now().Before(deadline) {
 		inbox := dispatchRequest(t, handler, http.MethodGet, "/api/v1/inbox", nil, "alice")
 		for _, ask := range decodeBody[[]model.Ask](t, inbox) {
@@ -142,6 +148,7 @@ func TestAskBlockWithoutOptionsSettles(t *testing.T) {
 }
 
 func TestDocumentRetypeRejectsUnknownTypeAndInvalidAttributes(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Retype validation", "Question\n")
 	blocks := decodeBody[[]model.ArtifactBlock](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/blocks", nil, "alice"))
@@ -172,6 +179,7 @@ func TestDocumentRetypeRejectsUnknownTypeAndInvalidAttributes(t *testing.T) {
 // the rule allows is taken, including an option without a label or a question that is only an
 // image, which settlement flags `invalid` and the dashboard shows as a malformed decision.
 func TestUploadsHoldAskBlocksToTheirContentRule(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	ask := func(body string) string {
 		return "Intro.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\n" + body + "\n:::\n\nAfter.\n"
@@ -231,6 +239,7 @@ func TestUploadsHoldAskBlocksToTheirContentRule(t *testing.T) {
 }
 
 func TestDocumentEditRejectsInvalidAskBlockAtomically(t *testing.T) {
+	t.Parallel()
 	var documentService *docs.Service
 	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: 20 * time.Millisecond})
@@ -252,7 +261,7 @@ func TestDocumentEditRejectsInvalidAskBlockAtomically(t *testing.T) {
 
 	var askID, question string
 	var optionsJSON []byte
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(concurrentWait)
 	for time.Now().Before(deadline) {
 		err := database.Pool.QueryRow(context.Background(), `
 			select id::text, question, options from asks
@@ -307,6 +316,7 @@ func TestDocumentEditRejectsInvalidAskBlockAtomically(t *testing.T) {
 }
 
 func TestDocumentEditExplainsRenderedQuoteMiss(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Rendered quote miss", "Use `config` with care.\n")
 	response := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
@@ -338,9 +348,14 @@ func TestDocumentEditExplainsRenderedQuoteMiss(t *testing.T) {
 
 // awaitIndexedAskBlock polls the inbox until the ask block with blockID on artifactID is
 // indexed, failing the test when settlement never reaches it.
+//
+// A minute rather than ten seconds: this waits for an event, and under the race detector with
+// every package of the module beside it a settlement of a million-character option took longer
+// than ten (run 42039747360, envoy-go-race-api). Waiting longer for an event weakens nothing and
+// costs a healthy run nothing - it returns in milliseconds when the settlement is quick.
 func awaitIndexedAskBlock(t *testing.T, handler http.Handler, artifactID, blockID, question string) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(time.Minute)
 	for time.Now().Before(deadline) {
 		inbox := dispatchRequest(t, handler, http.MethodGet, "/api/v1/inbox", nil, "alice")
 		if inbox.Code != http.StatusOK {
@@ -363,6 +378,7 @@ func awaitIndexedAskBlock(t *testing.T, handler http.Handler, artifactID, blockI
 // A spec written at issue creation never passes through a live edit; its ask blocks must still
 // become asks, or an agent that opens an issue with decisions in the spec gets no inbox rows.
 func TestAskBlocksInCreatedSpecAreIndexed(t *testing.T) {
+	t.Parallel()
 	var documentService *docs.Service
 	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: 20 * time.Millisecond})
@@ -377,6 +393,7 @@ func TestAskBlocksInCreatedSpecAreIndexed(t *testing.T) {
 // Uploading a new document version through the artifacts API replaces the text inside the
 // upload's own transaction, which suppresses live settlement; the closer must still run.
 func TestAskBlocksInUploadedSpecVersionAreIndexed(t *testing.T) {
+	t.Parallel()
 	var documentService *docs.Service
 	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: 20 * time.Millisecond})
@@ -400,6 +417,7 @@ func TestAskBlocksInUploadedSpecVersionAreIndexed(t *testing.T) {
 // blocks under their ids. It opens no ask in anyone's Inbox: each copied block shows the state and
 // answer of the ask it was copied from (LEGION-651).
 func TestAnUploadedCopyOfASpecOpensNoAskForItsCopiedBlocks(t *testing.T) {
+	t.Parallel()
 	var documentService *docs.Service
 	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: 20 * time.Millisecond})
@@ -450,7 +468,7 @@ func TestAnUploadedCopyOfASpecOpensNoAskForItsCopiedBlocks(t *testing.T) {
 	copied := decodeBody[struct {
 		Artifact model.Artifact `json:"artifact"`
 	}](t, uploaded).Artifact.ID
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(concurrentWait)
 	for {
 		text := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+copied+"/text", nil, "alice").Body.String()
 		if strings.Contains(text, `#rec-answered urgency=\"med\" multiple=\"false\" state=\"answered\" answered_by=\"alice\"`) &&
@@ -496,10 +514,10 @@ func documentTexts(t *testing.T, handler http.Handler, document string) (string,
 }
 
 // awaitDocumentText polls document until its live text and its latest version both hold, failing
-// the test after ten seconds, or at once when either shows refused (nil refuses nothing).
+// the test after concurrentWait, or at once when either shows refused (nil refuses nothing).
 func awaitDocumentText(t *testing.T, handler http.Handler, document, what string, holds, refused func(string) bool) {
 	t.Helper()
-	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+	for deadline := time.Now().Add(concurrentWait); ; time.Sleep(20 * time.Millisecond) {
 		live, version := documentTexts(t, handler, document)
 		if refused != nil && (refused(live) || refused(version)) {
 			t.Fatalf("the document showed what it must not while waiting for %s; live:\n%s\nlatest version:\n%s", what, live, version)
@@ -529,6 +547,7 @@ func contains(parts ...string) func(string) bool {
 // settlement later, in its live text and in its latest version, which is what the decision card and
 // dispatch request-approval's refusal read: the routes settle the copies of the ask they close.
 func TestAnsweringOrResolvingACopysSourceSettlesTheCopy(t *testing.T) {
+	t.Parallel()
 	var documentService *docs.Service
 	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: 20 * time.Millisecond})
@@ -593,6 +612,7 @@ func TestAnsweringOrResolvingACopysSourceSettlesTheCopy(t *testing.T) {
 // copy (SettleCopiesOf), and that settlement opens the copy's own ask for its block rather than
 // writing the answer to a question the copy does not ask into the record.
 func TestAnAnswerToACopysSourceAfterItsRewordingOpensTheCopysOwnAsk(t *testing.T) {
+	t.Parallel()
 	var documentService *docs.Service
 	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: 20 * time.Millisecond})
@@ -658,6 +678,7 @@ func TestAnAnswerToACopysSourceAfterItsRewordingOpensTheCopysOwnAsk(t *testing.T
 // gets back the wording the answer was given on. A copy then uploaded with the reworded text holds
 // a question no decision answered and opens its own ask.
 func TestAnUploadRewordingAnAnsweredAskLeavesItDecidedAndItsCopyOpensItsOwnAsk(t *testing.T) {
+	t.Parallel()
 	var documentService *docs.Service
 	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: 20 * time.Millisecond})
@@ -710,6 +731,7 @@ func TestAnUploadRewordingAnAnsweredAskLeavesItDecidedAndItsCopyOpensItsOwnAsk(t
 // event and on the ask row - never JSON null: the SPA's Conversation tab reads options.length
 // and a null there takes the page down.
 func TestOptionlessAskBlockCarriesEmptyOptionsNotNull(t *testing.T) {
+	t.Parallel()
 	var documentService *docs.Service
 	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: 20 * time.Millisecond})
@@ -749,7 +771,7 @@ type askBlockEventPayload struct {
 // blockID, failing the test when settlement never emits it.
 func awaitAskBlockEvent(t *testing.T, handler http.Handler, issueKey, eventType, blockID string) askBlockEventPayload {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(concurrentWait)
 	for time.Now().Before(deadline) {
 		events := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issueKey+"/events?limit=50", nil, "alice")
 		if events.Code != http.StatusOK {
@@ -780,6 +802,7 @@ func awaitAskBlockEvent(t *testing.T, handler http.Handler, issueKey, eventType,
 // it indexes must still be attributed to the session that wrote the block, or the asker can
 // never edit its own ask and nobody can tell who is asking.
 func TestBlockAskIndexedAfterEditKeepsTheWritingActor(t *testing.T) {
+	t.Parallel()
 	var documentService *docs.Service
 	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: 20 * time.Millisecond})
@@ -826,6 +849,7 @@ func TestBlockAskIndexedAfterEditKeepsTheWritingActor(t *testing.T) {
 }
 
 func TestChangingBlockAskReplacesAnswerAttributes(t *testing.T) {
+	t.Parallel()
 	handler, _ := blockAskHandler(t)
 	issue, askID := seedBlockAsk(t, handler, "Change typed ask", "decision", transportAsk, "Which transport?")
 	first := readBlockAsk(t, handler, askID)

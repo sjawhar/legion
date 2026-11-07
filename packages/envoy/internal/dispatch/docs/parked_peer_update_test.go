@@ -21,6 +21,7 @@ import (
 // earlier keystroke arrives. A load of the stored rows - the fold a room load and a compaction make -
 // reads the document the room holds, both while the keystroke waits and once it has landed.
 func TestTheStoredRowsOfARoomFoldToItsDocumentWhenAPeerUpdateParks(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	// No settlement writes the room between the load of its stored rows and the read of the room
 	// that load is compared with.

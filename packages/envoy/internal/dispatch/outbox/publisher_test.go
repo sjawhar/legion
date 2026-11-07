@@ -20,7 +20,17 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/testnats"
 )
+
+// eventWait is how long a test here waits FOR AN EVENT: a forward reaching its holder, a scan
+// starting, an outbox stopping once its context ended. It is where the test gives up, never a
+// measurement - the test still fails when the event never comes, and on an idle machine the wait
+// returns in milliseconds - so it allows for a loaded runner: every package of this module now
+// runs at once, four CI cores to some 3,800 parallel tests, under the race detector besides
+// (dispatch://INFRA-1075). A test whose SUBJECT is a span - a receipt window, a lease's period,
+// a stop that must beat the shutdown budget - keeps its own number.
+const eventWait = 30 * time.Second
 
 // answered is a channel already holding err, the outcome of a test publisher that answers each
 // publish before it returns: the outbox reads such an answer the moment it sends, as it reads one
@@ -258,6 +268,7 @@ func (p *blockingFailPublisher) Request(_ string, item contracts.Envelope, _ bus
 }
 
 func TestRunPublishesAskAnswerEnvelope(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	broker := events.NewBroker()
 	seedIssue(t, database, "T-1", nil)
@@ -317,6 +328,7 @@ func TestRunPublishesAskAnswerEnvelope(t *testing.T) {
 // every issue event does: the Legion daemon's intake reads it there. The issue's route is not a
 // destination, since nobody is woken by it.
 func TestRunPublishesTheDeployedEventOnTheIssueSubject(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	broker := events.NewBroker()
 	route := "role:legion-controller-x"
@@ -374,6 +386,7 @@ func TestRunPublishesTheDeployedEventOnTheIssueSubject(t *testing.T) {
 }
 
 func TestRunRoutesAskEventsToEveryFollowerRegardlessOfNotify(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name       string
 		eventType  string
@@ -422,6 +435,7 @@ func TestRunRoutesAskEventsToEveryFollowerRegardlessOfNotify(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			database := storetest.Open(t)
 			broker := events.NewBroker()
 			seedIssue(t, database, "T-1", nil)
@@ -451,6 +465,7 @@ func TestRunRoutesAskEventsToEveryFollowerRegardlessOfNotify(t *testing.T) {
 }
 
 func TestRunSkipsAnUnfollowedSession(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	broker := events.NewBroker()
 	seedIssue(t, database, "T-1", nil)
@@ -471,7 +486,7 @@ func TestRunSkipsAnUnfollowedSession(t *testing.T) {
 	stop := run(t, database, publisher, broker)
 	defer stop()
 
-	waitFor(t, time.Second, "reply publication", func() bool {
+	waitFor(t, eventWait, "reply publication", func() bool {
 		return publishedAt(t, database, event.ID) != nil
 	})
 	items := publisher.all()
@@ -483,8 +498,10 @@ func TestRunSkipsAnUnfollowedSession(t *testing.T) {
 // A human adding or removing a follower is told to that session directly: with no
 // whole-issue subscription (the default), its own topic is the only place it listens.
 func TestAddAuthorRoutesNotifiesTheAddedOrRemovedFollowerDirectly(t *testing.T) {
+	t.Parallel()
 	for _, eventType := range []string{"ask.follower_added", "ask.follower_removed"} {
 		t.Run(eventType, func(t *testing.T) {
+			t.Parallel()
 			database := storetest.Open(t)
 			seedIssue(t, database, "T-1", nil)
 			event := model.Event{
@@ -503,6 +520,7 @@ func TestAddAuthorRoutesNotifiesTheAddedOrRemovedFollowerDirectly(t *testing.T) 
 // whatever the issue's route: a takeover (its session was no longer live) and a release
 // somebody else made. A session that releases its own claim is not told about itself.
 func TestPublishPreviousClaimantTellsTheSessionThatLostTheClaim(t *testing.T) {
+	t.Parallel()
 	previous := map[string]any{
 		"actor": map[string]any{"kind": "session", "id": "session-one"},
 		"at":    "2026-09-24T05:00:00Z",
@@ -544,6 +562,7 @@ func TestPublishPreviousClaimantTellsTheSessionThatLostTheClaim(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			database := storetest.Open(t)
 			seedIssue(t, database, "T-1", nil)
 			event := model.Event{Type: tc.eventType, Actor: tc.actor, Payload: tc.payload}
@@ -566,6 +585,7 @@ func topicsOf(items []contracts.Envelope) []string {
 	return topics
 }
 func TestRunRoutesDocumentEventsToTheDocumentTopicAndTheirAuthor(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	database := storetest.Open(t)
 	broker := events.NewBroker()
@@ -629,6 +649,7 @@ func TestRunRoutesDocumentEventsToTheDocumentTopicAndTheirAuthor(t *testing.T) {
 }
 
 func TestRunSummarizesCommentBody(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	broker := events.NewBroker()
 	seedIssue(t, database, "T-1", nil)
@@ -656,6 +677,7 @@ func TestRunSummarizesCommentBody(t *testing.T) {
 }
 
 func TestRunCorrelatesAskReplyCommentToItsAsk(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	broker := events.NewBroker()
 	seedIssue(t, database, "T-1", nil)
@@ -695,6 +717,7 @@ func TestRunCorrelatesAskReplyCommentToItsAsk(t *testing.T) {
 }
 
 func TestRunRoutesAskReplyToAuthorEvenWhenIssueRoutedElsewhere(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	broker := events.NewBroker()
 	route := "role:legion-controller-x"
@@ -738,6 +761,7 @@ func TestRunRoutesAskReplyToAuthorEvenWhenIssueRoutedElsewhere(t *testing.T) {
 }
 
 func TestRunRoutesHumanReplyToCommentAuthor(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	broker := events.NewBroker()
 	seedIssue(t, database, "T-1", nil)
@@ -774,6 +798,7 @@ func TestRunRoutesHumanReplyToCommentAuthor(t *testing.T) {
 }
 
 func TestRunRoutesHumanReplyToMessageAuthor(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	broker := events.NewBroker()
 	seedIssue(t, database, "T-1", nil)
@@ -811,6 +836,7 @@ func TestRunRoutesHumanReplyToMessageAuthor(t *testing.T) {
 // (never `message.created`); it must wake the agent exactly like a fresh human message would:
 // the issue topic, the issue's route, and the root author's own topic, correlated to the root.
 func TestRunRoutesHumanAnsweredReplyToRouteAndMessageAuthor(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	broker := events.NewBroker()
 	route := "role:legion-controller-x"
@@ -878,6 +904,7 @@ func TestRunRoutesHumanAnsweredReplyToRouteAndMessageAuthor(t *testing.T) {
 }
 
 func TestRunRoutesReplyToReplyToBothTheRootAndParentAuthors(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	broker := events.NewBroker()
 	seedIssue(t, database, "T-1", nil)
@@ -914,6 +941,7 @@ func TestRunRoutesReplyToReplyToBothTheRootAndParentAuthors(t *testing.T) {
 }
 
 func TestRunRoutesCommentResolutionToRootAuthor(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	broker := events.NewBroker()
 	seedIssue(t, database, "T-1", nil)
@@ -945,6 +973,7 @@ func TestRunRoutesCommentResolutionToRootAuthor(t *testing.T) {
 }
 
 func TestAddAuthorRoutesSkipsAgentReplyingToItself(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	seedIssue(t, database, "T-1", nil)
 	rootID := seedComment(t, database, "T-1", model.Actor{Kind: "session", ID: "session-writer"}, "Draft done.", nil)
@@ -959,6 +988,7 @@ func TestAddAuthorRoutesSkipsAgentReplyingToItself(t *testing.T) {
 }
 
 func TestAddAuthorRoutesNotifiesTheUnsubscribedSessionDirectly(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	seedIssue(t, database, "T-1", nil)
 	event := model.Event{
@@ -976,6 +1006,7 @@ func TestAddAuthorRoutesNotifiesTheUnsubscribedSessionDirectly(t *testing.T) {
 }
 
 func TestAddAuthorRoutesSkipsSubscriptionRemovedWithoutASessionID(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	seedIssue(t, database, "T-1", nil)
 	event := model.Event{
@@ -989,6 +1020,7 @@ func TestAddAuthorRoutesSkipsSubscriptionRemovedWithoutASessionID(t *testing.T) 
 }
 
 func TestRunPublishesSubscriptionRemovedAndRoutesItDirectlyToTheUnsubscribedSession(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	broker := events.NewBroker()
 	seedIssue(t, database, "T-1", nil)
@@ -1019,6 +1051,7 @@ func TestRunPublishesSubscriptionRemovedAndRoutesItDirectlyToTheUnsubscribedSess
 }
 
 func TestRunRetriesSubscriptionRemovedWhenTheAuthorRoutePublishFails(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	broker := events.NewBroker()
 	seedIssue(t, database, "T-1", nil)
@@ -1064,6 +1097,7 @@ func TestRunRetriesSubscriptionRemovedWhenTheAuthorRoutePublishFails(t *testing.
 }
 
 func TestLoadRootCommentAuthorsTerminatesOnACycle(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	seedIssue(t, database, "T-1", nil)
 	commentID := seedComment(t, database, "T-1", model.Actor{Kind: "session", ID: "session-writer"}, "Draft done.", nil)
@@ -1086,7 +1120,7 @@ func TestLoadRootCommentAuthorsTerminatesOnACycle(t *testing.T) {
 	}()
 	select {
 	case <-done:
-	case <-time.After(2 * time.Second):
+	case <-time.After(eventWait):
 		t.Fatal("loadRootCommentAuthors did not terminate on a cyclic reply_to chain")
 	}
 	if err != nil {
@@ -1098,6 +1132,7 @@ func TestLoadRootCommentAuthorsTerminatesOnACycle(t *testing.T) {
 }
 
 func TestRunStillPublishesWhenTheRootWalkHitsAReplyToCycle(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	broker := events.NewBroker()
 	seedIssue(t, database, "T-1", nil)
@@ -1136,6 +1171,7 @@ func TestRunStillPublishesWhenTheRootWalkHitsAReplyToCycle(t *testing.T) {
 // A human resolution takes the issue route and reaches the asker; a session resolution
 // skips the route (notify is false) but still reaches the asker, who follows the ask.
 func TestRunRoutesAskResolutionToTheAskerAndHumanResolutionToTheRoute(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name            string
 		actor           model.Actor
@@ -1156,6 +1192,7 @@ func TestRunRoutesAskResolutionToTheAskerAndHumanResolutionToTheRoute(t *testing
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			database := storetest.Open(t)
 			broker := events.NewBroker()
 			route := "role:legion-controller-x"
@@ -1191,6 +1228,7 @@ func TestRunRoutesAskResolutionToTheAskerAndHumanResolutionToTheRoute(t *testing
 }
 
 func TestRunAddsBoundRoutePublication(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name, route, wantTopic string
 	}{
@@ -1198,6 +1236,7 @@ func TestRunAddsBoundRoutePublication(t *testing.T) {
 		{"session", "session:5a660655-04ad-4ce0-8a9b-93dd03c412b7", "notifications.agent.5a660655-04ad-4ce0-8a9b-93dd03c412b7"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			database := storetest.Open(t)
 			broker := events.NewBroker()
 			seedIssue(t, database, "T-1", &tc.route)
@@ -1224,6 +1263,7 @@ func TestRunAddsBoundRoutePublication(t *testing.T) {
 }
 
 func TestRunPublishesTargetedMessageToIssueSubscribersOnly(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	broker := events.NewBroker()
 	route := "role:legion-controller-x"
@@ -1251,6 +1291,7 @@ func TestRunPublishesTargetedMessageToIssueSubscribersOnly(t *testing.T) {
 }
 
 func TestRunPublishesQuietAnchorRefreshEventsOnlyToTheIssueTopic(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	broker := events.NewBroker()
 	route := "role:legion-controller-x"
@@ -1289,6 +1330,7 @@ func TestRunPublishesQuietAnchorRefreshEventsOnlyToTheIssueTopic(t *testing.T) {
 }
 
 func TestRunPublishesEveryEventButRoutesOnlyNotifyingEvents(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	broker := events.NewBroker()
 	route := "role:legion-controller-x"
@@ -1350,6 +1392,7 @@ func TestRunPublishesEveryEventButRoutesOnlyNotifyingEvents(t *testing.T) {
 // event an agent wrote, so a reader that skipped on it never saw an agent's comment on an issue
 // it had subscribed to; `quiet` says whether the event carries anything at all.
 func TestEnvelopePayloadStatesWhetherTheEventIsQuiet(t *testing.T) {
+	t.Parallel()
 	agent := model.Actor{Kind: "session", ID: "5a660655-04ad-4ce0-8a9b-93dd03c412b7"}
 	for _, tc := range []struct {
 		name  string
@@ -1403,6 +1446,7 @@ func TestEnvelopePayloadStatesWhetherTheEventIsQuiet(t *testing.T) {
 	// a targeted message is quiet either way - the session it names already had it through the
 	// synchronous listener send, so the issue's followers are not shown it a second time.
 	t.Run("a targeted message the outbox scanned out of Postgres", func(t *testing.T) {
+		t.Parallel()
 		database := storetest.Open(t)
 		broker := events.NewBroker()
 		seedIssue(t, database, "T-1", nil)
@@ -1437,6 +1481,7 @@ func TestEnvelopePayloadStatesWhetherTheEventIsQuiet(t *testing.T) {
 }
 
 func TestRunRetriesEventWhenRequiredRoleRouteFails(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	broker := events.NewBroker()
 	route := "role:legion-controller-x"
@@ -1469,6 +1514,7 @@ func TestRunRetriesEventWhenRequiredRoleRouteFails(t *testing.T) {
 }
 
 func TestRunRetriesEventWhenRequiredAuthorRouteFails(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	broker := events.NewBroker()
 	seedIssue(t, database, "T-1", nil)
@@ -1505,6 +1551,7 @@ func TestRunRetriesEventWhenRequiredAuthorRouteFails(t *testing.T) {
 }
 
 func TestRunRetriesFailedIssuePublication(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	broker := events.NewBroker()
 	seedIssue(t, database, "T-1", nil)
@@ -1518,7 +1565,7 @@ func TestRunRetriesFailedIssuePublication(t *testing.T) {
 
 	select {
 	case <-publisher.attempt:
-	case <-time.After(time.Second):
+	case <-time.After(eventWait):
 		t.Fatal("initial publication was not attempted")
 	}
 	if publishedAt(t, database, event.ID) != nil {
@@ -1537,6 +1584,7 @@ func TestRunRetriesFailedIssuePublication(t *testing.T) {
 // family without an attempt of its own, and an event of another issue is published by the same
 // scan, which returns rather than read the failing batch again and again.
 func TestAFullBatchOfFailingEventsHoldsBackOnlyItsOwnIssue(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	broker := events.NewBroker()
 	seedIssue(t, database, "T-1", nil)
@@ -1612,6 +1660,7 @@ func idsOf(events []model.Event) []int64 {
 // off with its attempt and the reason recorded, and it holds back none of its issue's later
 // events: the event behind it is published by the same scan.
 func TestScanPublishesTheEventBehindAnUnreadableRow(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	broker := events.NewBroker()
 	seedIssue(t, database, "T-1", nil)
@@ -1660,6 +1709,7 @@ func TestScanPublishesTheEventBehindAnUnreadableRow(t *testing.T) {
 }
 
 func TestRunReplacesOverflowedSubscriptionWithoutBusyLoop(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	broker := events.NewBroker()
 	seedIssue(t, database, "T-1", nil)
@@ -1675,7 +1725,7 @@ func TestRunReplacesOverflowedSubscriptionWithoutBusyLoop(t *testing.T) {
 
 	select {
 	case <-publisher.started:
-	case <-time.After(time.Second):
+	case <-time.After(eventWait):
 		t.Fatal("initial outbox scan did not start")
 	}
 	for range 65 {
@@ -1689,6 +1739,7 @@ func TestRunReplacesOverflowedSubscriptionWithoutBusyLoop(t *testing.T) {
 }
 
 func TestRunMarksIssueLessTargetedMessagesPublishedWithoutRepublishing(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	broker := events.NewBroker()
 	target := "session:planner-session"
@@ -1844,7 +1895,11 @@ func publishedAt(t *testing.T, database *store.Store, eventID int64) *time.Time 
 	return value
 }
 
-func TestMain(m *testing.M) { os.Exit(storetest.Main(m)) }
+// TestMain gives the package both harnesses: storetest.Main runs the tests and drops the databases
+// it clones, and testnats.MainWith shuts down the one NATS server the tests that need no server of
+// their own share (newRoleRig and its kin). A test that stops, freezes or reconfigures its server
+// still starts one of its own (testnats.Start).
+func TestMain(m *testing.M) { os.Exit(testnats.MainWith(m, storetest.Main)) }
 
 func waitFor(t *testing.T, timeout time.Duration, what string, condition func() bool) {
 	t.Helper()
@@ -1859,6 +1914,7 @@ func waitFor(t *testing.T, timeout time.Duration, what string, condition func() 
 }
 
 func TestRunRoutesChangedDocumentAskAnswerToFollower(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	database := storetest.Open(t)
 	broker := events.NewBroker()

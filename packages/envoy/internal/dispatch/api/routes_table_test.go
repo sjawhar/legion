@@ -12,7 +12,6 @@ import (
 	"sort"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -61,6 +60,7 @@ func TestRouteIndexLinesOrderTwoMethodsOfOnePathByMethod(t *testing.T) {
 }
 
 func TestRouteIndexListsEveryRouteSortedByPathThenMethod(t *testing.T) {
+	t.Parallel()
 	mux := http.NewServeMux()
 	Register(mux, t.Context(), Deps{AgentTokens: sharedAgentTokens(t, "agent-token")})
 
@@ -135,6 +135,7 @@ func TestRouteIndexListsEveryRouteSortedByPathThenMethod(t *testing.T) {
 // WriteRouteIndex is what `envoy-dispatch routes` prints and the docs site's API reference is
 // generated from: every row of the table, as GET /api/v1 serves it, and no test hook.
 func TestWriteRouteIndexCarriesEveryRouteTheTableHas(t *testing.T) {
+	t.Parallel()
 	var output bytes.Buffer
 	if err := WriteRouteIndex(&output); err != nil {
 		t.Fatal(err)
@@ -189,6 +190,7 @@ func TestWriteRouteIndexCarriesEveryRouteTheTableHas(t *testing.T) {
 // (testdata/routes.txt), which two branches that each add a route merge into the union of their
 // two lines.
 func TestRoutesTablePinsEveryRegisteredRoute(t *testing.T) {
+	t.Parallel()
 	routes := (&server{}).routes()
 	seen := make(map[string]struct{}, len(routes))
 	for _, route := range routes {
@@ -426,11 +428,12 @@ func personalTokenOwnedBy(t *testing.T, database *store.Store, owner string, sco
 // That last probe is what holds the gate to the table: without it a row the table declares
 // `approve` whose gate asked only for `person` would pass every test here.
 func TestRoutesTableAuthCellsMatchHandlers(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	personal := personalTokenHolding(t, database, model.ScopePerson, model.ScopeApprove)
 	personOnly := personalTokenHolding(t, database, model.ScopePerson)
 	probe := func(route apiRoute, credential string) *httptest.ResponseRecorder {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), concurrentWait)
 		defer cancel()
 		request := httptest.NewRequestWithContext(ctx, route.Method, routeProbePath(route.Pattern), bytes.NewReader([]byte(routeProbeBody(route))))
 		request.Header.Set("Content-Type", "application/json")
@@ -500,6 +503,7 @@ func TestRoutesTableAuthCellsMatchHandlers(t *testing.T) {
 // and the scope map names no route the table does not mount: the two halves register's panic
 // protects (scopedRoutesNotMounted), proved from the table alone with nothing mounted.
 func TestEveryRouteThatWasABrowsersAloneNamesThePersonScope(t *testing.T) {
+	t.Parallel()
 	browserOnly := []string{
 		"GET /api/v1/settings/project-default-assignees",
 		"PUT /api/v1/projects/{key}/default-assignee",

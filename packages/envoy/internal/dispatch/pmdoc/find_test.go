@@ -11,6 +11,7 @@ import (
 )
 
 func TestFindQuoteDisambiguatesByOccurrenceAndNearest(t *testing.T) {
+	t.Parallel()
 	doc, err := Parse("brown X brown Y brown\n")
 	if err != nil {
 		t.Fatal(err)
@@ -45,6 +46,7 @@ func TestFindQuoteDisambiguatesByOccurrenceAndNearest(t *testing.T) {
 }
 
 func TestFindQuoteStripsInlineMarkdownFromQuote(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		markdown string
@@ -100,6 +102,7 @@ func TestFindQuoteStripsInlineMarkdownFromQuote(t *testing.T) {
 }
 
 func TestFindQuoteDoesNotStripLiteralMarkdownCharacters(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name     string
 		markdown string
@@ -122,6 +125,7 @@ func TestFindQuoteDoesNotStripLiteralMarkdownCharacters(t *testing.T) {
 }
 
 func TestFindQuoteMissNamesThreeNearestBlocksInOrder(t *testing.T) {
+	t.Parallel()
 	doc, err := Parse("Closest rendered block.\n\nA distant block.\n\nClosest but later.\n\nClose enough.\n\nZebra.\n")
 	if err != nil {
 		t.Fatal(err)
@@ -141,6 +145,7 @@ func TestFindQuoteMissNamesThreeNearestBlocksInOrder(t *testing.T) {
 }
 
 func TestFindQuoteMissWithOneBlockNamesOne(t *testing.T) {
+	t.Parallel()
 	doc, err := Parse("Only block.\n")
 	if err != nil {
 		t.Fatal(err)
@@ -156,6 +161,7 @@ func TestFindQuoteMissWithOneBlockNamesOne(t *testing.T) {
 }
 
 func TestFindQuoteMatchesHeadingWrittenWithATXMarker(t *testing.T) {
+	t.Parallel()
 	doc, err := Parse("# Decisions needed\n\nDecisions needed\n\n## Decisions needed\n")
 	if err != nil {
 		t.Fatal(err)
@@ -189,6 +195,7 @@ func TestFindQuoteMatchesHeadingWrittenWithATXMarker(t *testing.T) {
 }
 
 func TestFindQuoteHeadingMarkerToleratesInlineMarkdownAndWhitespace(t *testing.T) {
+	t.Parallel()
 	doc, err := Parse("# Use `config` with care\n\nUse config with care in the body.\n")
 	if err != nil {
 		t.Fatal(err)
@@ -209,6 +216,7 @@ func TestFindQuoteHeadingMarkerToleratesInlineMarkdownAndWhitespace(t *testing.T
 }
 
 func TestFindHeadingMatchesTitleAcrossLevels(t *testing.T) {
+	t.Parallel()
 	doc, err := Parse("# A\n\ntext\n\n## A\n\n# B\n")
 	if err != nil {
 		t.Fatal(err)
@@ -237,6 +245,7 @@ func TestFindHeadingMatchesTitleAcrossLevels(t *testing.T) {
 }
 
 func TestListMarksAndMarkAttrs(t *testing.T) {
+	t.Parallel()
 	doc, err := FromJSON(fixtureNamed(t, "marks").PMJSON)
 	if err != nil {
 		t.Fatal(err)
@@ -259,6 +268,7 @@ func TestListMarksAndMarkAttrs(t *testing.T) {
 }
 
 func TestMarkRangeThenFindMark(t *testing.T) {
+	t.Parallel()
 	doc := crdt.New()
 	frag := doc.GetXmlFragment("prosemirror")
 	want, err := Parse("The quick brown fox.\n")
@@ -315,6 +325,7 @@ func TestMarkRangeThenFindMark(t *testing.T) {
 }
 
 func TestFindMarkSpansTextblocks(t *testing.T) {
+	t.Parallel()
 	doc := crdt.New()
 	fragment := doc.GetXmlFragment("prosemirror")
 	tree, err := Parse("one\n\ntwo\n")
@@ -351,6 +362,7 @@ func TestFindMarkSpansTextblocks(t *testing.T) {
 // Alice's over "brown fox". Whichever order the shared run lists them in, each reads as its own
 // whole text.
 func TestFindMarkReadsEachOfTwoMarksOfOneTypeOnOneRun(t *testing.T) {
+	t.Parallel()
 	bob := Mark{Type: "proofComment", Attrs: Attrs{"id": "c1", "by": "user:bob"}}
 	alice := Mark{Type: "proofComment", Attrs: Attrs{"id": "c2", "by": "user:alice"}}
 	for name, shared := range map[string][]Mark{"bob first": {bob, alice}, "alice first": {alice, bob}} {
@@ -386,6 +398,7 @@ func TestFindMarkReadsEachOfTwoMarksOfOneTypeOnOneRun(t *testing.T) {
 // The server writing a second record mark of one type over text the first covers keeps both: each
 // is its own Y attribute key, and removing one leaves the other whole.
 func TestMarkRangeKeepsAnotherMarkOfTheTypeOnTheSameText(t *testing.T) {
+	t.Parallel()
 	for _, markType := range []string{"proofComment", "proofSuggestion", "dispatchAsk"} {
 		t.Run(markType, func(t *testing.T) {
 			first := Mark{Type: markType, Attrs: Attrs{"id": "m1", "by": "user:bob"}}
@@ -474,6 +487,7 @@ func TestMarkRangeKeepsAnotherMarkOfTheTypeOnTheSameText(t *testing.T) {
 }
 
 func TestSpliceInlineKeepsNeighbourMarks(t *testing.T) {
+	t.Parallel()
 	doc, err := Parse("Keep **this** and change that.\n")
 	if err != nil {
 		t.Fatal(err)
@@ -500,6 +514,7 @@ func TestSpliceInlineKeepsNeighbourMarks(t *testing.T) {
 }
 
 func TestSpliceAcrossBlocksReplacesBlocks(t *testing.T) {
+	t.Parallel()
 	doc, err := Parse("# Title\n\nOne.\n\nTwo.\n\nThree.\n")
 	if err != nil {
 		t.Fatal(err)
@@ -530,6 +545,7 @@ func TestSpliceAcrossBlocksReplacesBlocks(t *testing.T) {
 }
 
 func TestSpliceNestedTextblocks(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		markdown string
@@ -591,6 +607,7 @@ func TestSpliceNestedTextblocks(t *testing.T) {
 }
 
 func TestSpliceCrossListItemsReplacesOnlySelectedItems(t *testing.T) {
+	t.Parallel()
 	doc, err := Parse("- one\n- two\n- three\n")
 	if err != nil {
 		t.Fatal(err)
@@ -621,6 +638,7 @@ func TestSpliceCrossListItemsReplacesOnlySelectedItems(t *testing.T) {
 }
 
 func TestSpliceAcrossTextblocksKeepsPartialBoundaries(t *testing.T) {
+	t.Parallel()
 	doc, err := Parse("a b c\n\nd e f\n")
 	if err != nil {
 		t.Fatal(err)
@@ -736,6 +754,7 @@ func TestSpliceMatchesEngineReplaceRange(t *testing.T) {
 }
 
 func TestSpliceBlockReplacementDoesNotFlattenIntoParagraph(t *testing.T) {
+	t.Parallel()
 	doc, err := Parse("a b c\n")
 	if err != nil {
 		t.Fatal(err)
@@ -761,6 +780,7 @@ func TestSpliceBlockReplacementDoesNotFlattenIntoParagraph(t *testing.T) {
 }
 
 func TestSpliceDoesNotJoinTextblocksWithDifferentAttrs(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		markdown string
@@ -818,6 +838,7 @@ func TestSpliceDoesNotJoinTextblocksWithDifferentAttrs(t *testing.T) {
 }
 
 func TestSpliceAtBlockBoundariesAndDeletes(t *testing.T) {
+	t.Parallel()
 	doc, err := Parse("One.\n\nTwo.\n")
 	if err != nil {
 		t.Fatal(err)
@@ -868,6 +889,7 @@ func TestSpliceAtBlockBoundariesAndDeletes(t *testing.T) {
 }
 
 func TestMarkRangeSupportsCodeBlocksAndMultipleBlocks(t *testing.T) {
+	t.Parallel()
 	doc, err := Parse("```\ncode\n```\n\none\n\ntwo\n")
 	if err != nil {
 		t.Fatal(err)
@@ -919,6 +941,7 @@ func TestMarkRangeSupportsCodeBlocksAndMultipleBlocks(t *testing.T) {
 // names the place for a person. A refusal of the mark itself (an unknown type, an empty range) is
 // not ErrMarkNotAllowed: no text a caller wrote causes it.
 func TestAMarkNotAllowedWhereItsTextStandsIsTheOnlyErrMarkNotAllowed(t *testing.T) {
+	t.Parallel()
 	doc, err := Parse("---\ntitle: Hello world\n---\n\n```\nrun the tests\n```\n\nIntro.\n")
 	if err != nil {
 		t.Fatal(err)
@@ -984,6 +1007,7 @@ func TestAMarkNotAllowedWhereItsTextStandsIsTheOnlyErrMarkNotAllowed(t *testing.
 // positions apart and the position halfway between them is as near each: the tie is a real one, not
 // one the fixture can miss.
 func TestNearestFirstListsEveryMatchInFindsOrderOfChoice(t *testing.T) {
+	t.Parallel()
 	doc, err := Parse("brown ones\n\nbrown two\n\nbrown three\n")
 	if err != nil {
 		t.Fatal(err)

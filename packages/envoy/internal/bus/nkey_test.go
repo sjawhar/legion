@@ -1,5 +1,8 @@
 package bus_test
 
+// Every test here sets NATS_NKEY_SEED or NATS_NKEY_SEED_FILE with t.Setenv, which panics the
+// process beside t.Parallel, so none of them is parallel (dispatch://INFRA-1075).
+
 import (
 	"encoding/base32"
 	"fmt"

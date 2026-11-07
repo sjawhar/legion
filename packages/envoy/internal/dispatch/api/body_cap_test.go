@@ -23,6 +23,7 @@ func paragraphBody(count, width int) string {
 // its six blocks. A comment whose second paragraph alone passes contracts.DispatchBlockUnits is
 // refused naming that block, and the issue's comments are as they were.
 func TestACommentIsBoundedBlockByBlockRatherThanAsAWhole(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "BLK", "Block bounds", "before")
 
@@ -52,6 +53,7 @@ func TestACommentIsBoundedBlockByBlockRatherThanAsAWhole(t *testing.T) {
 // contracts.DispatchBlockUnits+1 units is refused naming the block, and a body of one block more
 // than contracts.DispatchItemBlocks is refused for how many blocks it holds (INFRA-370).
 func TestBodiesAreBoundedOnEveryWriteRoute(t *testing.T) {
+	t.Parallel()
 	listener, _ := newBroadcastListener(t, broadcastSessions)
 	handler, _ := newTargetedMessageHandler(t, listener.URL)
 	issue := createInteractionIssue(t, handler, "CAP", "Body bounds", "before")

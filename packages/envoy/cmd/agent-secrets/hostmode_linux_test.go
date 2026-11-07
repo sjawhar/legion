@@ -61,8 +61,9 @@ func fakeHelperWithPids(t *testing.T, canned helper.Response) (string, <-chan in
 // TestRegisterExecRunsTheCommandAsTheRegisteredPid must run in a subprocess: --exec replaces the
 // process image.
 func TestRegisterExecRunsTheCommandAsTheRegisteredPid(t *testing.T) {
+	t.Parallel()
 	sock, pids := fakeHelperWithPids(t, helper.Response{OK: true, State: "enrolling", RuntimeID: "h:1:1"})
-	cmd := exec.Command("go", "run", ".", "register", "--exec", "--", "sh", "-c", "echo $$")
+	cmd := exec.Command(buildAgentSecrets(t), "register", "--exec", "--", "sh", "-c", "echo $$")
 	cmd.Env = append(os.Environ(), "AGENT_SECRETS_HELPER_SOCK="+sock)
 	out, err := cmd.Output()
 	if err != nil {
@@ -148,6 +149,7 @@ func helperSessions(t *testing.T, sock string) []helper.SessionInfo {
 // from an unregistered process is. nocredential_linux_test.go covers identity inside a
 // registered session.
 func TestIdentityAsksARealHelperWithoutRegistering(t *testing.T) {
+	t.Parallel()
 	binary := buildAgentSecrets(t)
 	sock := realHelper(t)
 	env := append(os.Environ(), "AGENT_SECRETS_HELPER_SOCK="+sock, "AGENT_SECRETS_KEY_DIR=", "XDG_RUNTIME_DIR="+t.TempDir(), "HOME="+t.TempDir())

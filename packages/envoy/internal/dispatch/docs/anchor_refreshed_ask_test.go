@@ -29,6 +29,7 @@ func anchorDocument(t *testing.T, service *Service, artifactID string) model.Ask
 // instead of the read answering SQLSTATE 22P02; the ask anchored canonically beside it keeps the
 // anchor document the read resolved before.
 func TestLoadAnchorRefreshedAskAnswersOverAnAnchorArtifactIDThatDoesNotCast(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "The quick brown fox")

@@ -158,7 +158,7 @@ func (s *server) legionManagedStatusAdvice(ctx context.Context, tx pgx.Tx, route
 		s.logAdviceError(route, issueKey, "legion_managed_status", err)
 		return nil
 	}
-	managed, err := legionManagedStatus(ctx, walk, issueKey)
+	managed, err := s.legionManagedStatus(ctx, walk, issueKey)
 	if err != nil {
 		_ = walk.Rollback(ctx)
 		s.logAdviceError(route, issueKey, "legion_managed_status", err)

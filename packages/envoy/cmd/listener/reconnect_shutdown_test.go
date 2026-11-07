@@ -166,6 +166,7 @@ func (r *listenerRelay) close() {
 // During a deploy, a reconnect can interrupt the replacement's durable bind. The reconnect must
 // leave that bind to finish, keep the role lane forwarding, then make SIGTERM an ordered shutdown.
 func TestListenerReconnectWithBindInFlightShutsDownAfterForwardingRoles(t *testing.T) {
+	t.Parallel()
 	const (
 		machineID = "reconnect-bind-sigterm"
 		holderID  = "ses_reconnect_bind_sigterm_holder"
@@ -190,7 +191,7 @@ func TestListenerReconnectWithBindInFlightShutsDownAfterForwardingRoles(t *testi
 	relay.arm("$JS.API.CONSUMER.INFO.", 2)
 	select {
 	case <-relay.swallowed:
-	case <-time.After(10 * time.Second):
+	case <-time.After(listenerWait):
 		t.Fatal("the listener's durable bind never reached the controlled relay")
 	}
 	relay.drop()
@@ -247,7 +248,7 @@ func TestListenerReconnectWithBindInFlightShutsDownAfterForwardingRoles(t *testi
 			if !strings.HasPrefix(frame.DedupeKey, roleForwardDedupePrefix) {
 				t.Fatalf("role message %d forwarded with dedupe key %q, want %s prefix", received, frame.DedupeKey, roleForwardDedupePrefix)
 			}
-		case <-time.After(10 * time.Second):
+		case <-time.After(listenerWait):
 			t.Fatalf("the listener forwarded %d of %d routed role messages during the reconnect:\n%s", received, messages, listener.Output.String())
 		}
 	}
