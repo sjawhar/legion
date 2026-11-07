@@ -289,9 +289,9 @@ func mintAtBoot(ctx context.Context, tokens appauth.Tokens, repo ghrepo.Reposito
 
 // openWorkflow opens the workflow in the order a refusal names its cause: the configuration, the
 // Dispatch bearer prepare read, the project's repository mapping from Dispatch (each repository
-// checked for both GitHub Apps) into repos, the mapping every role's gh bundle reads its owners
-// from, the Apps' logins, the App tokens minted for every served repository, then the fill of any
-// record written before the record carried its repository.
+// checked for both GitHub Apps) into repos, the served repositories every role's gh bundle reads
+// its directories from, the Apps' logins, the App tokens minted for every served repository, then
+// the fill of any record written before the record carried its repository.
 //
 // reserve is the daemon's one wake limiter as the engine reaches it (run builds it, before this
 // and before supervision, which reserves its launches from the same one): the moment the one
