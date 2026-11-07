@@ -525,14 +525,15 @@ func TestStartsAreIdempotentAndRefusedBeforeWriting(t *testing.T) {
 	}
 }
 
-// toldRecreated starts generation with env (resuming resume, "" for none), returns the
-// WorkspaceRecreatedVariable value its child was started with, and stops it.
-func (g *rig) toldRecreated(generation uint64, env []string, resume string) string {
+// told starts generation with env as its start command's own Env (resuming resume, "" for none),
+// answers what expansion — a shell parameter expansion the child prints, such as `$NAME` or
+// `${NAME-unset}` — came out in that child's environment, and stops the generation.
+func (g *rig) told(generation uint64, expansion string, env []string, resume string) string {
 	g.t.Helper()
 	told := filepath.Join(g.t.TempDir(), "told")
 	command := shimwire.LauncherStart{
 		ID: "start-" + strconv.FormatUint(generation, 10), Generation: generation,
-		Argv: []string{"/bin/sh", "-c", `printf '%s' "$` + WorkspaceRecreatedVariable + `" > "$TOLD.tmp" && mv "$TOLD.tmp" "$TOLD"; exec sleep 600`},
+		Argv: []string{"/bin/sh", "-c", `printf '%s' "` + expansion + `" > "$TOLD.tmp" && mv "$TOLD.tmp" "$TOLD"; exec sleep 600`},
 		Env:  append([]string{"TOLD=" + told}, env...), ResumeFile: resume,
 	}
 	if got := g.start(command); !got.OK {
@@ -549,6 +550,13 @@ func (g *rig) toldRecreated(generation uint64, env []string, resume string) stri
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+}
+
+// toldRecreated starts generation with env (resuming resume, "" for none), returns the
+// WorkspaceRecreatedVariable value its child was started with, and stops it.
+func (g *rig) toldRecreated(generation uint64, env []string, resume string) string {
+	g.t.Helper()
+	return g.told(generation, "$"+WorkspaceRecreatedVariable, env, resume)
 }
 
 // newWorkspace is a directory shaped as a workspace for the creation record (workspace.Created).

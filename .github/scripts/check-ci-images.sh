@@ -301,7 +301,7 @@ EXCEPTIONS = {
     "scripts/e2e/stage4a-sandbox-runtime.sh": NO_CI_JOB,
     "scripts/e2e/stage4b-sandbox-tree.sh": NO_CI_JOB,
     "scripts/e2e/verifiers-staging-token.sh": NO_CI_JOB,
-    "packages/daemon/internal/testpg/testpg.go": FETCHES_NOTHING,
+    "packages/daemon/internal/testpg/testdb/testdb.go": FETCHES_NOTHING,
     "packages/envoy/scripts/dev-postgres.sh": FETCHES_NOTHING,
     "packages/envoy/scripts/dev-postgres.test.sh": FETCHES_NOTHING,
     "packages/envoy/loadtest/cluster/cluster.sh": FETCHES_NOTHING,

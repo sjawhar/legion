@@ -6,6 +6,8 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+
+	"github.com/sjawhar/legion/daemon/internal/testpg/testdb"
 )
 
 // cloneChildVariable marks the run of this test binary that does the cloning, so the parent run
@@ -14,12 +16,12 @@ import (
 const cloneChildVariable = "LEGION_TESTPG_CLONE_CHILD"
 
 // Every clone of a test process copies the one template that process migrated: the whole point of
-// Clone over Database plus Migrate. The child run clones twice and its stderr must hold one
+// Clone over testdb.Database plus Migrate. The child run clones twice and its stderr must hold one
 // `testpg: migrated template` line, the line prepare logs; a second line is a second migration
 // run, which is the regression this guards — a template rebuilt per test, or per clone.
 func TestTwoClonesInOneProcessBuildOneTemplate(t *testing.T) {
 	if os.Getenv("LEGION_TEST_PG_DSN") == "" {
-		t.Skip(SkipMessage)
+		t.Skip(testdb.SkipMessage)
 	}
 	if os.Getenv(cloneChildVariable) != "" {
 		first, second := Clone(t, "legion_testpg_clone_test"), Clone(t, "legion_testpg_clone_test")
