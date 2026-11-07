@@ -3167,16 +3167,11 @@ jobs:
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
-        # The settings these tests need, as the server's own command line, so it starts with them
-        # and no step has to restart it; envoy-go's own service says what each of them buys and
-        # why this container can do without durability (dispatch://INFRA-1075). Two Dispatch
-        # server processes migrate this database and write it while the browser drives them.
-        command: postgres -c fsync=off -c full_page_writes=off -c synchronous_commit=off -c max_connections=500 -c max_prepared_transactions=20
         options: >-
           --health-cmd "pg_isready -U postgres"
-          --health-interval 1s
+          --health-interval 10s
           --health-timeout 5s
-          --health-retries 50
+          --health-retries 5
     env:
       DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
     steps:
@@ -3188,21 +3183,6 @@ jobs:
         with:
           go-version-file: packages/envoy/go.mod
           cache: false
-      # The settings the service's command: asks for, read back from the server itself; envoy-go's
-      # own read-back step says why a command is worth reading back.
-      - name: Read the disposable service's settings back
-        run: |
-          id="${{ job.services.postgres.id }}"
-          failed=
-          read_back=
-          for want in fsync=off full_page_writes=off synchronous_commit=off max_connections=500 max_prepared_transactions=20; do
-            setting=${want%%=*}
-            value=$(docker exec "$id" psql -U postgres -Atc "show $setting")
-            read_back="$read_back $setting=$value"
-            [ "$value" = "${want#*=}" ] || { echo "::error::the Postgres service reports $setting=$value, not ${want#*=}"; failed=1; }
-          done
-          echo "$id:$read_back"
-          [ -z "$failed" ] || exit 1
       # go-envoy, restored only: its modules are the envoy module's, but this job builds the
       # Dispatch server and the dev OIDC issuer, not the listener and natsd the family's saving
       # jobs build, so it saves none.
