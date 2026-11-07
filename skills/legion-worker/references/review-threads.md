@@ -93,10 +93,11 @@ threads the approval names are the work the merge waits for, and this loop close
    (`skill://legion-worker/references/merge-gate.md`). The `before_merge` results that passed at
    the head it approved first are still current for it when the fix's own diff changes no code
    that runs: it reads that diff, and its approval says it read it, that the diff changes no code
-   that runs, the head each result ran at and the head it approves. A fix whose diff changes code
-   that runs leaves every result stale, so that head gets a request for changes and the issue
-   goes back through the tester.
-3. **A thread the fix cannot close is a message to the architect**, sent with `envoy_publish` to
-   its role topic by whichever role found it: the sentence is false because the code is wrong, or
-   closing it would change code that runs. The architect moves the issue back to `implementing`.
-   Neither the implementer nor the reviewer moves it.
+   that runs, the head each result ran at and the head it approves. A push whose diff changes
+   code that runs leaves every result stale, so that head gets a request for changes and the
+   issue goes back through the tester.
+3. **A thread the fix cannot close is a behavioural finding**: the sentence is false because the
+   code is wrong, or closing it would change code that runs. Whichever role found it tells the
+   architect with `envoy_publish` to its role topic, and the reviewer's `REQUEST_CHANGES` naming
+   that finding is the review that moves the issue back to `implementing`. Neither the
+   implementer nor the reviewer moves the issue itself.

@@ -169,9 +169,11 @@ through your acceptance and retro to the merger's new READY.
 The reviewer resolves each thread it opened, with plain `gh`, once it has read the fix that
 closed it: its own threads and the bot threads it accepted. The implementer replies and resolves
 none. A thread whose text fix the implementer cannot make — the sentence is false because the
-code is wrong, or closing it would change code that runs — reaches you from whichever of the two
-found it, and you move the issue back to `implementing` with `request_backward_move`, the reason
-naming the thread. If the reviewer reports that GitHub refused its `resolveReviewThread`, open a
+code is wrong, or closing it would change code that runs — is a behavioural finding, and it
+reaches you from whichever of the two found it. The reviewer's `REQUEST_CHANGES` naming that
+finding is the review that moves the issue back to `implementing`; where no review carries it,
+you move the issue back yourself with `request_backward_move`, the reason naming the thread.
+If the reviewer reports that GitHub refused its `resolveReviewThread`, open a
 `dispatch ask` naming the thread's id or URL and GitHub's message, for a human to resolve it by
 hand, with options for resolved / could not. The merger does not complete while that ask is open;
 READY itself checks no thread state

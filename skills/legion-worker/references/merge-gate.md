@@ -70,7 +70,7 @@ other change to the head voids it.
   Approval is refused while any `before_merge` check of the issue's own Verification document has no passing result that is current at the head being reviewed: `REQUEST_CHANGES` naming each such check by its block id, and `dispatch results --issue <issue>` is the read that decides it.
   An issue with no Verification document, or whose Verification document holds no `before_merge` check, is a gap you name in the review body, never a review that asks for changes: say which of the two it is, and tell the architect, who writes the checks. Your own findings and the checks that do exist still decide the review, and on an issue that has none the architect's acceptance is the gate.
   A result is current at that head while the head is the head of an open pull request, or the final head of a merged one, attributed to the check's own issue. A child's pull request never makes a root check's result current, and a child never records the result that proves a root's check. A child that carries part of a root's requirement proves it with a check on the child's own Verification document whose `serves` names that requirement, and that result is current at the child's head. A root's own checks are proven at the root's own head, or on the default branch for an `after_merge` check, in the root's last round.
-  A passing result stays current across one push above the head you approved when that push changes no code that runs: read that push's own diff (`gh api repos/<o>/<r>/compare/<approved sha>...<new head>`), approve the new head, and say in that approval that you read the diff, that it changes no code that runs, the head each result ran at and the head you approve. The carry rests on the diff and on your statement of it, never on the push being called a text fix: where the diff changes code that runs every result is stale, as it is after any other push, so the head gets a request for changes and the issue goes back through the tester.
+  A passing result stays current across one push above the head you approved when that push changes no code that runs: read that push's own diff (`gh api repos/<o>/<r>/compare/<approved sha>...<new head>`), approve the new head, and say in that approval that you read the diff, that it changes no code that runs, the head each result ran at and the head you approve. The carry rests on the diff and on your statement of it, never on the push being called a text fix: where that push's diff changes code that runs every result is stale, as it is after any other push, so the head gets a request for changes and the issue goes back through the tester.
   On a docs-only PR the `Thermo` line still records the simplify pass and the defects it
   reported, and its pair half reads `thermonuclear pair: not run (docs-only)`.
   Submit **one review per round**. A reviewer submits `REQUEST_CHANGES` only when a behavioural
@@ -119,8 +119,9 @@ other change to the head voids it.
   you opened, one call per thread, and approve the head that push made, by SHA, reading that
   head's checks as you read any head's
   (`skill://legion-worker/references/review-threads.md` gives the loop and the calls). A thread
-  the fix cannot close is a message to the architect, who moves the issue back to `implementing`:
-  neither you nor the implementer moves it.
+  the fix cannot close is a behavioural finding: tell the architect, and your `REQUEST_CHANGES`
+  naming that finding is the review that moves the issue back to `implementing`. Neither you nor
+  the implementer moves the issue itself.
 - **A text finding stays text where a test pins the sentence it fixes.** A check that is green at
   the approved head is not a `before_merge` check of the issue with no current passing result, so
   it asks for no changes; a text fix that breaks such a pin is caught at the head the fix made,

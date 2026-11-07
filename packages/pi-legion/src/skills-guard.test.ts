@@ -562,7 +562,7 @@ test("one post-approval thread loop for each role, in every copy", () => {
     ]
   );
   countedOncePerFile(
-    "You resolve each thread you opened once you have read the fix that closed it, one call per thread, and then approve the head the fix landed on, by SHA, reading that head's checks as you read any head's; a thread the fix cannot close is a message to the architect, who moves the issue back to `implementing`.",
+    "You resolve each thread you opened once you have read the fix that closed it, one call per thread, and then approve the head the fix landed on, by SHA, reading that head's checks as you read any head's; a thread the fix cannot close is a behavioural finding: tell the architect, and your `REQUEST_CHANGES` naming that finding is the review that moves the issue back to `implementing`.",
     [
       "packages/daemon/internal/prompts/roles/reviewer.md",
       "packages/daemon/internal/prompts/roles/core/reviewer.md",
