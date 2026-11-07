@@ -335,9 +335,12 @@ func servedDefaults(repos *repositories) []string {
 //   - M5, the mapping names both and GitHub answers for both: somebody made a repository at the
 //     old location, which deletes GitHub's redirect, so the two names are two repositories.
 //
-// The sixth case is M2 with the review App alone answering that it is not installed on the mapped
-// name: one App that does not answer for a name is enough to read the pair's other name, and both
-// Apps are read there, since the question is which name GitHub holds the repository under.
+// The sixth case is M2 with the implement App installed on the mapped name while the review App
+// answers that it is not: a transfer takes a repository out of every installation of the owner
+// it left, so a mapped name that holds one App and not the other is the operator's own gap
+// instead. The pair's other name is read for neither App there, and the entry is left out naming
+// the App that is missing, rather than a project being moved onto the repository a pair names
+// on the strength of one missing installation.
 func TestTheMappingLoadServesEachMappedRepositoryUnderTheNameGitHubHasIt(t *testing.T) {
 	const old, moved = "sjawhar/legion", "cybermonklabs/legion"
 	// transferred is GitHub after the transfer, which answers the old address with the redirect
@@ -375,10 +378,12 @@ func TestTheMappingLoadServesEachMappedRepositoryUnderTheNameGitHubHasIt(t *test
 		asks   []string
 		unread string
 		// served is what the project serves, by name; serves the served entry Dispatch maps as
-		// the project's default; owners the owner set the mapping holds.
-		served []string
-		serves string
-		owners []string
+		// the project's default, "" where the project serves none; owners the owner set the
+		// mapping holds; refuses the refusal each left-out entry carries, by mapped name.
+		served  []string
+		serves  string
+		owners  []string
+		refuses []refusedRepository
 		// minted is each owner a read of GitHub's spelling was minted for, and gaps each webhook
 		// App gap with the repository it is recorded against.
 		minted []string
@@ -458,16 +463,18 @@ func TestTheMappingLoadServesEachMappedRepositoryUnderTheNameGitHubHasIt(t *test
 			minted:    []string{"cybermonklabs", "sjawhar"},
 		},
 		{
+			// The mapped name holds the implement App and not the review App, which is the
+			// operator's own gap: no read of the pair's other name is made for either App, and
+			// the entry is left out naming the review App alone. Nothing is served, so the
+			// project has no default and no owner, and no read of GitHub's spelling is minted.
 			name:      "M2 with the review App alone answering that it is not installed on the mapped name",
 			mappings:  []dispatch.RepoProject{{Repo: old, Project: "LEGION", Default: true}},
 			missing:   map[string]bool{"review " + old: true},
 			github:    transferred,
 			installed: []string{"cybermonklabs"},
-			asks:      reads(old, moved),
-			served:    []string{moved},
-			serves:    moved,
-			owners:    []string{"cybermonklabs"},
-			minted:    []string{"cybermonklabs"},
+			asks:      reads(old),
+			unread:    moved,
+			refuses:   []refusedRepository{{Repo: old, Reason: "the review App is not installed on " + old, mappedDefault: true}},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -487,11 +494,15 @@ func TestTheMappingLoadServesEachMappedRepositoryUnderTheNameGitHubHasIt(t *test
 			if got := repositoryNames(repos.Accepted()); !slices.Equal(got, tc.served) {
 				t.Errorf("the project serves %v, want %v", got, tc.served)
 			}
-			if got := servedDefaults(repos); !slices.Equal(got, []string{tc.serves}) {
-				t.Errorf("the served entries carrying the project's default are %v, want %s alone", got, tc.serves)
+			wantDefault := []string{tc.serves}
+			if tc.serves == "" {
+				wantDefault = nil
 			}
-			if got := repos.Refused(); len(got) != 0 {
-				t.Errorf("the load refuses %q, want none: every entry is served under the name both Apps answer for", refusalReasons(got))
+			if got := servedDefaults(repos); !slices.Equal(got, wantDefault) {
+				t.Errorf("the served entries carrying the project's default are %v, want %v", got, wantDefault)
+			}
+			if got := repos.Refused(); !slices.Equal(got, tc.refuses) {
+				t.Errorf("the load refuses %#v, want %#v: an entry is served under the name both Apps answer for, and left out naming the App that is missing", got, tc.refuses)
 			}
 			if got := repos.Owners(); !slices.Equal(got, tc.owners) {
 				t.Errorf("the owner set is %v, want %v: the owner of each served name", got, tc.owners)

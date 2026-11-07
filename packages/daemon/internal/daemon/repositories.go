@@ -395,16 +395,24 @@ func listMapping(ctx context.Context, client dispatch.Client) ([]dispatch.RepoPr
 // installed on it (installs, under each App's JWT; per repository, since an installation on an
 // owner may cover only some of its repositories).
 //
-// When GitHub answers that an App is not installed on the mapped name and renames pairs that
-// repository with another name, both Apps' installations are read for the pair's other name too
-// (ghrepo.Renames.Partner, which answers from either side: this is about which name GitHub has
-// the repository under, not about which way a resolution runs). An App is installed on an owner,
-// so a transfer to another owner leaves the mapped name covered by no installation of the owner
-// it still names, while the name it moved to is covered by the one that has it. The entry is
-// served under the name both Apps answer for, and recorded under that name from here on, so the
-// boot's own read of GitHub's spelling (nameAccepted, minted as the implement App) is made for an
-// owner whose installation exists. A mapped name both Apps answer for costs no second read: that
-// is the state before a transfer, where the mapping names the repository GitHub still holds.
+// When GitHub answers that no App of the deployment is installed on the mapped name and renames
+// pairs that repository with another name, both Apps' installations are read for the pair's
+// other name too (ghrepo.Renames.Partner, which answers from either side: this is about which
+// name GitHub has the repository under, not about which way a resolution runs). An App is
+// installed on an owner, so a transfer to another owner leaves the mapped name covered by no
+// installation of the owner it still names, neither App's, while the name it moved to is covered
+// by the ones that have it. The entry is served under the name both Apps answer for, and
+// recorded under that name from here on, so the boot's own read of GitHub's spelling
+// (nameAccepted, minted as the implement App) is made for an owner whose installation exists.
+//
+// A mapped name that holds one of the two Apps and not the other is the operator's own gap
+// rather than a transfer: the pair's other name is read for neither App, and the entry is left
+// out naming the App that is missing. Reading the pair there would serve a repository under a
+// name the operator never mapped on the strength of one missing installation, which before any
+// transfer — a pair configured early, and the Apps installed one at a time — would move a whole
+// project onto the repository the pair names. A mapped name both Apps answer for costs no second
+// read either: that is the state before a transfer, where the mapping names the repository
+// GitHub still holds.
 //
 // A repository neither name answers for is refused, naming each App that is not installed on each
 // name read and each read that failed, under Dispatch's own spelling of the mapped name, which is
@@ -445,9 +453,10 @@ func checkMapping(ctx context.Context, client dispatch.Client, mappings []dispat
 		repo    ghrepo.Repository
 		parse   error
 		// reads is each name both Apps were read for, in the order they were read: the mapped
-		// name, and the pair's other name when the mapped name answered that an App is not
-		// installed on it. Both are allocated at once, so an entry that reads a partner costs
-		// one allocation rather than a one-element slice and a grow that copies it. No read is
+		// name, and the pair's other name when no App of the deployment answered that it is
+		// installed on the mapped one. Both are allocated at once, so an entry that reads a
+		// partner costs one allocation rather than a one-element slice and a grow that copies
+		// it. No read is
 		// in flight across that append: the first round is collected whole (group.Wait) before
 		// any second element is appended, and each round is handed an element's address only
 		// after the round before it has finished.
@@ -503,15 +512,22 @@ func checkMapping(ctx context.Context, client dispatch.Client, mappings []dispat
 		if m.parse != nil {
 			continue
 		}
-		// notInstalled is GitHub answering, for one App or both, that it is not installed on
-		// the mapped name, which is the answer a partner read is made for. A read that failed
-		// is no such answer — that entry is read again instead (installReadRetry) — and neither
-		// is an installation that is there.
-		notInstalled := false
+		// noAppInstalled is GitHub answering, for every App of the deployment, that it is not
+		// installed on the mapped name, which is the answer a partner read is made for: a
+		// transfer takes the repository out of every installation of the owner it names, both
+		// Apps' alike, since an App is installed on an owner. A mapped name that holds one of
+		// the two Apps and not the other is the operator's own gap rather than a transfer, so
+		// reading the pair's other name there would serve a repository under a name the
+		// operator never mapped on the strength of a missing installation, and switch a project
+		// onto the repository a pair names before any transfer has happened; that entry is left
+		// out naming the App that is missing. A read that failed is no answer at all — that
+		// entry is read again instead (installReadRetry) — so an entry one of whose reads failed
+		// asks for no partner either, and neither does one every App is installed on.
+		noAppInstalled := true
 		for index := range appauth.Roles {
-			notInstalled = notInstalled || (m.reads[0].failed[index] == nil && !m.reads[0].installed[index])
+			noAppInstalled = noAppInstalled && m.reads[0].failed[index] == nil && !m.reads[0].installed[index]
 		}
-		if !notInstalled {
+		if !noAppInstalled {
 			continue
 		}
 		// The pair is looked up only for an entry that asked for one, so a deployment that
