@@ -127,6 +127,10 @@ type bootConfig struct {
 	// five minutes; only DISPATCH_TEST_CI_RECONCILE_INTERVAL, under the test hooks, sets it, since
 	// no process-level test can wait five minutes for a pass.
 	CIReconcileInterval time.Duration
+	// DeliveryReconcileInterval is how often the delivery reconcile pass runs, zero for
+	// delivery.ReconcileInterval's five minutes; only DISPATCH_TEST_DELIVERY_RECONCILE_INTERVAL,
+	// under the test hooks, sets it, since no end-to-end test can wait five minutes for a pass.
+	DeliveryReconcileInterval time.Duration
 	// MaintenanceSweepInterval is how often the maintenance sweep runs - the Idempotency-Keys and
 	// spent DPoP proofs past their windows, and the deliveries a process that died left owed -
 	// zero for api.MaintenanceSweepInterval's minute; only
@@ -780,6 +784,9 @@ func main() {
 	if boot.ReconcileAtStart {
 		reconcile.FirstPassAtStart()
 	}
+	if boot.DeliveryReconcileInterval > 0 {
+		reconcile.TickEvery(boot.DeliveryReconcileInterval)
+	}
 	go reconcile.Run(ctx, leases)
 	// waitIntakes waits for the intakes' stop, which shutdown runs before it closes the database
 	// pool; with no NATS client there is nothing to wait for.
@@ -1075,6 +1082,7 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 		{"DISPATCH_TEST_LISTENER_TAKEOVER_WINDOW", &boot.ListenerTakeoverWindow},
 		{"DISPATCH_TEST_EDIT_NOTICE_QUIET", &boot.EditNoticeQuiet},
 		{"DISPATCH_TEST_CI_RECONCILE_INTERVAL", &boot.CIReconcileInterval},
+		{"DISPATCH_TEST_DELIVERY_RECONCILE_INTERVAL", &boot.DeliveryReconcileInterval},
 		{"DISPATCH_TEST_MAINTENANCE_SWEEP_INTERVAL", &boot.MaintenanceSweepInterval},
 		{"DISPATCH_TEST_PROCESS_HEARTBEAT", &boot.ProcessHeartbeat},
 	} {

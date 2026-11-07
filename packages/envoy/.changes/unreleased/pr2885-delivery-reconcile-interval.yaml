@@ -1,0 +1,3 @@
+kind: Added
+body: |-
+  `DISPATCH_TEST_DELIVERY_RECONCILE_INTERVAL` sets how often the Dispatch server's delivery reconcile pass runs, in place of the five minutes a deployment runs it at, so an end-to-end test can watch a pass rather than wait for one. It is a test-only setting: it needs `DISPATCH_TEST_HOOKS=1`, takes a positive Go duration, and a deployment never sets it.
