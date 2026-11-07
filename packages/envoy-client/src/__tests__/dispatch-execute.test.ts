@@ -3496,11 +3496,13 @@ describe("executeDispatchTool", () => {
 
     expect(result).toEqual({
       text: [
-        'Not created: "Global search across issues and documents" looks like a duplicate.',
+        'Not created: "Global search across issues and documents" is a near copy of an open issue.',
         "LEGION-12 [triage] Global search across issues and documents → http://dispatch.test/issues/LEGION-12",
-        "Reference the existing issue, or run dispatch issue again with --force after reading it.",
+        "Read each issue above. If one is the same work, fold this into it by the duplicate rule of skill://dispatch-first.",
+        "If none is, run dispatch issue again with --force, and write in the new issue's spec why it is not each issue named here.",
       ].join("\n"),
       details: { duplicates: candidates },
+      refused: true,
     });
   });
 
@@ -12160,6 +12162,133 @@ describe("executeDispatchTool", () => {
     } finally {
       issue.resolve(issueResponse);
     }
+  });
+
+  // The controller's weekly audit counts the week's overrides with `dispatch read --issue <KEY>`
+  // and reads them off the `issue.created` line of its `Events:` block
+  // (`skills/legion-controller/references/weekly-audit.md`, "The week's forced creates"). The
+  // issues the refusal named ride on that event as `forced.past`, so the line has to name them:
+  // without them the count the audit reports cannot be made from the commands it gives, and no
+  // other command of the CLI prints the field.
+  test("names the issues a forced create went past on its issue.created line", async () => {
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      if (target.pathname === "/api/v1/issues/DSP-42") {
+        return response({
+          key: "DSP-42",
+          title: "Dispatch issue",
+          status: "open",
+          route: null,
+          open_asks: [],
+          children: [],
+          last_seq: 1,
+        });
+      }
+      if (target.pathname === "/api/v1/issues/DSP-42/events") {
+        return response([
+          {
+            seq: 1,
+            type: "issue.created",
+            issue_key: "DSP-42",
+            actor: {
+              kind: "session",
+              id: "s1",
+              origin: { session_title: "Legion implementer · INFRA-1160" },
+            },
+            created_at: "2026-09-09T00:01:00Z",
+            payload: {
+              key: "DSP-42",
+              status: "triage",
+              forced: { past: ["DSP-7", "DSP-9"] },
+            },
+          },
+        ]);
+      }
+      throw new Error(`unexpected request: ${target.pathname}`);
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_read",
+      args: { ref: "dispatch://DSP-42/log" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.text).toBe(
+      [
+        "Key: DSP-42",
+        "Events:",
+        "- #1 issue.created · session s1 (Legion implementer · INFRA-1160) · 2026-09-09T00:01:00Z · status triage · forced past DSP-7, DSP-9",
+      ].join("\n")
+    );
+  });
+
+  // A forced create whose near-copy check never answered carries `forced` with an empty `past`,
+  // and the weekly audit reports those apart from the overrides
+  // (`skills/legion-controller/references/weekly-audit.md`, "The week's forced creates"). It is
+  // the only record of such a create, so the line says so in words: printing the plain status
+  // line would make it read as a create nobody forced, and the audit's count cannot be made.
+  test("tells a forced create whose near-copy check did not answer from an unforced one", async () => {
+    const createdLine = async (forced: { past: string[] } | undefined): Promise<string> => {
+      const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+        const target = new URL(String(url));
+        if (target.pathname === "/api/v1/issues/DSP-42") {
+          return response({
+            key: "DSP-42",
+            title: "Dispatch issue",
+            status: "open",
+            route: null,
+            open_asks: [],
+            children: [],
+            last_seq: 1,
+          });
+        }
+        if (target.pathname === "/api/v1/issues/DSP-42/events") {
+          return response([
+            {
+              seq: 1,
+              type: "issue.created",
+              issue_key: "DSP-42",
+              actor: {
+                kind: "session",
+                id: "s1",
+                origin: { session_title: "Legion implementer · INFRA-1160" },
+              },
+              created_at: "2026-09-09T00:01:00Z",
+              payload: {
+                key: "DSP-42",
+                status: "triage",
+                ...(forced === undefined ? {} : { forced }),
+              },
+            },
+          ]);
+        }
+        throw new Error(`unexpected request: ${target.pathname}`);
+      };
+
+      const result = await executeDispatchTool({
+        tool: "dispatch_read",
+        args: { ref: "dispatch://DSP-42/log" },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      });
+      return result.text.split("\n").at(-1) ?? "";
+    };
+
+    const created =
+      "- #1 issue.created · session s1 (Legion implementer · INFRA-1160) · 2026-09-09T00:01:00Z · status triage";
+    expect(await createdLine({ past: [] })).toBe(
+      `${created} · forced, the near-copy check did not answer`
+    );
+    expect(await createdLine(undefined)).toBe(created);
   });
 
   test("reads recent events from a Dispatch log reference, each with the head of its text", async () => {

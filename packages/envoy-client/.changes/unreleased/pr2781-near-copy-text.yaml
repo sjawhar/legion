@@ -1,0 +1,12 @@
+kind: Changed
+body: |-
+  `dispatch issue` refused as a near copy names each issue the refusal found, points to the
+  duplicate rule of `skill://dispatch-first`, and asks a filer who forces to write in the new
+  issue's spec why it is not each named issue. After a create below the refusal, the output names
+  the likely duplicate and points to the same rule. `dispatch related`'s `--exclude-issue` is now
+  repeatable. A `dispatch issue` the near-copy gate refuses exits 1, where it exited 0, so a
+  script that reads the exit code is no longer told the issue was filed; an argument the CLI
+  refuses before the call reaches Dispatch exits 2, where it exited 1, as `skill://dispatch` says
+  a usage error does, leaving exit 1 for a refusal alone. On an `issue.created` line, a forced
+  create whose near-copy check did not answer now reads as that, apart from one that went past
+  the refusal.

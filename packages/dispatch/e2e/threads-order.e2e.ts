@@ -103,7 +103,13 @@ async function seedThreads(replies: readonly string[] = REPLIES): Promise<Seeded
     await createComment(askIssue.key, { ask_id: ask.id, body }, asSession());
   }
 
+  // force, because this fixture files a near copy on purpose: "Replay window" shares its only
+  // meaning sentence, "The mirror replays the ledger on a cold start.", with "Replay budget"
+  // above, which the near-copy gate refuses as a copy of an open issue
+  // (dispatch://INFRA-1160/spec#b-r2). The threads this spec reads are what it is about, so the
+  // create goes in forced rather than the two texts being pulled apart.
   const blockIssue = await createIssue({
+    force: true,
     project: "CORE",
     spec: decisionSpec,
     title: "Replay window",

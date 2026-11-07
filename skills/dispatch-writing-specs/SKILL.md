@@ -28,7 +28,7 @@ Part | Content
 `Design` | How it meets them; a value and its reason for each limit, size and time
 `Decisions` | One line: `The decisions are in dispatch://KEY/artifact/decisions-md.`
 
-`serves` and `needs` name a block of this issue or an ancestor. Another agent can build and check the work from these alone. A small change gets a few sentences per part, no matrix; split a large design into child issues.
+`serves` and `needs` name a block of this issue or an ancestor. Another agent can build and check the work from these alone. A small change gets a few sentences per part, no matrix; split a large design into children.
 
 ## Rules for the text
 

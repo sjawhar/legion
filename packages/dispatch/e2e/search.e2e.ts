@@ -416,42 +416,70 @@ test("no results and short queries are stated, not silent", async ({ browser }) 
     await context.close();
   }
 });
-test("the agent issue API returns POSSIBLE_DUPLICATE and force creates the issue", async ({
+// The gate refuses a near copy of an open issue, not a title that shares words with one. A text
+// that only shares words is created and names the issue it is like, so the filer reads that issue
+// before going on (dispatch://INFRA-1160/spec#b-r2, #b-r4).
+test("the agent issue API names a likely duplicate, refuses a copy, and force creates it", async ({
   request,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
   await createIssue({ project: "CORE", title: "Calibrate astrolabe navigation instruments" });
 
-  const duplicate = await request.post("/api/v1/issues", {
+  const related = await request.post("/api/v1/issues", {
     data: {
       actor: searchSession.actor,
       project: "CORE",
       title: "Astrolabe navigation instruments rollout",
     },
+    headers: { Authorization: `Bearer ${e2eAgentToken}` },
+  });
+  expect(related.status()).toBe(201);
+  await expect(related.json()).resolves.toMatchObject({
+    advice: {
+      suggestions: {
+        likely_duplicate: {
+          key: "CORE-1",
+          title: "Calibrate astrolabe navigation instruments",
+        },
+      },
+    },
+    key: "CORE-2",
+  });
+
+  const mirrorSpec = "# Mirrors\n\nThe sextant mirror is silvered. The clamp holds it square.\n";
+  const copied = {
+    actor: searchSession.actor,
+    project: "CORE",
+    spec: mirrorSpec,
+    title: "Overhaul the sextant mirror alignment",
+  };
+  await createIssue({
+    project: "CORE",
+    spec: mirrorSpec,
+    title: "Overhaul the sextant mirror alignment",
+  });
+
+  const duplicate = await request.post("/api/v1/issues", {
+    data: copied,
     headers: { Authorization: `Bearer ${e2eAgentToken}` },
   });
   expect(duplicate.status()).toBe(409);
   await expect(duplicate.json()).resolves.toMatchObject({
     candidates: [
       {
-        key: "CORE-1",
-        title: "Calibrate astrolabe navigation instruments",
+        key: "CORE-3",
+        title: "Overhaul the sextant mirror alignment",
       },
     ],
     code: "POSSIBLE_DUPLICATE",
   });
 
   const forced = await request.post("/api/v1/issues", {
-    data: {
-      actor: searchSession.actor,
-      force: true,
-      project: "CORE",
-      title: "Astrolabe navigation instruments rollout",
-    },
+    data: { ...copied, force: true },
     headers: { Authorization: `Bearer ${e2eAgentToken}` },
   });
   expect(forced.status()).toBe(201);
-  await expect(forced.json()).resolves.toMatchObject({ key: "CORE-2" });
+  await expect(forced.json()).resolves.toMatchObject({ key: "CORE-4" });
 });
 
 // The hint names keys a touch reader does not have, and 33px of palette is 33px of hits, so it

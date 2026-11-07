@@ -1,0 +1,5 @@
+kind: Added
+body: |-
+  `Suggestions.likely_duplicate`, the closest open issue of an unforced create below the near-copy
+  refusal; `IssueEventPayload.forced`, what a forced create went past; and
+  `RelatedCheckInput.exclude_issues`, the list of issues a related read leaves out of its results.

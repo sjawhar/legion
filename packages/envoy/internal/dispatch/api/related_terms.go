@@ -475,6 +475,12 @@ type relatedTerms struct {
 	Items int
 	// NoLexemes is a text that holds no lexeme at all: blank, or stopwords alone.
 	NoLexemes bool
+	// TextLexemes is how many distinct lexemes the text itself holds, numbers and hashes aside,
+	// before the cap and before a word is dropped as unpriced or as common. The near-copy gate
+	// reads it to tell a short text from a long one whose pick came out short: a text holding no
+	// more words than duplicateMinTerms is judged on whether its words are the same ones, not on
+	// a share of them (duplicateEqualLexemesQuery).
+	TextLexemes int
 }
 
 // relatedTermsSQL reads, for every lexeme of the text, its frequency there (tf), its df from the
@@ -641,6 +647,20 @@ type relatedCandidate struct {
 	known  bool
 }
 
+// probeUnknownTerms and priceUnknownTerms are pickRelatedTerms's two ways with a lexeme the
+// project's statistics do not hold. The related-item check probes: a live exists per kind, up to
+// relatedProbeLimit of them, which costs a text of many unseen words hundreds of milliseconds.
+// The near-copy gate, which a create waits on before it is written, prices instead: such a
+// lexeme is taken at the rarest document frequency the statistics did price, the highest idf
+// they carry, because a word they have not seen is almost always rare or new since the last
+// refresh. Document frequency 1 would rank it above every priced word and reorder the pick, and
+// zero weight would be wrong the other way: a copy filed seconds after its original would lose
+// exactly the words that make it a copy.
+const (
+	probeUnknownTerms = true
+	priceUnknownTerms = false
+)
+
 // pickRelatedTerms chooses the related-item check's keywords from text (as More Like
 // This does): each lexeme scored tf × idf, idf = ln(1 + (N − df + 0.5)/(df + 0.5)) (Lucene's BM25
 // idf), where df is how many of the project's items hold it and N how many items the project
@@ -652,11 +672,14 @@ type relatedCandidate struct {
 //
 // df comes from the project's statistics (refreshSearchTermStats). A lexeme they do not hold, or
 // whose df the excluded owner's items bring to zero, is probed live, the relatedProbeLimit most
-// frequent in the text, and a hit counts as df 1. A project with no statistics starts their
-// refresh (ensureSearchTermStats) and is picked in probe mode, every lexeme probed and N taken as
-// 0. Each chosen term's surface is read from title alone (relatedTermsSQL).
+// frequent in the text, and a hit counts as df 1, or is priced instead where the caller asks for
+// that (priceUnknownTerms). A project with no statistics is picked with N taken as 0: a probe
+// caller starts their refresh (ensureSearchTermStats) and probes the relatedProbeLimit most
+// frequent lexemes, as above, while a price caller starts no refresh and probes nothing, so no
+// lexeme is priced and each is taken at df 1, the fallback rarest when nothing is priced.
+// Each chosen term's surface is read from title alone (relatedTermsSQL).
 func (s *server) pickRelatedTerms(
-	ctx context.Context, q queryer, project, text, title string, exclude relatedExclusion,
+	ctx context.Context, q queryer, project, text, title string, exclude relatedExclusion, probe bool,
 ) (relatedTerms, error) {
 	var artifactID *string
 	if exclude.artifactID != "" {
@@ -689,15 +712,42 @@ func (s *server) pickRelatedTerms(
 	picked := relatedTerms{StatsPresent: items != nil}
 	if items != nil {
 		picked.Items = *items
-	} else {
+	} else if probe {
+		// Only the related-item check starts the refresh. It needs the statistics, since it
+		// drops a word it cannot price; the near-copy gate prices one instead and reads whatever
+		// is there. Starting it from the gate as well would run a second refresh of the same
+		// project per create, each holding a pool connection for as long as the read takes.
 		s.ensureSearchTermStats(project)
 	}
 
 	candidates = slices.DeleteFunc(candidates, func(candidate relatedCandidate) bool {
 		return relatedNoise(candidate.Lexeme)
 	})
-	if err := probeRelatedCandidates(ctx, q, project, exclude.issueKey, artifactID, candidates); err != nil {
-		return relatedTerms{}, err
+	picked.TextLexemes = len(candidates)
+	if probe {
+		if err := probeRelatedCandidates(ctx, q, project, exclude.issueKey, artifactID, candidates); err != nil {
+			return relatedTerms{}, err
+		}
+	} else {
+		// The rarest document frequency the statistics did price, which is the highest idf they
+		// hold: an unpriced lexeme is taken at that, never below it, so a word the statistics
+		// have not seen weighs as much as the rarest word they have and no more. Giving it df 1
+		// outright would rank it above every priced word and reorder the pick; weight zero would
+		// lose a copy filed seconds after its original exactly the words that make it a copy.
+		rarest := 0
+		for _, candidate := range candidates {
+			if candidate.known && candidate.DF > 0 && (rarest == 0 || candidate.DF < rarest) {
+				rarest = candidate.DF
+			}
+		}
+		if rarest == 0 {
+			rarest = 1
+		}
+		for index := range candidates {
+			if !candidates[index].known {
+				candidates[index].DF, candidates[index].known = rarest, true
+			}
+		}
 	}
 
 	commonAbove := max(float64(relatedCommonFloor), float64(picked.Items)/10)

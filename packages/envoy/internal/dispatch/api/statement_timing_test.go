@@ -137,6 +137,16 @@ func TestStatementTimings(t *testing.T) {
 	searchMeaningArguments := slices.Concat(searchArguments, meaning)
 	relatedKeywordArguments := slices.Concat(relatedArguments, []any{lexemes, weights})
 	relatedMeaningArguments := slices.Concat(relatedArguments, meaning, []any{lexemes, weights})
+	// The check's two statements each have a second shape, the one whose kinds CTE drops the
+	// owners the check leaves out (relatedExcludedOwners), and that shape is the one every
+	// write runs: relatedSearch runs it whenever the check excludes anything, and every
+	// recording source names an owner (INFRA-1160). It is measured with the subject issue
+	// excluded, as a create excludes the issue it is filing, and the owners are a non-empty
+	// list of their own rather than nil: over a NULL array the filter is null of every row, and
+	// `where not` would then drop the lot and measure a statement that reads nothing.
+	excludedOwners := []any{[]string{"issue:" + subjects.Issue}}
+	relatedKeywordExcludingArguments := slices.Concat(relatedKeywordArguments, excludedOwners)
+	relatedMeaningExcludingArguments := slices.Concat(relatedMeaningArguments, excludedOwners)
 	// The probe is measured on a subject of its own, subjects.ProbeLexemes, the project's twenty
 	// rarest words rather than the three the other statements are measured on. Twenty is the
 	// list a question of a paragraph or two hands the picker, and rare is what it hands it: of
@@ -214,7 +224,9 @@ func TestStatementTimings(t *testing.T) {
 	// reading, measured once under a name that says whose it is: two gates over one text would
 	// double the run and could disagree under the very spread above. Each whole statement is
 	// reported beside it, both texts and no bound, which is the end-to-end number a reader of
-	// the gate asks for next.
+	// the gate asks for next. The after side of each report is the excluding shape, the text a
+	// write runs; each report's name is its before text's, which is what a reader lines up
+	// against the Before branch's reading on the older schema.
 	documentLegArguments := []any{lexemeQuery, subjects.Project, lexemes, weights}
 	runner.Pair(t, "the document arm relatedKeywordQuery and relatedMeaningQuery share",
 		benchtime.Statement{
@@ -227,10 +239,10 @@ func TestStatementTimings(t *testing.T) {
 		})
 	runner.Report(t, "relatedKeywordQuery, the whole statement",
 		benchtime.Statement{SQL: mainRelatedKeywordQuery, Args: relatedKeywordArguments},
-		benchtime.Statement{SQL: relatedKeywordQuery, Args: relatedKeywordArguments})
+		benchtime.Statement{SQL: relatedKeywordExcludingQuery, Args: relatedKeywordExcludingArguments})
 	runner.Report(t, "relatedMeaningQuery, the whole statement, over main's document arm",
 		benchtime.Statement{SQL: relatedMeaningQueryOverMainsDocumentArm, Args: relatedMeaningArguments, Setup: meaningSetup},
-		benchtime.Statement{SQL: relatedMeaningQuery, Args: relatedMeaningArguments, Setup: meaningSetup})
+		benchtime.Statement{SQL: relatedMeaningExcludingQuery, Args: relatedMeaningExcludingArguments, Setup: meaningSetup})
 
 	runner.Pair(t, "relatedProbeSQL",
 		benchtime.Statement{SQL: mainRelatedProbeSQL, Args: probeArguments},

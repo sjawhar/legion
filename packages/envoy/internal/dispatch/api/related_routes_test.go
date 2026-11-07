@@ -376,3 +376,165 @@ func TestRelatedChecksRouteRefusesABadFilter(t *testing.T) {
 		}
 	}
 }
+
+// uploadProjectDocument puts a markdown document on the project and answers its artifact id.
+func uploadProjectDocument(t *testing.T, handler http.Handler, project, name, markdown string) string {
+	t.Helper()
+	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects/"+project+"/artifacts", map[string]any{
+		"name": name, "content": markdown,
+	}, "alice")
+	if response.Code != http.StatusCreated && response.Code != http.StatusOK {
+		t.Fatalf("upload %s: status=%d body=%s", name, response.Code, response.Body.String())
+	}
+	return decodeBody[struct {
+		Artifact struct {
+			ID string `json:"id"`
+		} `json:"artifact"`
+	}](t, response).Artifact.ID
+}
+
+// The three places go to open issues before anything a project document holds, and a done issue
+// comes after every open one. A project document is what the audit found taking an issue's
+// place: a filer can fold into an issue and only read a document.
+func TestRelatedItemsListOpenIssuesBeforeAnyOtherItem(t *testing.T) {
+	handler, database, _ := newTestServer(t, testServerOptions{})
+	createSuggestionProject(t, handler, "RORDER")
+	const subject = "zymurgy ledger reconciliation drifts after a gnomon reseat"
+	// Three open issues that match, each through a different part of itself, so the order is not
+	// about which part matched.
+	byTitle := createSearchIssue(t, handler, "RORDER", "The "+subject, "")
+	bySpec := createSearchIssue(t, handler, "RORDER", "Ledger tail", "The "+subject+" every night.")
+	byComment := createSearchIssue(t, handler, "RORDER", "Ledger notes", "")
+	addIssueComment(t, handler, byComment, "Seen again: the "+subject+".")
+	// A done issue that matches as well as any of them.
+	closed := createSearchIssue(t, handler, "RORDER", "Closed: the "+subject, "")
+	if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+closed, map[string]string{
+		"status": "done",
+	}, "alice"); response.Code != http.StatusOK {
+		t.Fatalf("close %s: status=%d body=%s", closed, response.Code, response.Body.String())
+	}
+	// A project document and an answered ask on it, which hold the same words.
+	document := uploadProjectDocument(t, handler, "RORDER", "ledger-notes.md",
+		"# Ledger notes\n\nThe "+subject+", every night, for a week.\n")
+	ask := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+document+"/asks", map[string]any{
+		"question": "Does the " + subject + " matter for the quarter?",
+	}, "alice")
+	if ask.Code != http.StatusCreated {
+		t.Fatalf("open the document ask: status=%d body=%s", ask.Code, ask.Body.String())
+	}
+	refreshTermStats(t, database, "RORDER")
+
+	suggestions := getRelated(t, handler, "RORDER", url.Values{"title": {"The " + subject}})
+	owners := relatedOwners(suggestions)
+	if len(owners) != suggestionRelatedCount {
+		t.Fatalf("related owners = %v, want %d of them", owners, suggestionRelatedCount)
+	}
+	for _, key := range []string{byTitle, bySpec, byComment} {
+		if !slices.Contains(owners, key) {
+			t.Fatalf("related owners = %v, want the open issue %s among them", owners, key)
+		}
+	}
+	if slices.Contains(owners, closed) {
+		t.Fatalf("related owners = %v, want the done issue %s after every open one", owners, closed)
+	}
+	for _, item := range suggestions.Related {
+		if item.Owner.Kind != "issue" {
+			t.Fatalf("related = %+v, want nothing a project document holds before an open issue", suggestions.Related)
+		}
+	}
+}
+
+// The no-write route leaves out every issue its list names, and a released client's single
+// exclude_issue as a string still answers 200 and leaves that issue out.
+func TestRelatedRouteExcludeIssuesLeavesEveryNamedIssueOut(t *testing.T) {
+	handler, database, _ := newTestServer(t, testServerOptions{})
+	createSuggestionProject(t, handler, "REXCLS")
+	const subject = "zymurgy ledger reconciliation drifts"
+	parent := createSearchIssue(t, handler, "REXCLS", "The "+subject, "")
+	child := createSearchIssue(t, handler, "REXCLS", "The "+subject+" nightly", "")
+	keeper := createSearchIssue(t, handler, "REXCLS", "The "+subject+" at the quarter", "")
+	refreshTermStats(t, database, "REXCLS")
+	before := relatedWrites(t, database)
+
+	params := url.Values{"title": {"The " + subject}}
+	if owners := relatedOwners(getRelated(t, handler, "REXCLS", params)); len(owners) != 3 {
+		t.Fatalf("related owners without an exclusion = %v, want all three", owners)
+	}
+	params["exclude_issues"] = []string{parent, child}
+	suggestions := getRelated(t, handler, "REXCLS", params)
+	if owners := relatedOwners(suggestions); !slices.Equal(owners, []string{keeper}) {
+		t.Fatalf("related owners = %v, want only %s", owners, keeper)
+	}
+	expectNothingWritten(t, database, before)
+
+	// A released client sends the single string, and it still works.
+	single := getRelated(t, handler, "REXCLS", url.Values{"title": {"The " + subject}, "exclude_issue": {parent}})
+	if owners := relatedOwners(single); slices.Contains(owners, parent) {
+		t.Fatalf("related owners = %v, want nothing of %s", owners, parent)
+	}
+
+	// POST takes the list in its body, and both forms refuse a key the project does not hold and
+	// a list past the cap.
+	body := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects/REXCLS/related", map[string]any{
+		"title": "The " + subject, "exclude_issues": []string{parent, child},
+	}, "alice")
+	if body.Code != http.StatusOK {
+		t.Fatalf("POST with exclude_issues: status=%d body=%s", body.Code, body.Body.String())
+	}
+	if owners := relatedOwners(decodeBody[testSuggestions](t, body)); !slices.Equal(owners, []string{keeper}) {
+		t.Fatalf("POST related owners = %v, want only %s", owners, keeper)
+	}
+	tooMany := make([]string, relatedExcludeLimit+1)
+	for index := range tooMany {
+		tooMany[index] = keeper
+	}
+	for _, list := range [][]string{{"REXCLS-99"}, {"not-a-key"}, tooMany} {
+		refused := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects/REXCLS/related", map[string]any{
+			"title": "The " + subject, "exclude_issues": list,
+		}, "alice")
+		if refused.Code != http.StatusBadRequest || !strings.Contains(refused.Body.String(), `"code":"EXCLUDE_ISSUE_INPUT"`) {
+			t.Fatalf("exclude_issues %d keys: status=%d body=%s, want 400 EXCLUDE_ISSUE_INPUT",
+				len(list), refused.Code, refused.Body.String())
+		}
+	}
+}
+
+// An exclusion leaves its issues out of the search's window, not out of its answer: enough
+// excluded issues to fill the window (suggestionSearchDepth rows), each matching more of the
+// query's words than the one keeper that also matches, and the check still lists the keeper.
+// Dropped after the page instead, those issues take every place in the window and the check
+// answers none while the match it exists to find sits below it - which is what the list is for,
+// a read that leaves out an issue and its subtree (INFRA-1160).
+func TestRelatedRouteExcludedIssuesLeaveTheSearchWindowNotJustItsResults(t *testing.T) {
+	handler, database, _ := newTestServer(t, testServerOptions{})
+	createSuggestionProject(t, handler, "RWIN")
+	// The keeper is filed first, so it is the oldest of the issues that tie on anything, and it
+	// holds one of the query's rare words where each excluded issue holds two: every excluded
+	// issue outranks it by idf-weighted coordination (relatedCoordinationRank), whatever the
+	// snippet density of either adds.
+	const keeperWord = "zymurgy"
+	keeper := createSearchIssue(t, handler, "RWIN", "Ledger totals in "+keeperWord, "")
+	words := []string{keeperWord}
+	excluded := make([]string, 0, suggestionSearchDepth+1)
+	for index := range suggestionSearchDepth + 1 {
+		first, second := fmt.Sprintf("quo%cvex", 'a'+index), fmt.Sprintf("pli%czor", 'a'+index)
+		words = append(words, first, second)
+		excluded = append(excluded, createSearchIssue(t, handler, "RWIN",
+			fmt.Sprintf("Ledger totals in %s and %s", first, second), ""))
+	}
+	refreshTermStats(t, database, "RWIN")
+	before := relatedWrites(t, database)
+
+	params := url.Values{"title": {"Ledger totals in " + strings.Join(words, " ")}}
+	if owners := relatedOwners(getRelated(t, handler, "RWIN", params)); slices.Contains(owners, keeper) {
+		t.Fatalf("related owners without an exclusion = %v, want %s below the window the %d excluded issues fill",
+			owners, keeper, len(excluded))
+	}
+	params["exclude_issues"] = excluded
+	suggestions := getRelated(t, handler, "RWIN", params)
+	if suggestions.Outcome != "found" || !slices.Equal(relatedOwners(suggestions), []string{keeper}) {
+		t.Fatalf("suggestions = %+v, want %s alone, found: the excluded issues leave the window rather than its results",
+			suggestions, keeper)
+	}
+	expectNothingWritten(t, database, before)
+}

@@ -64,7 +64,7 @@ parent's check: a child's pull request never makes a parent check's result curre
 that carries part of a parent's requirement proves it with a check on the child's own
 Verification document whose `serves` names that requirement. Nothing in the tree builds on the parent's own merge, because that
 merge comes last: a child that waits for it waits forever, so work another child builds on is a
-first-wave child of its own. While the approved head does not carry those merges, or the result of
+child of its own, in a repository of its own or with a deploy of its own. While the approved head does not carry those merges, or the result of
 a check in another repository is older than the close of a child it needs, leave
 the issue in `accepting` until each of those children has closed (`child-closed`) or been parked
 for good (`child-status`). Move a parked child's criterion to other work first; never downgrade

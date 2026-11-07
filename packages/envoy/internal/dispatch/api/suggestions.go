@@ -73,12 +73,31 @@ var (
 	// relatedKeywordQuery is the check's stage 1: search's keyword query (searchQueryBody) over the
 	// chosen lexemes, with relatedKeywordLegs. Parameters: searchQueryBody's $1-$8, then $9 the
 	// lexemes and $10 their idf.
-	relatedKeywordQuery = relatedQOpener + relatedTermWeights(9) + searchQueryBody(relatedKeywordLegs)
+	relatedKeywordQuery = relatedQOpener + relatedTermWeights(9) + searchQueryBody(relatedKeywordLegs, "")
+	// relatedKeywordExcludingQuery is relatedKeywordQuery with the exclusion filter over one more
+	// parameter, $11 the owners the check leaves out (relatedExcludedOwners).
+	relatedKeywordExcludingQuery = relatedQOpener + relatedTermWeights(9) +
+		searchQueryBody(relatedKeywordLegs, relatedExcludedOwners(11))
 	// relatedMeaningQuery is the check's stage 2: search's meaning query, which fuses the same
 	// keyword legs with the meaning arms, over the same lexemes and the text's embedding.
 	// Parameters: searchQueryMeaningBody's $1-$11, then $12 the lexemes and $13 their idf.
-	relatedMeaningQuery = relatedQOpener + relatedTermWeights(12) + searchQueryMeaningBody(relatedKeywordLegs)
+	relatedMeaningQuery = relatedQOpener + relatedTermWeights(12) + searchQueryMeaningBody(relatedKeywordLegs, "")
+	// relatedMeaningExcludingQuery is relatedMeaningQuery with the same filter, here over $14.
+	relatedMeaningExcludingQuery = relatedQOpener + relatedTermWeights(12) +
+		searchQueryMeaningBody(relatedKeywordLegs, relatedExcludedOwners(14))
+	// relatedKeywordStatement and relatedMeaningStatement are what relatedSearch runs.
+	relatedKeywordStatement = relatedStatement{plain: relatedKeywordQuery, excluding: relatedKeywordExcludingQuery}
+	relatedMeaningStatement = relatedStatement{plain: relatedMeaningQuery, excluding: relatedMeaningExcludingQuery}
 )
+
+// relatedStatement is one of the check's two searches in both its shapes: the statement itself,
+// and the same statement with the exclusion filter over one further parameter. A check that
+// leaves nothing out runs the plain one, so a read with nothing to exclude never tests every
+// candidate row the arms match against an empty list.
+type relatedStatement struct {
+	plain     string
+	excluding string
+}
 
 // relatedCoordinationRank ranks a keyword arm's item, searchColumn its search vector, by
 // idf-weighted coordination in place of search's ts_rank_cd: the sum of the idf of every chosen
@@ -263,30 +282,6 @@ type suggestionSource struct {
 	actor      model.Actor
 }
 
-// owns reports whether result is the source itself or anything its owner holds: the new issue, or
-// the issue or project document the new ask sits on, and everything inside that owner (its spec,
-// its other asks, comments and messages). Each is the best match for the source's own words, so
-// suggesting one says nothing, and acting on it (a reply on the ask's own issue) must never count
-// as acting on a suggestion.
-func (source suggestionSource) owns(result model.SearchResult) bool {
-	if source.askID != "" && result.Kind == "ask" && result.ID == source.askID {
-		return true
-	}
-	if source.issueKey != "" {
-		return ownedByIssue(result, source.issueKey)
-	}
-	if source.artifactID != "" {
-		return (result.Kind == "document" && result.ID == source.artifactID) ||
-			(result.Owner.Kind == "document" && result.Owner.ArtifactID == source.artifactID)
-	}
-	return false
-}
-
-// ownedByIssue reports whether result is the issue key or anything that issue owns.
-func ownedByIssue(result model.SearchResult, key string) bool {
-	return (result.Kind == "issue" && result.ID == key) || (result.Owner.Kind == "issue" && result.Owner.Key == key)
-}
-
 // relatedInput is one related-item check's question.
 type relatedInput struct {
 	// project is the project to search; empty resolves it from source's owner.
@@ -302,17 +297,17 @@ type relatedInput struct {
 	// terms' document frequencies, as an issue source's own issue is (the no-write route's
 	// exclude_issue).
 	excludeIssue string
+	// excludeIssues leaves each of those issues and everything it owns out of the results, and
+	// out of the results alone: the single exclude_issue exists to stop a text inflating the
+	// rarity of its own words, and an ancestor or a descendant of the query is not the query's
+	// own text, so the list's issues keep their place in the word statistics (the no-write
+	// route's exclude_issues).
+	excludeIssues []string
 	// keywordsOnly skips the meaning search.
 	keywordsOnly bool
 	// record writes the check's records: write_suggestions rows for an issue or ask source and one
 	// related_checks row. The no-write route leaves it false.
 	record bool
-}
-
-// excludes reports whether result is left out of the check's items: the source's own, or the
-// excluded issue's.
-func (input relatedInput) excludes(result model.SearchResult) bool {
-	return input.source.owns(result) || (input.excludeIssue != "" && ownedByIssue(result, input.excludeIssue))
 }
 
 // relatedRecord is what the related_checks row of one check holds besides its source and what
@@ -439,11 +434,12 @@ func (s *server) runRelatedCheck(
 		return notMade(relatedReasonSearchFailed, relatedSearchFailedMissing)
 	}
 	exclusion := relatedExclusion{issueKey: cmp.Or(input.source.issueKey, input.excludeIssue), artifactID: input.source.artifactID}
+	excluded := input.excluded()
 	stagesStarted := time.Now()
 	pick := &relatedPick{ready: make(chan struct{})}
 	keyword := make(chan relatedStage, 1)
 	go func() {
-		pick.terms, pick.err = s.pickRelatedTerms(keywordCtx, s.deps.Store.Pool, project, input.text, input.title, exclusion)
+		pick.terms, pick.err = s.pickRelatedTerms(keywordCtx, s.deps.Store.Pool, project, input.text, input.title, exclusion, probeUnknownTerms)
 		close(pick.ready)
 		stage := relatedStage{err: pick.err}
 		switch {
@@ -453,7 +449,7 @@ func (s *server) runRelatedCheck(
 			// keyword matches anything, so there is no query to run.
 			stage.response = model.SearchResponse{Results: []model.SearchResult{}, Limit: suggestionSearchDepth}
 		default:
-			stage.response, stage.err = s.relatedSearch(keywordCtx, s.deps.Store.Pool, relatedKeywordQuery, project, pick.terms)
+			stage.response, stage.err = s.relatedSearch(keywordCtx, s.deps.Store.Pool, relatedKeywordStatement, project, pick.terms, excluded)
 		}
 		stage.took = time.Since(stagesStarted)
 		keyword <- stage
@@ -482,7 +478,7 @@ func (s *server) runRelatedCheck(
 		meaningDone = meaningCtx.Done()
 		meaning = make(chan relatedStage, 1)
 		go func() {
-			stage := s.relatedMeaningStage(meaningRead, project, input.text, pick)
+			stage := s.relatedMeaningStage(meaningRead, project, input.text, pick, excluded)
 			stage.took = time.Since(stagesStarted)
 			meaning <- stage
 		}()
@@ -558,9 +554,12 @@ func (s *server) runRelatedCheck(
 }
 
 // relatedMeaningStage is stage 2: the text's embedding, started at once, then, once stage 1 has
-// picked the terms, the meaning query over them. Its reason is empty when it answered and names
-// why it did not otherwise; ctx ends at the meaning allowance.
-func (s *server) relatedMeaningStage(ctx context.Context, project, text string, pick *relatedPick) relatedStage {
+// picked the terms, the meaning query over them, which leaves out the owners excluded names. Its
+// reason is empty when it answered and names why it did not otherwise; ctx ends at the meaning
+// allowance.
+func (s *server) relatedMeaningStage(
+	ctx context.Context, project, text string, pick *relatedPick, excluded []string,
+) relatedStage {
 	failed := func(reason string, err error) relatedStage {
 		if ctx.Err() != nil {
 			reason = relatedReasonMeaningTimeout
@@ -583,37 +582,43 @@ func (s *server) relatedMeaningStage(ctx context.Context, project, text string, 
 		// The check answers not made without reading this.
 		return failed(relatedReasonMeaningFailed, nil)
 	}
-	response, err := s.relatedMeaningSearch(ctx, project, pick.terms, vector)
+	response, err := s.relatedMeaningSearch(ctx, project, pick.terms, vector, excluded)
 	if err != nil {
 		return failed(relatedReasonMeaningFailed, err)
 	}
 	return relatedStage{response: response}
 }
 
-// relatedMeaningSearch runs relatedMeaningQuery in a read transaction of its own
+// relatedMeaningSearch runs the check's meaning statement in a read transaction of its own
 // (beginMeaningScan), so that the check's meaning query reads the index as search's own does: it
 // runs the same arms, and searchMeaningScan, which that transaction sets, is what either of them
 // needs of the index scan (searchMeaningScan says what each setting is for).
 func (s *server) relatedMeaningSearch(
-	ctx context.Context, project string, picked relatedTerms, vector []float32,
+	ctx context.Context, project string, picked relatedTerms, vector []float32, excluded []string,
 ) (model.SearchResponse, error) {
 	tx, err := s.beginMeaningScan(ctx)
 	if err != nil {
 		return model.SearchResponse{}, err
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
-	return s.relatedSearch(ctx, tx, relatedMeaningQuery, project, picked, embed.Literal(vector),
-		searchMeaningFloor, s.deps.Embedder.Identity())
+	return s.relatedSearch(ctx, tx, relatedMeaningStatement, project, picked, excluded,
+		embed.Literal(vector), searchMeaningFloor, s.deps.Embedder.Identity())
 }
 
-// relatedSearch runs one of the check's two queries with the parameters search passes its own
+// relatedSearch runs one of the check's two statements with the parameters search passes its own
 // ($1 the chosen lexemes as a tsquery, $4 the first term for the snippet window), then meaning,
 // the meaning query's further three ($9 the vector, $10 searchMeaningFloor, $11 the embedder's
 // identity), none for the keyword query, then the chosen lexemes and their idf, the keyword
 // arms' weights. An empty tsquery (no term chosen) matches nothing, so the meaning query then
 // ranks by meaning alone.
+//
+// excluded is the owners the check leaves out (relatedInput.excluded). With any, the statement
+// is the one whose kinds CTE filters them (relatedStatement.excluding) and they are its last
+// parameter, which is why that filter reads $11 of the keyword statement and $14 of the meaning
+// one; with none, the statement is the one without the filter.
 func (s *server) relatedSearch(
-	ctx context.Context, q queryer, query, project string, picked relatedTerms, meaning ...any,
+	ctx context.Context, q queryer, statement relatedStatement, project string, picked relatedTerms,
+	excluded []string, meaning ...any,
 ) (model.SearchResponse, error) {
 	snippetTerm := ""
 	if len(picked.Terms) > 0 {
@@ -627,6 +632,10 @@ func (s *server) relatedSearch(
 	args := []any{picked.TSQuery, project, suggestionSearchDepth, snippetTerm, headlineOptions,
 		0, contracts.SearchKindDepth, searchFusionK}
 	args = append(append(args, meaning...), lexemes, weights)
+	query := statement.plain
+	if len(excluded) > 0 {
+		query, args = statement.excluding, append(args, excluded)
+	}
 	rows, err := q.Query(ctx, query, args...)
 	if err != nil {
 		return model.SearchResponse{}, err
@@ -669,12 +678,15 @@ func milliseconds(d time.Duration) *int {
 }
 
 // fillRelatedItems turns the search's results into Related and Decision. Everything the input
-// excludes is left out first; the rest carry their ask state (attachAskStates). A failure to read
-// those states leaves every item's nil, and so no Decision, rather than failing the check or
-// keeping the states read before it. Each owner (an issue, or a project document)
+// excludes is left out first, as the statement that answered already left it out of the rows it
+// ranked and paged (relatedExcludedOwners): the same rule over what came back, so an item the
+// check must not offer cannot reach a reader through a statement that answered anything else.
+// The rest carry their ask state (attachAskStates). A failure to read those states leaves every
+// item's nil, and so no Decision, rather than failing the check or keeping the states read
+// before it. Each owner (an issue, or a project document)
 // keeps only its best-ranked item, so an issue matched through its title, its spec and a comment
-// fills one place, not three. Related then takes the best suggestionRelatedCount with every item
-// on an open owner ahead of every item on a done issue, keeping the search's order within each;
+// fills one place, not three. Related then takes the best suggestionRelatedCount in
+// relatedItemRank's order, keeping the search's order within each rank;
 // Decision is the first answered ask in the search's own order, deliberately not reordered by
 // owner status: an answered question stays the best match for the question asked whether or not
 // its issue has since closed.
@@ -706,7 +718,7 @@ func (s *server) fillRelatedItems(
 		}
 	}
 	slices.SortStableFunc(related, func(a, b model.SearchResult) int {
-		return cmp.Compare(boolRank(closedOwner(a)), boolRank(closedOwner(b)))
+		return cmp.Compare(relatedItemRank(a), relatedItemRank(b))
 	})
 	for _, result := range related[:min(len(related), suggestionRelatedCount)] {
 		suggestions.Related = append(suggestions.Related, suggestionFromResult(result))
@@ -737,19 +749,37 @@ func (s *server) resolveSuggestionProject(ctx context.Context, source suggestion
 	return project, err
 }
 
-// closedOwner reports whether result belongs to an issue that is done. Keyword search ranks an
-// issue already closed as a duplicate above the open issue it was closed into whenever its words
-// are closer to the new filing's, which they often are (a duplicate restates the bug the way the
-// next duplicate will); the open issue is the one an agent can act on.
-func closedOwner(result model.SearchResult) bool {
-	return result.Owner.Kind == "issue" && result.Owner.Status == "done"
-}
-
-func boolRank(b bool) int {
-	if b {
+// relatedItemRank orders the check's related items: up to three open issues come before any item
+// of another kind, and everything a done issue owns comes last.
+//
+// The rank is the item's owner, not the item's own kind. An open issue is what a filer can act
+// on - fold into it, comment on it, file under it - and it is that issue whether the text
+// matched its title, its spec or a comment on it, since each fills the same one place and the
+// reader is given the issue's key either way. What takes a place an issue needs is an item on a
+// project document: a project-level document or an answered ask on one, which a filer can read
+// and nothing more (dispatch://INFRA-1160/spec, "Problem"). Ranking by the item's own kind
+// instead costs recall, measured: over the 71 known duplicate pairs of INFRA it listed the
+// earlier issue for 17, against 25 for the order this replaces, because a target matched
+// through its spec fell below weaker matches on another issue's title.
+//
+// Keyword search ranks an issue already closed as a duplicate above the open issue it was closed
+// into whenever its words are closer to the new filing's, which they often are (a duplicate
+// restates the bug the way the next duplicate will); the open issue is the one an agent can act
+// on, so done comes last whatever the item is.
+func relatedItemRank(result model.SearchResult) int {
+	switch {
+	case closedOwner(result):
+		return 2
+	case result.Owner.Kind == "issue":
+		return 0
+	default:
 		return 1
 	}
-	return 0
+}
+
+// closedOwner reports whether result belongs to an issue that is done.
+func closedOwner(result model.SearchResult) bool {
+	return result.Owner.Kind == "issue" && result.Owner.Status == "done"
 }
 
 func suggestionFromResult(result model.SearchResult) model.WriteSuggestion {

@@ -63,14 +63,16 @@ test("dispatch artifact refuses inline content under a .jsonl name and stores th
     );
     const stored = await storedRows(issue.key);
     // Before the refusal the command exited 0 and the issue held a document whose markdown was
-    // not the file: `{ code: 0, stored: "altered" }`.
+    // not the file: `{ code: 0, stored: "altered" }`. The code is 2, not 1: an argument this CLI
+    // refuses before it calls Dispatch is a usage error, and 1 is a write Dispatch refused
+    // (`skill://dispatch`, "Exit 1 is a refusal, 2 a usage error").
     expect(
       {
         code: inline.code,
         stored: stored === undefined ? "nothing" : stored === rows ? "unchanged" : "altered",
       },
       `${inline.stdout}${inline.stderr}${stored ?? ""}`
-    ).toEqual({ code: 1, stored: "nothing" });
+    ).toEqual({ code: 2, stored: "nothing" });
     expect(inline.stdout).toContain('"rows.jsonl" is not a Markdown name');
     expect(inline.stdout).toContain("--path <file>");
 

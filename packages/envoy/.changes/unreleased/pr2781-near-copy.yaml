@@ -1,0 +1,7 @@
+kind: Changed
+body: |-
+  Dispatch refuses an issue create only when its title and spec are a near copy of an open issue
+  of the project, other than the new issue's ancestors, in place of the rule that refused a title
+  sharing enough words with any issue, open or closed. A create that goes past the refusal with
+  `force` records the issues it named on its `issue.created` event, and an unforced create below
+  the refusal is told its closest open issue as `advice.suggestions.likely_duplicate`.

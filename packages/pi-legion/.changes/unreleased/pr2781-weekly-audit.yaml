@@ -1,0 +1,5 @@
+kind: Added
+body: |-
+  `skill://legion-controller` runs a weekly audit on its first turn of each UTC week: the week's
+  forced creates by filer, the sizes of the open Legion trees, a nudge to the architect of each
+  oversplit tree, and a duplicate audit run as dispatched scouts.

@@ -26,67 +26,21 @@ if (($# != 2)); then
 fi
 readonly project="$1"
 readonly output="$2"
-: "${DISPATCH_URL:?DISPATCH_URL must name the Dispatch server to read}"
-: "${DISPATCH_TOKEN_FILE:?DISPATCH_TOKEN_FILE must name a file holding a Dispatch token}"
-[[ -r "$DISPATCH_TOKEN_FILE" ]] || {
-  printf 'DISPATCH_TOKEN_FILE is not readable: %s\n' "$DISPATCH_TOKEN_FILE" >&2
-  exit 2
-}
-for command in curl jq; do
-  command -v "$command" >/dev/null || {
-    printf '%s is required\n' "$command" >&2
-    exit 1
-  }
-done
+scripts_dir="$(cd "$(dirname "$0")" && pwd)"
+readonly scripts_dir
+# shellcheck source-path=SCRIPTDIR source=lib/dispatch-export.sh
+. "${scripts_dir}/lib/dispatch-export.sh"
 
-umask 077
-readonly base="${DISPATCH_URL%/}/api/v1"
-workdir="$(mktemp -d "${TMPDIR:-/tmp}/related-recall.XXXXXX")"
-readonly workdir
-trap 'rm -rf "$workdir"' EXIT
+# dispatch_export_open checks DISPATCH_URL, DISPATCH_TOKEN_FILE, curl and jq, sets base and
+# workdir, takes the EXIT trap that removes workdir, and writes the token header curl reads.
+# get, uri, times, list_issue_keys, list_events and markdown come from the same file: this
+# export and near-copy-replay.sh read a Dispatch project the same way, from one copy of it.
+dispatch_export_open related-recall
+readonly base workdir
 mkdir "$workdir/issues"
-# The token reaches curl through a header file, so it never sits on a command line.
-printf 'Authorization: Bearer %s\n' "$(tr -d '\r\n' <"$DISPATCH_TOKEN_FILE")" >"$workdir/auth"
 
-# get prints the JSON body of GET <path> under /api/v1. --fail-with-body makes any non-2xx an
-# error; 404 alone is reported as status 4 so a caller can tell a missing issue from a failure.
-get() {
-  local status
-  status="$(curl --silent --show-error --retry 3 --retry-all-errors --max-time 60 \
-    -H "@$workdir/auth" -o "$workdir/body" -w '%{http_code}' "${base}$1")"
-  case "$status" in
-    2??) cat "$workdir/body" ;;
-    404) return 4 ;;
-    *)
-      printf 'GET %s answered %s\n' "$1" "$status" >&2
-      return 1
-      ;;
-  esac
-}
-
-uri() { jq -rn --arg value "$1" '$value | @uri'; }
-
-# Every issue of the project, all statuses, one page at a time.
-: >"$workdir/keys"
-offset=0
-while :; do
-  page="$(get "/issues?project=$(uri "$project")&limit=250&offset=${offset}")"
-  jq -r '.issues[].key' <<<"$page" >>"$workdir/keys"
-  count="$(jq '.issues | length' <<<"$page")"
-  total="$(jq '.total' <<<"$page")"
-  offset=$((offset + count))
-  if ((count == 0 || offset >= total)); then
-    break
-  fi
-done
-if [[ ! -s "$workdir/keys" ]]; then
-  printf 'project %s has no issues\n' "$project" >&2
-  exit 1
-fi
-
-# Dispatch writes times with as many fraction digits as they need; padded to six, two times
-# compare as text, which every comparison below relies on.
-readonly times='def t: if . == null then . else sub("Z$"; "") | split(".") | .[0] + "." + ((.[1] // "") + "000000")[0:6] + "Z" end;'
+# Every issue of the project, all statuses.
+list_issue_keys "$project" "$workdir/keys"
 
 # One file per issue: its row, with its primary document's versions (number and time only).
 # shellcheck disable=SC2016 # $id is jq's variable, not a shell expansion
@@ -184,22 +138,10 @@ while read -r pair; do
     | $pair + {reason: "", direction, query: .query.key, target: .target.key, query_created_at: .query.created_at}' >>"$workdir/pairs.jsonl"
 done <"$workdir/found.jsonl"
 
-# markdown writes one version of an issue's primary document to a file, byte for byte.
-markdown() {
-  get "/artifacts/$(uri "$(jq -r .spec_artifact "$workdir/issues/$1.json")")/versions/$2" | jq -j .markdown >"$3"
-}
-
 # titles prints an issue's titles over time, [{created_at, title}], from its issue.created and
 # issue.updated events, each of which carries the whole issue.
 titles() {
-  local after=0 page
-  : >"$workdir/events"
-  while :; do
-    page="$(get "/issues/$(uri "$1")/events?after=${after}&limit=200")"
-    jq -c '.[]' <<<"$page" >>"$workdir/events"
-    (("$(jq length <<<"$page")" == 200)) || break
-    after="$(jq '.[-1].seq' <<<"$page")"
-  done
+  list_events "$1" "$workdir/events"
   jq -sc "$times"'[.[] | select(.type == "issue.created" or .type == "issue.updated") | {created_at: (.created_at | t), title: .payload.title}]
     | reduce .[] as $e ([]; if (last | .title) == $e.title then . else . + [$e] end)' "$workdir/events"
 }
@@ -236,7 +178,7 @@ while read -r key; do
     title_versions="$(titles "$key")"
   fi
   jq -c --rawfile spec "$workdir/spec" --slurpfile versions "$workdir/versions" --argjson titles "$title_versions" '
-    {record: "issue", key, title, created_at, updated_at, status, spec: $spec}
+    {record: "issue", key, title, created_at, updated_at, status, closed_at, spec: $spec}
     + (if ($versions | length) > 0 then {spec_versions: $versions} else {} end)
     + (if ($titles | length) > 1 then {title_versions: $titles} else {} end)' "$row" >>"$workdir/output.jsonl"
 done <"$workdir/keys"

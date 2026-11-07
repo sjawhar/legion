@@ -203,6 +203,11 @@ export interface DispatchToolResult {
   /** What the caller should hear beside the result rather than in it: the dispatch CLI writes
    *  each line to stderr. The text already says what the reader needs. */
   readonly warnings?: readonly string[];
+  /** The call was answered and did nothing: Dispatch refused the write and the text says so.
+   *  A tool reads the text, so this rides beside it; the dispatch CLI exits 1 on it, which is
+   *  what `skill://dispatch` promises a refusal is, so a script that reads the status is not
+   *  told a create happened. */
+  readonly refused?: boolean;
 }
 
 interface ResolvedArtifact {
@@ -2641,7 +2646,19 @@ function eventHead(event: Event): string | undefined {
       );
     case "artifact.human_edited":
       return textHead(humanEditHead(event.payload));
-    case "issue.created":
+    case "issue.created": {
+      // What a create went past with --force, which the controller's weekly audit counts off
+      // this line: the event is the only record of an override, and `dispatch read` is the only
+      // surface that shows it. The audit counts the two apart, so they read apart: `forced` with
+      // issues is an override of the refusal, `forced` with none is a create whose near-copy
+      // check never answered, and no `forced` is a create the refusal would not have stopped.
+      const forced = event.payload.forced;
+      const head = `status ${event.payload.status}`;
+      if (forced === undefined) return head;
+      return forced.past.length === 0
+        ? `${head} · forced, the near-copy check did not answer`
+        : `${head} · forced past ${forced.past.join(", ")}`;
+    }
     case "issue.updated":
     case "issue.closed":
       return `status ${event.payload.status}`;
@@ -2667,10 +2684,20 @@ function eventRef(event: Event): string | undefined {
   return kind === undefined ? undefined : `dispatch://${event.issue_key}/${kind}/${id}`;
 }
 
+/** The writer an event log line names: `actorText`, and a session's own title beside its id when
+ *  the actor carries one. The controller's weekly audit counts a week's creates by their filer,
+ *  and the filer is that title (`Legion implementer · INFRA-1160` counts as `Legion
+ *  implementer`): a session id names one process, so without the title the count is one row per
+ *  session (`skill://legion-controller/references/weekly-audit.md`). */
+function eventActorText(actor: Event["actor"]): string {
+  const title = actor.kind === "session" ? actor.origin?.session_title : undefined;
+  return title === undefined || title === "" ? actorText(actor) : `${actorText(actor)} (${title})`;
+}
+
 function eventLine(event: Event): string {
   const head = eventHead(event);
   const ref = eventRef(event);
-  return `- #${event.seq} ${event.type}${ref === undefined ? "" : ` ${ref}`} · ${actorText(event.actor)} · ${event.created_at}${head === undefined || head === "" ? "" : ` · ${head}`}`;
+  return `- #${event.seq} ${event.type}${ref === undefined ? "" : ` ${ref}`} · ${eventActorText(event.actor)} · ${event.created_at}${head === undefined || head === "" ? "" : ` · ${head}`}`;
 }
 
 function childrenSummary(issue: IssueDetails): string {
@@ -4120,14 +4147,16 @@ export async function executeDispatchTool(
         const candidates = duplicateCandidates(error);
         return {
           text: [
-            `Not created: "${title}" looks like a duplicate.`,
+            `Not created: "${title}" is a near copy of an open issue.`,
             ...candidates.map((candidate) => {
               const href = new URL(candidate.href, linkBase).toString();
               return `${candidate.key} [${candidate.status}] ${candidate.title} → ${href}`;
             }),
-            "Reference the existing issue, or run dispatch issue again with --force after reading it.",
+            "Read each issue above. If one is the same work, fold this into it by the duplicate rule of skill://dispatch-first.",
+            "If none is, run dispatch issue again with --force, and write in the new issue's spec why it is not each issue named here.",
           ].join("\n"),
           details: { duplicates: candidates },
+          refused: true,
         };
       }
     }
@@ -4378,12 +4407,12 @@ export async function executeDispatchTool(
       const project = stringArg(args, "project");
       const title = optionalString(args, "title");
       const text = optionalString(args, "text");
-      const excludeIssue = optionalString(args, "exclude_issue");
+      const excludeIssues = optionalStringArray(args, "exclude_issues");
       const keywordsOnly = optionalBoolean(args, "keywords_only");
       const suggestions = await client.related(project, {
         ...(title === undefined ? {} : { title }),
         ...(text === undefined ? {} : { text }),
-        ...(excludeIssue === undefined ? {} : { exclude_issue: excludeIssue }),
+        ...(excludeIssues === undefined ? {} : { exclude_issues: excludeIssues }),
         ...(keywordsOnly === undefined ? {} : { keywords_only: keywordsOnly }),
       });
       return {

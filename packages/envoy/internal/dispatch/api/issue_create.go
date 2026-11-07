@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -200,35 +199,47 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	// The title-overlap refusal, and under force the same overlaps named in the result instead
-	// a forced create is told what it forced past, but a slow or failing overlap read
-	// must not refuse a create its caller already insisted on, so it is bounded on its own and its
-	// failure only logged.
-	var titleMatches []model.DuplicateCandidate
+	// The near-copy gate, run once for every create it covers whatever `force` says: a forced
+	// create's record of what it went past must be the refusal an unforced create would have met,
+	// and two reads would drift. The gate bounds and logs its own read (duplicateGate), and a read
+	// that does not answer refuses nothing: the create goes in and is told that no near-copy check
+	// was made, forced or not, a forced one also recording that it was forced with no issues named.
+	//
+	// A create naming a GitHub issue runs no gate at all: it imports an issue somebody else
+	// already filed and refusing it would leave that issue unimported. It takes the zero
+	// outcome, which records nothing anywhere, so the event cannot say a check was made that
+	// never ran. Every record of the gate - the 409, the event's `forced`, `title_matches`,
+	// `likely_duplicate` and `near_copy_check` - is settled here, in the one place that knows
+	// whether the gate ran, and copied below rather than derived again from `force` and
+	// `external` at each site.
+	//
+	// The gate's candidate set leaves out the new issue's whole ancestor chain, which is read
+	// here, before the transaction. A parent that does not exist or sits in another project
+	// yields an empty chain and still gets its own refusal inside the transaction, so no error
+	// changes order.
+	var outcome nearCopyOutcome
 	if input.External == "" {
-		if input.Force {
-			matchCtx, cancel := context.WithTimeout(r.Context(), forcedTitleMatchTimeout)
-			candidates, err := s.duplicateCandidates(matchCtx, s.deps.Store.Pool, input.Project, input.Title, parentKey)
-			cancel()
-			if err != nil {
-				slog.Warn("dispatch: forced issue create names no title overlaps", "project", input.Project, "error", err)
-			} else {
-				titleMatches = candidates
-			}
-		} else {
-			candidates, err := s.duplicateCandidates(r.Context(), s.deps.Store.Pool, input.Project, input.Title, parentKey)
+		ancestors := []string{}
+		if parentKey != "" {
+			chain, err := refs.IssueAncestors(r.Context(), s.deps.Store.Pool, parentKey)
 			if err != nil {
 				s.writeHandlerError(w, err)
 				return
 			}
-			if len(candidates) > 0 {
-				WriteJSON(w, http.StatusConflict, map[string]any{
-					"error":      fmt.Sprintf("possible duplicate of %s: %s", candidates[0].Key, candidates[0].Title),
-					"code":       "POSSIBLE_DUPLICATE",
-					"candidates": candidates,
-				})
-				return
-			}
+			ancestors = append([]string{parentKey}, chain...)
+		}
+		spec := ""
+		if input.Spec != nil {
+			spec = *input.Spec
+		}
+		outcome = s.runNearCopyGate(r.Context(), input.Project, input.Title, spec, ancestors, input.Force)
+		if len(outcome.Refuse) > 0 {
+			WriteJSON(w, http.StatusConflict, map[string]any{
+				"error":      fmt.Sprintf("possible duplicate of %s: %s", outcome.Refuse[0].Key, outcome.Refuse[0].Title),
+				"code":       "POSSIBLE_DUPLICATE",
+				"candidates": outcome.Refuse,
+			})
+			return
 		}
 	}
 
@@ -424,6 +435,7 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	payload.Forced = outcome.Forced
 	event, err := s.appendEvent(r.Context(), tx, issueOwner(key).event("issue.created", actor, payload))
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -458,13 +470,86 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		source:  suggestionSource{kind: "issue", issueKey: key, actor: actor},
 		record:  true,
 	})
-	suggestions.TitleMatches = titleMatches
+	suggestions.TitleMatches = outcome.TitleMatches
+	suggestions.LikelyDuplicate = outcome.LikelyDuplicate
+	suggestions.NearCopyCheck = outcome.NearCopyCheck
 	WriteJSON(w, http.StatusCreated, withSuggestions(issue, advice, suggestions))
 }
 
-// forcedTitleMatchTimeout bounds the title-overlap read a forced issue create runs only to name
-// what it forced past: the create is not refused on it, so it must not wait long on it either.
-const forcedTitleMatchTimeout = time.Second
+// duplicateGateTimeout bounds the near-copy gate's whole read, on the context and as the read
+// transaction's own statement_timeout. Every create waits on it before it is written, so it is
+// held well under the second the title rule it replaces was given: past it the create goes in
+// and is told that no near-copy check was made, which is what a slow read must cost rather than
+// a project nobody can write to.
+const duplicateGateTimeout = 500 * time.Millisecond
+
+// nearCopyOutcome is everything the near-copy gate decides for one create, settled once by
+// runNearCopyGate and then only copied: the 409 the create is refused with, what the
+// issue.created event records, and what the response tells the filer. The zero value is the
+// create the gate never ran for - an external create - which records nothing and says nothing,
+// so no reader of the event log is told of a check that was never made.
+type nearCopyOutcome struct {
+	// Refuse is what a 409 POSSIBLE_DUPLICATE names, and is empty on every create that goes in:
+	// a create the gate refuses is never written.
+	Refuse []model.DuplicateCandidate
+	// Forced is what the issue.created event stores about a create that went in with `force`, in
+	// the three states dispatch://INFRA-1160/spec#b-r3 names:
+	//
+	//	forced past a refusal       {"past": ["INFRA-724"]}
+	//	the check did not answer    {"past": []}
+	//	the refusal would not have stopped it, no force, or no check  nothing
+	//
+	// Past carries no omitempty, so the empty list survives the write and a reader can tell the
+	// second state from the third. The weekly count reads it from the event.
+	Forced *model.ForcedCreate
+	// TitleMatches is advice.suggestions.title_matches: the issues a forced create went past,
+	// which every released client prints as a near copy it forced past. An unforced create never
+	// fills it, whatever the gate found - its nudge rides in LikelyDuplicate, a field of its own,
+	// because Dispatch deploys before the CLI reaches agents and a nudge carried here would tell
+	// every nudged filer it forced past something it did not.
+	TitleMatches []model.DuplicateCandidate
+	// LikelyDuplicate is advice.suggestions.likely_duplicate: the closest open issue of an
+	// unforced create the gate nudged rather than refused.
+	LikelyDuplicate *model.DuplicateCandidate
+	// NearCopyCheck is advice.suggestions.near_copy_check: why the create went in unchecked,
+	// empty when the gate answered.
+	NearCopyCheck string
+}
+
+// runNearCopyGate runs the gate for a create and settles every record of it at once. Only a
+// create the gate covers reaches it: createIssue leaves the zero outcome for an external create,
+// whose gate never runs.
+//
+// The four states are the gate's own: it did not answer, it found nothing to say, it found a
+// refusal the create forced past, or it found one the create is refused with. Each sets what
+// that state records and leaves the rest zero, so no site downstream reads `force` or `external`
+// again and no record can disagree with another.
+func (s *server) runNearCopyGate(
+	ctx context.Context, project, title, spec string, ancestors []string, force bool,
+) nearCopyOutcome {
+	gate := s.duplicateGate(ctx, project, title, spec, ancestors)
+	refusals := gate.refusals()
+	switch {
+	case !gate.answered():
+		outcome := nearCopyOutcome{NearCopyCheck: gate.Unanswered}
+		if force {
+			outcome.Forced = &model.ForcedCreate{Past: []string{}}
+		}
+		return outcome
+	case len(refusals) == 0:
+		if force {
+			return nearCopyOutcome{}
+		}
+		return nearCopyOutcome{LikelyDuplicate: gate.nudge()}
+	case !force:
+		return nearCopyOutcome{Refuse: refusals}
+	}
+	past := make([]string, 0, len(refusals))
+	for _, candidate := range refusals {
+		past = append(past, candidate.Key)
+	}
+	return nearCopyOutcome{Forced: &model.ForcedCreate{Past: past}, TitleMatches: refusals}
+}
 
 // respondWithExistingExternalIssue answers a create naming a GitHub issue Dispatch already holds
 // with that issue. Nothing was created, so no related-item check is made, and the result says so

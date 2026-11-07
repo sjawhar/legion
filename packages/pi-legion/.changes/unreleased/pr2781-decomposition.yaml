@@ -1,0 +1,7 @@
+kind: Changed
+body: |-
+  `skill://legion-architect` and the two architect role prompts say that a child needs a
+  repository or a deploy order of its own, that a repeated change is one child, and that work
+  waiting on a sibling's merge in the same repository is written into the spec of the issue whose
+  pull request carries it rather than filed as a child. The red-team verdict comment carries a
+  fixed first line, and an unreleased duplicate child is folded rather than released.

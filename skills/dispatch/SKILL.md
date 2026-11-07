@@ -9,7 +9,7 @@ Dispatch is a record for the people who decide, never a log of your work.
 
 - Use the `dispatch` command; the HTTP API only for what no command does. `dispatch <command> --help` gives its rules and an example.
 - Put long text on stdin: `--<field>-file -` with a quoted here-document (`<<'EOF'`); give object and list fields as JSON.
-- Exit 1 is a refusal, 2 a usage error. A refusal lists each problem: fix them all, then call once.
+- Exit 1 is a refusal, 2 a usage error. A refusal lists every problem: fix all, call once.
 - A Dispatch command hard to use, or storing or losing something wrongly, is a defect to report, not work around: open an issue in the owning project's code and tell that project's controller; a Legion role tells its architect (`skill://legion-worker/references/findings.md`).
 
 ## Asks and ask blocks
@@ -35,7 +35,7 @@ The question and the recommendation, as `skill://dispatch-writing-specs` writes 
 
 ## Choosing what to work on
 
-- When you finish an issue, take the top ready one: `todo`, by priority then board rank, per project.
+- Finishing an issue, take the top `todo` one by priority then board rank, per project.
 - `todo` means specced and waiting on nothing; one that waits goes in `backlog`, saying on what.
 - Hold at most three issues in flight; move the rest to `backlog`, saying where each is.
 - Never reorder the board: one agent keeps each project's order (`issue-update --before`/`--after`). If the top looks wrong, tell `notifications.role.legion-<project>-controller`.

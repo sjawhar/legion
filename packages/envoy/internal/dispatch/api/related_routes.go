@@ -14,12 +14,20 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
+// relatedExcludeLimit is the most issues one no-write related read may leave out. A read that
+// leaves out an issue's whole subtree sends one key per issue, and a project's deepest tree is
+// far short of this; a longer list is a caller sending the project rather than a neighbourhood.
+const relatedExcludeLimit = 50
+
 // relatedRequest is the no-write related route's question, from GET's query or POST's body.
+// ExcludeIssue is the single issue released clients send, which is also left out of the word
+// statistics; ExcludeIssues is the list, which leaves its issues out of the results alone.
 type relatedRequest struct {
-	Title        string `json:"title"`
-	Text         string `json:"text"`
-	ExcludeIssue string `json:"exclude_issue"`
-	KeywordsOnly bool   `json:"keywords_only"`
+	Title         string   `json:"title"`
+	Text          string   `json:"text"`
+	ExcludeIssue  string   `json:"exclude_issue"`
+	ExcludeIssues []string `json:"exclude_issues"`
+	KeywordsOnly  bool     `json:"keywords_only"`
 }
 
 // checkText is what the check reads: the title and the text, each alone when the other is blank,
@@ -40,7 +48,12 @@ func (s *server) getRelated(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	query := r.URL.Query()
-	request := relatedRequest{Title: query.Get("title"), Text: query.Get("text"), ExcludeIssue: query.Get("exclude_issue")}
+	request := relatedRequest{
+		Title:         query.Get("title"),
+		Text:          query.Get("text"),
+		ExcludeIssue:  query.Get("exclude_issue"),
+		ExcludeIssues: query["exclude_issues"],
+	}
 	switch query.Get("keywords_only") {
 	case "", "false":
 	case "true":
@@ -95,12 +108,23 @@ func (s *server) answerRelated(w http.ResponseWriter, r *http.Request, request r
 			return
 		}
 	}
+	excluded := make([]string, 0, len(request.ExcludeIssues))
+	for _, key := range request.ExcludeIssues {
+		if key = strings.TrimSpace(key); key != "" {
+			excluded = append(excluded, key)
+		}
+	}
+	if err := s.requireProjectIssues(r, project, excluded); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 	WriteJSON(w, http.StatusOK, s.relatedCheck(r.Context(), relatedInput{
-		project:      project,
-		text:         request.checkText(),
-		title:        request.Title,
-		excludeIssue: request.ExcludeIssue,
-		keywordsOnly: request.KeywordsOnly,
+		project:       project,
+		text:          request.checkText(),
+		title:         request.Title,
+		excludeIssue:  request.ExcludeIssue,
+		excludeIssues: excluded,
+		keywordsOnly:  request.KeywordsOnly,
 	}))
 }
 
@@ -120,6 +144,38 @@ func (s *server) requireProjectIssue(r *http.Request, project, key string) error
 	}
 	if issueProject != project {
 		return errorf(http.StatusBadRequest, "EXCLUDE_ISSUE_INPUT", "exclude_issue %s is not an issue of project %s", key, project)
+	}
+	return nil
+}
+
+// requireProjectIssues refuses an exclusion list longer than relatedExcludeLimit, and one
+// holding anything that is not an issue of project. Every key is read in one statement, so a
+// list of fifty costs one round trip, and the refusal names the first key the project does not
+// hold rather than the whole list, as the single exclude_issue's does.
+func (s *server) requireProjectIssues(r *http.Request, project string, keys []string) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	if len(keys) > relatedExcludeLimit {
+		return errorf(http.StatusBadRequest, "EXCLUDE_ISSUE_INPUT",
+			"exclude_issues takes at most %d issues; %d were sent", relatedExcludeLimit, len(keys))
+	}
+	for _, key := range keys {
+		if !issueKeyPattern.MatchString(key) {
+			return errorf(http.StatusBadRequest, "EXCLUDE_ISSUE_INPUT", "exclude_issues %q is not an issue key", key)
+		}
+	}
+	var missing []string
+	if err := s.deps.Store.Pool.QueryRow(r.Context(), `
+		select coalesce(array_agg(k.key order by k.ordinality), '{}')
+		  from unnest($1::text[]) with ordinality k(key, ordinality)
+		 where not exists (select 1 from issues i where i.key = k.key and i.project_key = $2)
+	`, keys, project).Scan(&missing); err != nil {
+		return err
+	}
+	if len(missing) > 0 {
+		return errorf(http.StatusBadRequest, "EXCLUDE_ISSUE_INPUT",
+			"exclude_issues %s is not an issue of project %s", missing[0], project)
 	}
 	return nil
 }

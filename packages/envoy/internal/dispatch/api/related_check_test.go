@@ -186,6 +186,42 @@ func TestRelatedCheckMeaningListsASameMeaningItemWithNoSharedWord(t *testing.T) 
 	}
 }
 
+// The meaning stage runs the exclusion too, in the statement it reads the index with: ten
+// excluded issues nearer the text than the keeper fill the window the page takes
+// (suggestionSearchDepth rows), and the check still finds the keeper and still says it searched
+// by meaning and keywords. Left out after the page instead, the ten take every place in it and
+// the keeper, eleventh by vector, is never seen (INFRA-1160).
+func TestRelatedCheckMeaningLeavesExcludedIssuesOutOfItsWindow(t *testing.T) {
+	const text = "Archive snapshots finish late"
+	const keeperTitle = "Our own nightly backup cousin"
+	arc := func(angle float64) []float32 { return angledVector(math.Cos(angle), 1) }
+	vectors := map[string][]float32{text: queryVector(), keeperTitle: arc(0.8)}
+	for index := range suggestionSearchDepth {
+		vectors[fmt.Sprintf("Crowded neighbour %d", index)] = arc(0.005 * float64(index+1))
+	}
+	embedder := &fakeEmbedder{vectors: vectors}
+	handler, database, srv := meaningServer(t, embedder)
+	createSuggestionProject(t, handler, "MWIN")
+	excluded := make([]string, 0, suggestionSearchDepth)
+	for index := range suggestionSearchDepth {
+		excluded = append(excluded, createSearchIssue(t, handler, "MWIN", fmt.Sprintf("Crowded neighbour %d", index), ""))
+	}
+	keeper := createSearchIssue(t, handler, "MWIN", keeperTitle, "")
+	processAllPending(t, database, embedder)
+
+	crowded := srv.relatedCheck(context.Background(), relatedInput{project: "MWIN", text: text})
+	if owners := relatedOwnerKeys(crowded.Related); slices.Contains(owners, keeper) {
+		t.Fatalf("related owners with nothing excluded = %v, want %s behind the %d nearer issues", owners, keeper, len(excluded))
+	}
+	suggestions := srv.relatedCheck(context.Background(), relatedInput{project: "MWIN", text: text, excludeIssues: excluded})
+	if suggestions.Outcome != "found" || suggestions.Search != "meaning_and_keywords" {
+		t.Fatalf("suggestions = %+v, want found by meaning and keywords", suggestions)
+	}
+	if got := relatedOwnerKeys(suggestions.Related); !slices.Equal(got, []string{keeper}) {
+		t.Fatalf("related owners = %v, want %s alone, the one issue the check does not leave out", got, keeper)
+	}
+}
+
 // A failing embedder leaves the check its keyword search, and the result says so and why.
 func TestRelatedCheckMeaningEmbedderFailingSearchesByKeywordsOnly(t *testing.T) {
 	embedder := &fakeEmbedder{err: errors.New("model service throttled")}
@@ -652,29 +688,23 @@ func TestRelatedCheckBoundsBlankTextIsNotMade(t *testing.T) {
 	}
 }
 
-// A forced create is told the title overlaps it forced past even when the search behind its check
-// cannot run, and the issue is created.
+// A forced create is told the near copies it forced past even when the check behind it cannot
+// run, and the issue is created.
+//
+// The check is stopped by its own allowance, which the near-copy gate does not share: the gate
+// runs before the write under a bound of its own, the check after it. A lock would stop both,
+// since the gate prices the text's words through the check's own picker, and that case is the
+// third state of R3's record (TestCreateIssueForcedWithNoAnswerRecordsAnEmptyList).
 func TestCreateIssueForceNamesTitleMatchesWhenTheSearchFails(t *testing.T) {
-	handler, database, _, served := newRegisteredTestServer(t, testServerOptions{})
-	served.suggestionTimeout = time.Second
+	handler, _, _, served := newRegisteredTestServer(t, testServerOptions{})
 	createSuggestionProject(t, handler, "FORCE")
 	const title = "Archive search drops rows past offset fifty"
 	existing := createSuggestionIssue(t, handler, map[string]any{"project": "FORCE", "title": title})
 
-	lockTx, err := database.Pool.Begin(context.Background())
-	if err != nil {
-		t.Fatalf("begin lock tx: %v", err)
-	}
-	t.Cleanup(func() { _ = lockTx.Rollback(context.Background()) })
-	if _, err := lockTx.Exec(context.Background(), "lock table asks in access exclusive mode"); err != nil {
-		t.Fatalf("lock asks: %v", err)
-	}
+	served.suggestionTimeout = time.Nanosecond
 	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{
 		"project": "FORCE", "title": title, "force": true,
 	}, "alice")
-	if err := lockTx.Rollback(context.Background()); err != nil {
-		t.Fatalf("release the lock: %v", err)
-	}
 	if response.Code != http.StatusCreated {
 		t.Fatalf("forced create: status=%d body=%s", response.Code, response.Body.String())
 	}

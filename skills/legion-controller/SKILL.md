@@ -33,10 +33,13 @@ Launch, `gh`, pull requests, takeover: `skill://legion-controller/references/ses
 
 1. Recheck [trees waiting on a root claim](#trees-waiting-on-a-root-claim).
 2. Do the wake's work, or, on a start message, the start procedure below.
-3. On your first turn of each UTC day, whatever woke you: run the weekly-plan reconciliation
+3. On your first turn of each UTC week, whatever woke you: run the weekly audit
+   (`skill://legion-controller/references/weekly-audit.md`) before the day's report, so its
+   numbers and its nudges go in that report.
+4. On your first turn of each UTC day, whatever woke you: run the weekly-plan reconciliation
    (`skill://legion-controller/references/backlog-stewardship.md`), then post the
    [daily report](#daily-report).
-4. Name the [free slots](#free-slots) in your summary, so a person sees room to hand Legion work.
+5. Name the [free slots](#free-slots) in your summary, so a person sees room to hand Legion work.
 
 ## What happened before you started
 
