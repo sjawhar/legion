@@ -130,9 +130,9 @@ afterEach(resetOutstandingAnswers);
 // store outlives its test and would go on retrying into the tests and files after it
 // (`watchWriteStores`). Without this, one process running every file leaves writes retrying into
 // later files - sends to an agent session (`POST /api/v1/agents/<session>/messages`) and asks'
-// answers (`POST /api/v1/asks/<id>/answer`), in numbers that vary from run to run - each reaching
-// the network guard in whichever test is running then, and every such run fails. So is the issue
-// state the last pin answered let go, which the next pin would otherwise write over.
+// answers (`POST /api/v1/asks/<id>/answer`), in numbers that vary from run to run - each answered
+// by nothing (`network.ts`) in whichever test is running then, and every such run fails. So is
+// the issue state the last pin answered let go, which the next pin would otherwise write over.
 const madeStores = new Set<Writes>();
 watchWriteStores((store) => madeStores.add(store));
 afterEach(() => {

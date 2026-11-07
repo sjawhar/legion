@@ -1339,13 +1339,16 @@ a `catch`, and a write still retrying after a file's last test, are reported all
 The module answers the five routes the application shell reads on every page
 (`/auth/whoami` as a 401 with no identity, `/api/v1/agents`, `/api/v1/me/replies`,
 `/api/v1/credential-requests`, `/api/v1/me/agents/state`), each with the API's empty shape.
-Every other route is the test's own to answer, and there are three seams for it, from the top
+Every other route is the test's own to answer, and there are four seams for it, from the top
 down: the api-client method a test spies (`spyOn(api, "issue")`), which most of the suite uses
 and which never reaches MSW; the request identity `__tests__/send-answers.ts` (`answerRoute`)
 and `__tests__/keyed-attempt.ts` carry, which answers a write by the request object it was sent
-with and hands its answer the bounds — neither of which crosses the wire; and
-`answerRequests(http.get(…))` from `__tests__/network.ts`, which answers at HTTP and is forgotten
-after each test.
+with and hands its answer the bounds — neither of which crosses the wire;
+`spyOn(globalThis, "fetch")`, or a `globalThis.fetch` replaced, that a test installs and restores
+for its own run, which takes the request before MSW sees it
+(`features/shell/DeploymentResilience.test.tsx`, `features/writes/write-store.test.ts`,
+`__tests__/client.test.ts`); and `answerRequests(http.get(…))` from `__tests__/network.ts`, which
+answers at HTTP and is forgotten after each test.
 After every test the preload also stops every write store made since the last, which
 `watchWriteStores` in `features/writes/write-store.ts` tells it of as each is made (the app holds
 none but its own), and drops what the page kept (`resetWriteStorage`): a store outlives the test
