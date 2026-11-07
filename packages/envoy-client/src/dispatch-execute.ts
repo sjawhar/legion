@@ -2239,7 +2239,7 @@ function formatCheckResults(results: IssueCheckResults): string {
     if (latest === undefined) {
       return `${head}no result yet. ${check.text}`;
     }
-    return `${head}${latest.verdict} at ${latest.commit_sha.slice(0, 12)} by ${latest.role}, ${latest.currency ?? "unknown"}. ${check.text}`;
+    return `${head}${latest.verdict} at ${latest.commit_sha} by ${latest.role}, ${latest.currency ?? "unknown"}. ${check.text}`;
   });
   return [`Checks of ${results.issue}:`, ...lines].join("\n");
 }
@@ -5107,7 +5107,7 @@ export async function executeDispatchTool(
         ...optional,
       });
       return {
-        text: `Recorded ${recorded.result.verdict} for check ${recorded.result.check_block_id} of ${recorded.result.check_issue_key} at ${recorded.result.commit_sha.slice(0, 12)}, as ${recorded.result.role}.\n\nPull request body line:\n${recorded.line}`,
+        text: `Recorded ${recorded.result.verdict} for check ${recorded.result.check_block_id} of ${recorded.result.check_issue_key} at ${recorded.result.commit_sha}, as ${recorded.result.role}.\n\nPull request body line:\n${recorded.line}`,
         details: {
           issue,
           result: recorded.result.id,

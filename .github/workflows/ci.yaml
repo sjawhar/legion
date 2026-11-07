@@ -31,18 +31,19 @@ name: CI
 # actions/cache/restore: go-daemon (typecheck, test and pi-legion), go-docs (docs, and the build job
 # of docs-pages.yaml, which saves it), go-envoy (envoy-e2e-local and envoy-session-stall, which
 # build the same listener and natsd, listener-server-change, which builds the listener, and
-# dispatch, dispatch-browser-multiprocess and envoy-go-race-docs, which save none), go-envoy-test
-# (envoy-go alone, which saves it: it builds the test binary of every package of the envoy module,
-# a set no other job builds), go-envoy-infra (envoy-infra-go) and go-notices (lint's notices step).
-# Each family keeps one entry, keyed on the Go version its job's setup-go installed, so it is
-# refreshed only when Go is bumped. A go.sum change downloads only the changed modules, and Go's
-# build cache is content-addressed, so a stale entry costs a run only what changed; a key on the
-# go.sum files left a whole entry, up to a gigabyte, per change for seven days. Only a run off main
-# falls back, when the exact key misses, to the family's newest entry by its prefix; a run on main
-# restores by the exact key only, so the entry it saves after a Go bump holds nothing the older Go
-# built. Each family is saved with actions/cache/save as the last step before the ci-ok report of a
-# job that runs on main, and only on a push to main whose job succeeded and whose restore missed
-# the exact key. setup-bun reads and writes its cache only on main (.github/actions/setup-bun).
+# dispatch, dispatch-browser-multiprocess, envoy-go-race-docs and envoy-go-docs-finalizers,
+# which save none), go-envoy-test (envoy-go alone, which saves it: it builds the test binary of
+# every package of the envoy module, a set no other job builds), go-envoy-infra (envoy-infra-go)
+# and go-notices (lint's notices step). Each family keeps one entry, keyed on the Go version its
+# job's setup-go installed, so it is refreshed only when Go is bumped. A go.sum change downloads
+# only the changed modules, and Go's build cache is content-addressed, so a stale entry costs a
+# run only what changed; a key on the go.sum files left a whole entry, up to a gigabyte, per
+# change for seven days. Only a run off main falls back, when the exact key misses, to the
+# family's newest entry by its prefix; a run on main restores by the exact key only, so the entry
+# it saves after a Go bump holds nothing the older Go built. Each family is saved with
+# actions/cache/save as the last step before the ci-ok report of a job that runs on main, and
+# only on a push to main whose job succeeded and whose restore missed the exact key. setup-bun
+# reads and writes its cache only on main (.github/actions/setup-bun).
 
 # No `paths:`: every change starts this workflow, and `changes` selects what runs. No `branches:`
 # on pull_request: a pull request on any base is tested. No `edited`: a title or body edit starts
@@ -115,6 +116,7 @@ env:
       "envoy-go-race": "envoy_go_race",
       "envoy-go-race-api": "envoy_go_race_api",
       "envoy-go-race-docs": "envoy_go_race_docs",
+      "envoy-go-docs-finalizers": "envoy_go_race_docs",
       "dispatch-memory": "dispatch_memory",
       "dispatch-multiprocess": "dispatch_multiprocess",
       "listener-server-change": "listener_server_change",
@@ -283,6 +285,9 @@ jobs:
               - 'packages/envoy/internal/testnats/*'
               - 'packages/envoy/listenfd/*'
               - 'packages/envoy/migrationid/*'
+              # The reasons the listener refuses a publish to a role no session holds, which the
+              # daemon's notify path reads as notify.ErrNoHolder.
+              - 'packages/envoy/roleholder/*'
               # The daemon reads the Envoy session timings (heartbeat, live window, claim
               # staleness and the listener call's attempts) through this one public package: it
               # is a module of its own, so Go's internal rule bars it from internal/contracts,
@@ -291,7 +296,8 @@ jobs:
               - 'packages/envoy/testnatsimages/*'
             # The Dispatch server, `go list -deps ./cmd/dispatch` in packages/envoy (its embedded
             # migrations and pmdoc schema included): what the daemon's outbox test builds
-            # (internal/dispatch/outbox_scratch_dispatch_test.go:187), the browser tests' and the
+            # (internal/testbuild/testbuild.go:112, called from
+            # internal/daemon/outbox_scratch_dispatch_test.go:353), the browser tests' and the
             # docs screenshots' run-server.sh builds (packages/dispatch/e2e/run-server.sh:135), and
             # envoy-infra's permissions live test builds (infra/core/permissions_live_test.go:298).
             # packages/envoy/listenfd serves on the socket a test or harness holds (#2229).
@@ -367,6 +373,7 @@ jobs:
               - 'packages/envoy/internal/store/*'
               - 'packages/envoy/listenfd/*'
               - 'packages/envoy/migrationid/*'
+              - 'packages/envoy/roleholder/*'
             # The daemon's `legion` command, `go list -deps ./cmd/legion` in packages/daemon (its
             # embedded probes, turnscope.yml and role prompts included, and the envoy package it
             # serves its held listener through): what docs/site/scripts/build-binaries.sh:17 builds
@@ -430,6 +437,7 @@ jobs:
               - 'packages/daemon/internal/supervise/*'
               - 'packages/daemon/internal/treelifecycle/*'
               - 'packages/daemon/internal/wait/*'
+              - 'packages/daemon/internal/wakepace/*'
               - 'packages/daemon/internal/workflow/*'
               - 'packages/daemon/internal/workspace/*'
               - 'packages/envoy/brokerclient/*'
@@ -449,6 +457,9 @@ jobs:
               # packages/envoy/migrationid is the identifier rule the daemon's embedded
               # migrations are held to, in the envoy module so both sets keep one rule.
               - 'packages/envoy/migrationid/*'
+              # packages/envoy/roleholder names the reasons the listener refuses a role publish
+              # with, which internal/notify reads as notify.ErrNoHolder.
+              - 'packages/envoy/roleholder/*'
               # The one public door onto the generated Envoy session timings the daemon's
               # liveness and notice rules read: it sits in the envoy module because the
               # daemon, a module of its own, cannot reach internal/contracts, where they are.
@@ -485,6 +496,7 @@ jobs:
               - 'packages/envoy/internal/verify/*'
               - 'packages/envoy/internal/webhook/*'
               - 'packages/envoy/listenfd/*'
+              - 'packages/envoy/roleholder/*'
             # What `go test ./cmd/dispatch` reads under both its memory and its multiprocess tag:
             # the packages it compiles, with the whole of cmd/dispatch and internal/dispatch, whose
             # .go files cmd/dispatch/settings_test.go:137 walks, and the pod spec
@@ -528,6 +540,7 @@ jobs:
               - 'packages/envoy/internal/testsocks5/*'
               - 'packages/envoy/listenfd/*'
               - 'packages/envoy/migrationid/*'
+              - 'packages/envoy/roleholder/*'
               - 'packages/envoy/infra/gcp/testdata/dispatch-pod.golden'
             # Oh My Pi, which .github/actions/install-omp installs at the version .omp-pin names,
             # through the mise .github/actions/install-jj leaves.
@@ -538,10 +551,10 @@ jobs:
               # install-jj reads the mise version and checksum it installs from here.
               - 'packages/daemon/docker/worker.Dockerfile'
             # What the test job's two Go steps read together — the plain step, which tests every
-            # package of packages/daemon but the four concurrent ones, and the race step, which
-            # tests those four — so the filter still covers the whole module's closure. The
-            # packages they compile, the Dispatch server
-            # internal/daemon/outbox_scratch_dispatch_test.go:187 builds, and what their tests read
+            # package of packages/daemon but the three concurrent ones, and the race step, which
+            # tests those three — so the filter still covers the whole module's closure. The
+            # packages they compile, the Dispatch server internal/testbuild/testbuild.go:112 builds
+            # for internal/daemon/outbox_scratch_dispatch_test.go:353, and what their tests read
             # outside the daemon: contracts' fixtures
             # (internal/api/state_golden_test.go:27, internal/intake/intake_test.go:698), the two
             # Oh My Pi plugins internal/daemon/promptreferences_omp_test.go:132 packs, whose prepack
@@ -601,6 +614,9 @@ jobs:
               # tests/daemon-api-version.test.ts:15 and its neighbours.
               - 'packages/contracts/fixtures/daemon-api/**'
               - 'packages/envoy-client/src/**'
+              # tests/envoy-channel-stall.test.ts:5-11 imports test/envoy-stack, stall-proxy and
+              # stall-scenario.
+              - 'packages/envoy-client/test/**'
               - 'packages/envoy-client/bin/dispatch.ts'
               - 'packages/pi-shared/src/**'
               # scripts/build.ts:115-128 generates legion/ from pi-legion's agents and the skills
@@ -613,7 +629,7 @@ jobs:
               # own name, to no `version` of its own, and to a source range that leaves out the
               # 0.0.0 placeholder and admits the first release.
               - '.claude-plugin/marketplace.json'
-            # The daemon's tests (every package once: the four concurrent packages under the race
+            # The daemon's tests (every package once: the three concurrent packages under the race
             # detector, the rest in the plain step, and the daemon
             # scripts/e2e/stage1-skeleton.sh builds) and every file the job's other steps read.
             test:
@@ -629,7 +645,7 @@ jobs:
               - *listener_command
               # Each .github/scripts/*.test.sh runs its checker, through test-lib.sh (and
               # workflow_paths.py, check-pr-text.sh, release-bump.sh, ci_filter_coverage.py where a
-              # checker sources them).
+              # checker sources them); workflow_paths.test.sh runs that path model itself.
               - '.github/scripts/*'
               # select-e2e-proofs.test.sh runs the selector over this list and over scripts/e2e/.
               - '.github/e2e-scripts.json'
@@ -780,6 +796,8 @@ jobs:
               - *biome
               - 'packages/pi-shared/**'
               - 'packages/envoy-client/src/**'
+              # src/handoff-record.test.ts:7 imports @legion/envoy-client/test/fake-dispatch.
+              - 'packages/envoy-client/test/**'
               - 'packages/contracts/src/**'
               # src/daemon-client.test.ts:15 and its neighbours read the daemon API fixtures.
               - 'packages/contracts/fixtures/daemon-api/**'
@@ -805,6 +823,9 @@ jobs:
               # src/skills-guard.test.ts:23, scripts/prepack.test.ts:6).
               - 'packages/pi-shared/test/**'
               - 'packages/envoy-client/src/**'
+              # extensions/envoy.test.ts:45-51 imports test/envoy-stack, stall-proxy and
+              # stall-scenario; extensions/askgate/decision-record.test.ts:9 its fake-dispatch.
+              - 'packages/envoy-client/test/**'
               - 'packages/envoy-client/bin/dispatch.ts'
               - 'packages/envoy-client/scripts/build-dispatch-cli.sh'
               - 'packages/contracts/src/**'
@@ -862,6 +883,7 @@ jobs:
               - 'packages/envoy/internal/dispatch/pmdoc/**'
               - 'packages/envoy/internal/dispatch/text/*'
               - 'packages/envoy/migrationid/*'
+              - 'packages/envoy/roleholder/*'
               - 'packages/envoy/sessiontiming/*'
               - *go_workspace
               # The guides and docs the skills guard sweeps (src/skills-guard.test.ts:143-148).
@@ -893,6 +915,9 @@ jobs:
               - 'packages/envoy/going/testdata/**'
               # e2e/cli-body-cap.e2e.ts:27 runs envoy-client's dispatch CLI.
               - 'packages/envoy-client/src/**'
+              # e2e/__tests__/delivery-live-probe.test.ts:6-9 and local-instance-support.test.ts:2-5
+              # import @legion/envoy-client/test/fake-dispatch.
+              - 'packages/envoy-client/test/**'
               - 'packages/envoy-client/bin/dispatch.ts'
               # The Dispatch server the browser tests start (e2e/run-server.sh:135), on the socket
               # scripts/e2e/lib/held-port.py holds (run-server.sh:37).
@@ -1035,6 +1060,8 @@ jobs:
             # one and what those packages embed.
             envoy_go_race_docs:
               - '.github/workflows/ci.yaml'
+              # The race step runs the package under this sampler (the step's comment says why).
+              - '.github/scripts/race_memory.py'
               - *go_workspace
               - 'packages/envoy/internal/contracts/*'
               - 'packages/envoy/internal/contracts/testdata/**'
@@ -1249,6 +1276,7 @@ jobs:
               - 'packages/envoy/internal/**'
               - 'packages/envoy/listenfd/**'
               - 'packages/envoy/migrationid/**'
+              - 'packages/envoy/roleholder/**'
               - 'packages/envoy/docker/rds-global-bundle.pem'
               # TestSmoke compiles in the root workspace.
               - 'go.work'
@@ -1277,6 +1305,8 @@ jobs:
               - '.github/actions/pull-test-images/**'
               # The download URL the schema step stamps into the plugin and asserts on.
               - '.github/scripts/repo-paths.sh'
+              # The disk the live tests leave: the two steps around them run this sampler.
+              - '.github/scripts/disk_watch.py'
             # The local acceptance run drives the Go listener and renders every frame with the
             # shared TypeScript renderer, so a change to either side, or to the contracts both
             # read, runs it.
@@ -1360,6 +1390,7 @@ jobs:
               - 'packages/envoy/listenfd/**'
               - 'packages/envoy/loadtest/**'
               - 'packages/envoy/migrationid/**'
+              - 'packages/envoy/roleholder/**'
               - 'packages/envoy/scripts/**'
               - 'packages/envoy/sessiontiming/**'
               - 'packages/envoy/testnatsimages/**'
@@ -1830,6 +1861,15 @@ jobs:
       # clean up, and its image (testcontainers/ryuk, on Docker Hub) would be one more registry
       # pull a test could fail on.
       TESTCONTAINERS_RYUK_DISABLED: "true"
+      # The fuzz and property counts follow the lane. A pull-request run takes the reduced counts
+      # below; every other lane — a merge group, a push to main — takes the empty string, which
+      # every reader treats as unset (classify's run_fuzz_test.go and sender_fuzz_test.go, the
+      # daemon's keptPropertyEnv), so the full counts live in the Go source alone and the queue
+      # still runs them. sender_fuzz_test.go's own count is 2,000 histories of each order already,
+      # so the pull-request value leaves it as it is. The number of seeds falls rather than each
+      # seed's depth: a seed that stops early stops reaching the states the property is about.
+      LEGION_RUN_FUZZ_ITERS: ${{ github.event_name == 'pull_request' && '2000' || '' }}
+      LEGION_KEPT_PROPERTY_RUNS: ${{ github.event_name == 'pull_request' && '8' || '' }}
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1897,6 +1937,9 @@ jobs:
       - name: Test the gh version check
         run: .github/scripts/check-gh-version.test.sh
 
+      - name: Test the workflow path model the path checks import
+        run: .github/scripts/workflow_paths.test.sh
+
       - name: Test the image trigger path check
         run: .github/scripts/check-image-trigger-paths.test.sh
 
@@ -1939,6 +1982,12 @@ jobs:
 
       - name: Test ci-ok's report and the check-run post (a stand-in gh)
         run: .github/scripts/ci-ok-report.test.sh
+
+      - name: Test the race memory sampler
+        run: .github/scripts/race_memory.test.sh
+
+      - name: Test the disk watch
+        run: .github/scripts/disk_watch.test.sh
 
       - name: Test the session import pods script (a stand-in kubectl)
         run: bash scripts/sessions-import-pods.test.sh
@@ -2032,32 +2081,35 @@ jobs:
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
           unshare --user --map-root-user true
 
-      # The step runs every package of the module except the four the race step below tests, so
+      # The step runs every package of the module except the three the race step below tests, so
       # each of those runs once per job, under the detector. `set -o pipefail` is what makes a
       # failed go list, or a pattern that matches every package, fail the step rather than pass it
       # with nothing tested.
       - name: Test the Go daemon
         run: |
           set -o pipefail
-          go list ./... | grep -Ev '/(internal/daemon|internal/record|internal/sessionproxy|internal/launcher)$' | xargs go test -count=1 -timeout 15m
+          go list ./... | grep -Ev '/(internal/daemon|internal/sessionproxy|internal/launcher)$' | xargs go test -count=1 -timeout 15m
         working-directory: packages/daemon
 
       # The outbox's lane registry, lease renewal and held clock are the daemon's first goroutines
-      # that share state with the intake's commit hooks and the API, so the packages the lanes and
-      # their store live in run under the race detector once per job, the plain step above leaving
-      # them out; so do the session proxy and the launcher that wires it, whose accept loop, copy
-      # pairs, pair tracking and bounded drain share state across goroutines. The detector needs
-      # cgo, which the runners have gcc for. The lane tests hold a fake clock, so they are
-      # deterministic under it.
+      # that share state with the intake's commit hooks and the API, so the packages the lanes
+      # live in run under the race detector once per job, the plain step above leaving them out;
+      # so do the session proxy and the launcher that wires it, whose accept loop, copy pairs,
+      # pair tracking and bounded drain share state across goroutines. internal/record is not
+      # here: the lanes' store is the package's subject, but its product code starts no goroutine
+      # and uses no sync, so the detector had only the package's own test goroutines to watch,
+      # and that cover is what leaving it out gives up. It runs in the plain step instead. The
+      # detector needs cgo, which the runners have gcc for. The lane tests hold a fake clock, so
+      # they are deterministic under it.
       #
       # The step carries a package deadline of its own, as the envoy race lanes do: under go
-      # test's ten-minute default, internal/daemon, by far the slowest of the four packages, took
+      # test's ten-minute default, internal/daemon, by far the slowest of the three packages, took
       # up to 570 s on the green runs of 2026-11-02 and 2026-11-03 and ran the ten minutes out on
       # main at job 125691048644 (run 41562777668). No single test dominates it: a local run timed
       # 648 tests one after another, the slowest at 44 s. The 30 minutes leave it three times its
       # slowest run.
       - name: Test the concurrent packages under the race detector
-        run: go test -count=1 -race -timeout 30m ./internal/daemon/ ./internal/record/ ./internal/sessionproxy/ ./internal/launcher/
+        run: go test -count=1 -race -timeout 30m ./internal/daemon/ ./internal/sessionproxy/ ./internal/launcher/
         working-directory: packages/daemon
 
       - name: Stage 1 live proof
@@ -2414,19 +2466,28 @@ jobs:
     # steps' `env:` drops run-server.sh's `go build` out of check-ci-filters.sh's reduction, which
     # then counts it as reading every Go file of the repository.
     #
-    # The budgets below, this one and the two on steps, are measured: GitHub's jobs API over the
+    # The job budget below and the browser step's are measured: GitHub's jobs API over the
     # 397 of the newest 400 ci.yaml runs that could be read, created between 2026-11-05T04:52:45Z
     # and 2026-11-05T21:06:27Z (268 pull_request, 120 merge_group, 12 push), over the 217 jobs of
     # this name that concluded success. Three runs could not be read, 41995538189, 42034266338 and
     # 42087689355, whose jobs endpoint answered HTTP 502 on four attempts. The whole window is
     # after the commit that moved this job to four lanes, 9689e2c54 of 2026-11-05T04:09:18Z, so no
-    # run is left out for being older than it.
+    # run is left out for being older than it. Those 217 jobs ran a smaller package list than the
+    # install step's below, so the install step is out of the table below, and its budget is its
+    # own retry arithmetic rather than a reading of that window.
     #
-    #   step                                             median    95th     max
-    #   Install Playwright Chromium, WebKit and Firefox     38 s   102 s   634 s
-    #   Browser-test dispatch dashboard                   1475 s  1582 s  1671 s
-    #   every other step summed                            199 s   221 s   232 s
-    #   the whole job                                     1715 s  1875 s  2348 s
+    #   step                               median    95th     max
+    #   Browser-test dispatch dashboard    1475 s  1582 s  1671 s
+    #   every other step summed             199 s   221 s   232 s
+    #   the whole job                      1715 s  1875 s  2348 s
+    #
+    # The install step has one reading at its present package set, not a distribution: 30 s, in
+    # job 128209099649 of cybermonklabs/legion#2888 at 5ff42456. A distribution at that set can
+    # be read from main's jobs of this name. The apt archive cache's three steps came after that
+    # window too, so the "every other step summed" row holds none of them. In that job the restore
+    # missed, and the key and restore steps took under a second each. A restore that hits reads
+    # about 114 MB from the Actions cache, and the save, which runs only on a push to main whose
+    # restore missed, has no reading yet.
     #
     # The rule: a step budget is that step's measured maximum plus 15 per cent, rounded up to the
     # next whole minute, with a floor of two minutes; an install step's budget comes from its own
@@ -2545,60 +2606,117 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('bun.lock') }}
           restore-keys: ${{ github.ref != 'refs/heads/main' && format('playwright-{0}-', runner.os) || '' }}
+      # The key the apt archive cache below is read and written under, computed here because a
+      # step expression cannot read the runner's own environment.
+      - id: apt-debs-key
+        name: Compute the apt archive cache key
+        run: |
+          # The entry line in bun.lock reads `"playwright-core": ["playwright-core@1.64.1", ...`.
+          version=$(sed -n 's/^ *"playwright-core": \["playwright-core@\([^"]*\)".*/\1/p' bun.lock)
+          [ -n "$version" ] || {
+            echo "::error::no playwright-core version in bun.lock, so the apt archive cache key" \
+              "cannot name the Playwright version"
+            exit 1
+          }
+          # A GitHub hosted runner sets both, for example ubuntu24 and 20251027.1.0.
+          for name in ImageOS ImageVersion; do
+            [ -n "${!name}" ] || {
+              echo "::error::the runner set no $name, so the apt archive cache key cannot name" \
+                "the image"
+              exit 1
+            }
+          done
+          echo "key=apt-playwright-$version-$ImageOS-$ImageVersion" >> "$GITHUB_OUTPUT"
+      # No restore-keys: a partial match would hand the install the .deb files of another
+      # Playwright version or another image, which apt would fetch again anyway.
+      - id: apt-debs
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/apt-archives
+          key: ${{ steps.apt-debs-key.outputs.key }}
       # This step installs the system packages itself instead of through `playwright install
-      # --with-deps`, which installs Playwright's whole ubuntu24.04-x64 list. The pinned list
-      # below is that list less four media packages - gstreamer1.0-libav,
-      # gstreamer1.0-plugins-bad, gstreamer1.0-plugins-good and libavcodec60 - which is what
-      # makes this step small enough to bound. Measured on this
-      # image: Playwright's whole list resolves to 181 packages and 114 MB; without those four it
-      # is 60 packages and 51.4 MB. The four carry 121 of the 181 packages and 62.8 of the
-      # 114.2 MB, through the ffmpeg stack and the GStreamer plugin trees.
+      # --with-deps`, which runs its apt calls with no bound, no retry and no second origin. The
+      # pinned list below is Playwright's ubuntu24.04-x64 list exactly: the union of the `tools`,
+      # `chromium`, `firefox` and `webkit` entries of that table in playwright-core's
+      # lib/coreBundle.js. Measured in job 128209099649, of cybermonklabs/legion#2888 at 5ff42456:
+      # Playwright's 79 names and gstreamer1.0-tools resolve, with their dependencies, to 182
+      # packages and 114 MB of archives (`0 upgraded, 182 newly installed, 0 to remove and 27
+      # not upgraded.` and `Need to get 114 MB of archives.`), and the `apt-get update` before
+      # them fetched 13.0 MB of indexes (`Fetched 13.0 MB in 1s (10.1 MB/s)`). Nothing is left
+      # out of the list, so there is no reduced set beside it and no split to measure.
       #
-      # Each is safe to drop because they are plugins and codecs loaded at playback, not
-      # libraries the browsers link: Playwright's own source says of gstreamer1.0-libav that its
-      # one library libgstlibav.so is the library required for playing h.264. No spec or source
-      # file under packages/dispatch holds `<video`, `.mp4`, `.webm`, `new Audio` or
-      # `playsinline`, so no row plays media. The libraries WebKit links stay in the list:
-      # libgstreamer-plugins-bad1.0-0, libgstreamer-plugins-base1.0-0, libgstreamer1.0-0,
-      # libgstreamer-gl1.0-0, libflite1 and libgtk-4-1 among them. A row that later needs media
-      # reinstalls that package by name. That the browsers still launch is what the suite's six
-      # WebKit and Firefox projects prove - webkit, webkit-iphone, webkit-alone, firefox,
-      # firefox-download-navigation and firefox-alone (e2e/playwright.config.ts) - which the
-      # "Browser-test dispatch dashboard" step below runs.
+      # `step_tools` below is the one package this step installs that Playwright's list does not
+      # name: gstreamer1.0-tools, for the `gst-inspect-1.0` the decoder guard runs. It is a
+      # variable of its own because `packages` is what the check at the end of the step holds
+      # against Playwright's own list, name for name.
       #
-      # On a Playwright upgrade, re-derive the list as the union of the `tools`, `chromium`,
-      # `firefox` and `webkit` entries of the ubuntu24.04-x64 table in playwright-core's
-      # lib/coreBundle.js, less those four. Deriving it at run time by subtracting one apt
-      # closure from the other does not work and must not be written: the two closures share 35
-      # packages Playwright's own list names or needs, and the subtraction leaves WebKit unable
-      # to launch.
+      # WebKit plays video and audio through GStreamer, so without gstreamer1.0-plugins-good,
+      # gstreamer1.0-plugins-bad, gstreamer1.0-libav and libavcodec60 it loads a page and plays
+      # nothing: the first three hold the plugins that demux Matroska and decode VP8 and h.264,
+      # and libavcodec60 is the codec library gstreamer1.0-libav's plugin links for h.264.
+      # Playwright's own source says of gstreamer1.0-libav that its one library libgstlibav.so is
+      # the library required for playing h.264. The decoder guard after the install asks the
+      # GStreamer registry for one element out of each of those three plugin packages and out of
+      # the already-pinned gstreamer1.0-plugins-base; avdec_h264 loads only where libavcodec60 is
+      # installed, so it answers for that library too. It runs before the browsers are
+      # downloaded, and it is the one check that catches a package that installs without its
+      # element reaching the GStreamer registry. That the browsers launch at all is what the
+      # suite's six WebKit and Firefox projects prove - webkit, webkit-iphone, webkit-alone,
+      # firefox, firefox-download-navigation and firefox-alone (e2e/playwright.config.ts) -
+      # which the "Browser-test dispatch dashboard" step below runs.
+      #
+      # On a Playwright upgrade, re-derive the list as that union again, with nothing taken out
+      # of it. Deriving it at run time by subtracting one apt closure from another does not work
+      # and must not be written: the closure of the four that carry playback and the closure of
+      # the rest share 35 packages Playwright's own list names or needs, and the subtraction
+      # leaves WebKit unable to launch. This paragraph is a standing refusal, not a record of a
+      # design that was taken out: nobody is to re-derive a reduced list.
       #
       # The 22-minute budget is the step's own retry arithmetic, not its measured maximum, which
       # the bounds make unreachable: two bounded attempts of `apt-get update` at 90 s, two of the
       # download at 300 s, then, where both of those time out, one 90 s read of the fallback
-      # origin's indexes and a third 300 s download attempt, then the unpack, the browser
-      # download and the two apt simulations of the list check, none of which touch the Ubuntu
-      # mirror. So the arithmetic is 2 x 90 + 2 x 300 + 90 + 300 s of bounded apt, about 20 s of
-      # unpack, about 90 s for the browsers and about 30 s for the list check: 1310 s, rounded up
-      # to 22 min. The budget has to carry the fallback's own update, because the path that
-      # needs every one of those bounds is the path on which the step still succeeds. Healthy
-      # today is a 38 s median and a 102 s 95th percentile for the whole step.
+      # origin's indexes and a third 300 s download attempt, then the unpack, the keeping of the
+      # archives for the cache, the decoder guard, the browser download and the one apt
+      # simulation of the list check, none of which touch the Ubuntu mirror. So the arithmetic is
+      # 2 x 90 + 2 x 300 + 90 + 300 = 1170 s of bounded apt, 13.6 s of unpack, 1.1 s of keeping,
+      # 0.4 s of decoder guard, about 90 s for the browsers and 1.6 s for the list check:
+      # 1170 + 13.6 + 1.1 + 0.4 + 90 + 1.6 = 1276.7 s, rounded up to 22 min. The budget has to
+      # carry the fallback's own update, because the path that needs every one of those bounds is
+      # the path on which the step still succeeds.
+      #
+      # The five readings after the bounded apt are job 128209099649's, of cybermonklabs/legion#2888
+      # at 5ff42456, at its 182 packages. The unpack is the 13.6 s from `Download complete and in
+      # download only mode` at 23:14:13.884 to the last line of the unbounded install at
+      # 23:14:27.475. The keeping is the 1.1 s to `apt archives: seeded 0 .deb files, keeping 182`
+      # at 23:14:28.541, which is 114 MB copied out of apt's directory for the cache above. The
+      # decoder guard is the 0.4 s to `the decoders WebKit plays through are in the registry: ...`
+      # at 23:14:28.984. The browsers and the list check together are the 1.6 s to `The pinned list
+      # is current: ...` at 23:14:30.540 - but that job restored its browsers from the Actions cache
+      # (`Cache hit for: playwright-Linux-7f68fc...`, 482 MB, at 23:13:54), so that 1.6 s is no
+      # reading of the cold browser download and the budget has to carry the cold case. That is what
+      # the 90 s term is: the step's estimate for the cold browsers, not a reading, which the
+      # package set does not reach. The list check is measured inside that 1.6 s, so 1.6 s is the
+      # term the reading supports for it. The whole step took 30 s in that job, 23:14:00 to
+      # 23:14:30: one reading at this package set, not a distribution. Each is one reading, so each
+      # moves a little from run to run; the margin the sum leaves under 22 min is what carries that.
       #
       # Each bound is derived from its own phase: each job's two apt rates, as apt logged them,
-      # scaled onto the head's smaller fetch of 12.9 MB of indexes and 51.4 MB of packages. The
+      # scaled onto the step's fetch of 13.0 MB of indexes and the list's 114 MB of packages. The
       # population is the 205 green dispatch jobs of the tester's window (2026-11-05T08:51:42Z
       # to 23:07:42Z, a different window from the table above, which is why its count differs),
-      # read in full for the 26 whose install step ran over 73 s. No shorter step can reach
-      # either bound: an update need over 90 s means a merge-base index fetch of 10.5 MB taking
-      # over 73 s, and a download need over 300 s means a merge-base fetch of 114 MB taking over
-      # 665 s.
+      # read in full for the 26 whose install step ran over 73 s.
       #
       # Two jobs bind the two bounds. Job 127238648049 binds the download: apt logged
-      # `Fetched 114 MB in 10min 13s (186 kB/s)` for its packages, so the head's 51.4 MB need
-      # 276.3 s there, and 300 s leaves 8.6 per cent of headroom. Job 127357441704 binds the
-      # update: apt logged `Fetched 10.5 MB in 45s (233 kB/s)` for its `apt-get update`, so the
-      # head's 12.9 MB need 55.4 s there, and 90 s leaves 63 per cent. On this model the two
-      # bounds fail none of the 205.
+      # `Fetched 114 MB in 10min 13s (186 kB/s)` for its packages, so the list's 114 MB need
+      # 613 s there, which the two 300 s attempts on the primary do not reach. Job 127357441704
+      # binds the update: apt logged `Fetched 10.5 MB in 45s (233 kB/s)` for its `apt-get
+      # update`, so the step's 13.0 MB of indexes need 55.8 s there, and 90 s leaves 61 per cent
+      # over that need. Neither the index figure nor its 90 s bound moves with the package set.
+      #
+      # So at 186 kB/s, the slowest mirror a green job of that window met, the list's 114 MB
+      # need more than the 600 s of the two attempts on the primary, and the origin switch
+      # fires. That is the trade Playwright's whole list costs: a download phase that reaches the
+      # fallback origin on that mirror.
       #
       # One blended rate per job is the wrong model, as job 127238648049's own log shows:
       # `Fetched 10.5 MB in 1s (9797 kB/s)` for its update and the 186 kB/s above for its
@@ -2606,27 +2724,34 @@ jobs:
       # understates the download. The model assumes a retry meets the same mirror rate, and
       # azure.archive.ubuntu.com is a pool, so a retry may meet a faster mirror or a slower one.
       # Both bounds come from the slowest mirror a green job of that window met, and are read
-      # again when a green job meets a slower one. Under about 143 kB/s the indexes do not
-      # arrive inside one bound, and under about 171 kB/s the packages do not: job 127274913129
-      # met 62.5 kB/s for its packages, and its job budget cancelled it.
+      # again when a green job meets a slower one. Under 13.0 MB / 90 s = 144 kB/s the indexes
+      # do not arrive inside one bound, and under 114 MB / 300 s = 380 kB/s the packages do not:
+      # job 127274913129 met 62.5 kB/s for its packages, and its job budget cancelled it. The
+      # list's 114 MB need 1824 s at that rate, which neither 600 s nor 900 s of download
+      # reaches, so the step fails by its own name there.
       #
-      # What the three attempts complete, which is the threshold the step carries: three bounds
-      # of 300 s are 900 s of download, so the step completes above about 57 kB/s, and under
-      # that it fails by its own name - in about 900 s where both `apt-get update` phases were
-      # fast, and in at most 1170 s where each was retried to its bound. Two attempts would have
-      # completed only above about 86 kB/s, which is why there are three: at 62.5 kB/s the
-      # head's 51.4 MB need 822 s, which 600 s of download does not reach and 900 s does, and
-      # job 127274913129 above met exactly that rate.
+      # What the attempts complete is the threshold the step carries, and it is three bands
+      # rather than one number, because the third attempt is on another origin and the partial
+      # may not be reused across that switch. With B the 114 MB the list fetches:
+      #   above B / 600 s = 190 kB/s the two attempts on the primary complete the download;
+      #   between B / 900 s = 127 kB/s and 190 kB/s the origin switch fires on every run and
+      #     completion rests on the fallback resuming the partial; where it does not, that one
+      #     attempt carries all 114 MB and needs B / 300 s = 380 kB/s, which nothing in this
+      #     band meets, so that class fails by its own name;
+      #   below 127 kB/s the step fails by its own name whatever the fallback does - in about
+      #     900 s where both `apt-get update` phases were fast, and in at most 1170 s where each
+      #     was retried to its bound.
       #
       # The attempts accumulate, which is measured and not assumed: `apt-get ... -d` resumes. An
       # attempt the bound kills leaves its bytes in apt's partial directory, and the attempt
-      # after it asks only for the rest, which that attempt logs as
-      # `Need to get 42.1 MB/51.4 MB of archives` after a first attempt that had asked for
-      # 51.4 MB. Measured separately, the partial is resumed across the origin switch too, since
-      # the two mirrors serve the same file and the server answers a byte-range request. Where
-      # the fallback's snapshot holds a different version the filename differs, the partial is
-      # not reused and that attempt carries the full 51.4 MB, which at any healthy rate is
-      # seconds.
+      # after it asks only for the rest. Job 128209099649 measured that at 5ff42456: after the
+      # download phase had fetched all 114 MB, the install call after it asked for
+      # `Need to get 0 B/114 MB of archives.`, so what the download put on disk the install does
+      # not fetch again. Measured separately, the partial is resumed across the origin switch
+      # too, since the two mirrors serve the same file and the server answers a byte-range
+      # request. Where the fallback's snapshot holds a different version the filename differs,
+      # the partial is not reused and that attempt carries the full 114 MB, which that job
+      # fetched in 8 s at 14.7 MB/s.
       #
       # Why the third attempt changes origin rather than the bound being raised: a longer bound
       # buys a longer hang and hides the mirror. One step's log holds both of the rates the one
@@ -2635,16 +2760,31 @@ jobs:
       # that answers that. A single bad pool member is the case no attempt count on one origin
       # reaches.
       #
-      # The slowest reading this repository holds is that 31 kB/s: 9.3 MB fetched in a 300 s
-      # attempt. No attempt count worth having completes 51.4 MB at that rate - it needs
-      # 1658 s - so the step fails by its own name there, which is the intended outcome.
+      # The slowest reading this repository holds is that 31 kB/s: the list's 114 MB need 3677 s
+      # at it, which no attempt count worth having completes, so the step fails by its own name
+      # there, which is the intended outcome.
       #
-      # The worst case the step now carries: if both `apt-get update` attempts fail, the step
+      # The worst case the step carries: if both `apt-get update` attempts fail, the step
       # stops after about 180 s, so the longest the bounded apt phases can run is one update
       # attempt stopped at 90 s, a second ending just inside 90 s, two download attempts stopped
       # at 300 s, the fallback origin's update stopped at 90 s and a third download attempt
       # stopped at 300 s. The step fails by its own name in at most 1170 s, against the
       # 40-minute job cancel it replaces.
+      #
+      # The .deb files of that list are cached between runs. The restore step above reads them
+      # into ~/apt-archives, and the step below copies them into apt's archive directory before
+      # its first call. apt takes a file there whose name and size match the index without
+      # fetching it and without hashing it (the pkgAcqArchive constructor in
+      # apt-pkg/acquire-item.cc, lines 3499-3507 of apt 2.7.14, compares the size alone), so a
+      # restored file is trusted as the push to main that wrote the entry left it. The key names
+      # the Playwright version bun.lock pins, because that version decides Playwright's list, and
+      # the runner image, because the image decides which versions apt resolves, so an image roll
+      # misses the entry rather than restoring files the new image's indexes no longer name. It
+      # names neither `step_tools` nor the versions apt resolves from updates published after the
+      # image was built, and an entry is written once and never replaced, so a package that changes
+      # under one key is fetched on every run until the key moves. Only a push to main writes an
+      # entry. A pull-request or merge-queue run restores main's entry where one exists under its
+      # key and otherwise fetches the whole set, and every bound and budget above is that cold case.
       - name: Install Playwright Chromium, WebKit and Firefox
         # The runner image preconfigures Google's chrome-stable apt source, whose index
         # intermittently fails `apt-get update` with a hash-sum mismatch and takes the install
@@ -2654,17 +2794,25 @@ jobs:
         run: |
           grep -rl dl.google.com /etc/apt/sources.list.d | xargs -r sudo rm -f
           packages="fonts-freefont-ttf fonts-ipafont-gothic fonts-liberation fonts-noto-color-emoji
-          fonts-tlwg-loma-otf fonts-unifont fonts-wqy-zenhei gstreamer1.0-plugins-base libasound2t64
-          libatk-bridge2.0-0t64 libatk1.0-0t64 libatomic1 libatspi2.0-0t64 libavif16 libcairo-gobject2
-          libcairo2 libcups2t64 libdbus-1-3 libdrm2 libenchant-2-2 libepoxy0 libevent-2.1-7t64
-          libflite1 libfontconfig1 libfreetype6 libgbm1 libgdk-pixbuf-2.0-0 libgles2 libglib2.0-0t64
-          libgstreamer-gl1.0-0 libgstreamer-plugins-bad1.0-0 libgstreamer-plugins-base1.0-0
-          libgstreamer1.0-0 libgtk-3-0t64 libgtk-4-1 libharfbuzz-icu0 libharfbuzz0b libhyphen0
-          libicu74 libjpeg-turbo8 liblcms2-2 libmanette-0.2-0 libnspr4 libnss3 libopus0 libpango-1.0-0
-          libpangocairo-1.0-0 libpng16-16t64 libsecret-1-0 libvpx9 libwayland-client0 libwayland-egl1
-          libwayland-server0 libwebp7 libwebpdemux2 libwoff1 libx11-6 libx11-xcb1 libx264-164
-          libxcb-shm0 libxcb1 libxcomposite1 libxcursor1 libxdamage1 libxext6 libxfixes3 libxi6
-          libxkbcommon0 libxml2 libxrandr2 libxrender1 libxslt1.1 xfonts-cyrillic xfonts-scalable xvfb"
+          fonts-tlwg-loma-otf fonts-unifont fonts-wqy-zenhei gstreamer1.0-libav
+          gstreamer1.0-plugins-bad gstreamer1.0-plugins-base gstreamer1.0-plugins-good libasound2t64
+          libatk-bridge2.0-0t64 libatk1.0-0t64 libatomic1 libatspi2.0-0t64 libavcodec60 libavif16
+          libcairo-gobject2 libcairo2 libcups2t64 libdbus-1-3 libdrm2 libenchant-2-2 libepoxy0
+          libevent-2.1-7t64 libflite1 libfontconfig1 libfreetype6 libgbm1 libgdk-pixbuf-2.0-0
+          libgles2 libglib2.0-0t64 libgstreamer-gl1.0-0 libgstreamer-plugins-bad1.0-0
+          libgstreamer-plugins-base1.0-0 libgstreamer1.0-0 libgtk-3-0t64 libgtk-4-1 libharfbuzz-icu0
+          libharfbuzz0b libhyphen0 libicu74 libjpeg-turbo8 liblcms2-2 libmanette-0.2-0 libnspr4
+          libnss3 libopus0 libpango-1.0-0 libpangocairo-1.0-0 libpng16-16t64 libsecret-1-0 libvpx9
+          libwayland-client0 libwayland-egl1 libwayland-server0 libwebp7 libwebpdemux2 libwoff1
+          libx11-6 libx11-xcb1 libx264-164 libxcb-shm0 libxcb1 libxcomposite1 libxcursor1
+          libxdamage1 libxext6 libxfixes3 libxi6 libxkbcommon0 libxml2 libxrandr2 libxrender1
+          libxslt1.1 xfonts-cyrillic xfonts-scalable xvfb"
+          # gstreamer1.0-tools holds the gst-inspect-1.0 the decoder guard below runs, and is no
+          # name of Playwright's list. It is out of `packages` because `packages` is the list the
+          # check at the end of the step holds against Playwright's own.
+          step_tools="gstreamer1.0-tools"
+          # What apt is given in every phase: the pinned list and the step's own tool.
+          apt_list="$packages $step_tools"
           # A bounded attempt, retried: the attempt count, then what the log calls the phase,
           # then the command. Each failed attempt prints the phase, that attempt's exit status
           # and how many attempts are left; `timeout` exits 124 when it killed the command, so
@@ -2682,6 +2830,14 @@ jobs:
               [ "$left" -gt 0 ] || return 1
             done
           }
+          # What the restore above found, handed to apt before it reads any index. A file whose
+          # version the index no longer names has another file name, and one whose size differs is
+          # deleted (acquire-item.cc:3508-3511), so apt fetches both again. nullglob makes an empty
+          # or absent directory an empty list instead of a failed copy.
+          shopt -s nullglob
+          seeded=("$HOME"/apt-archives/*.deb)
+          shopt -u nullglob
+          [ "${#seeded[@]}" -eq 0 ] || sudo cp "${seeded[@]}" /var/cache/apt/archives/
           # `sudo timeout`, not `timeout sudo`: the signal has to reach apt-get itself, not a
           # sudo holding it.
           attempts 2 "apt-get update" sudo timeout 90 apt-get update || {
@@ -2692,15 +2848,23 @@ jobs:
           # Download only (`-d`): a killed apt releases its fcntl locks either way, but with
           # nothing unpacked in this phase no dpkg run is ever stopped part way, so the attempts
           # after it and the unbounded install below start from a clean package state. It prints
-          # what it fetched, which is this step's own byte record. $packages is left unquoted on
+          # what it fetched, which is this step's own byte record. $apt_list is left unquoted on
           # purpose, to split into words.
-          if ! attempts 2 "the package download" sudo timeout 300 apt-get install -y --no-install-recommends -d $packages; then
+          if ! attempts 2 "the package download" sudo timeout 300 \
+            apt-get install -y --no-install-recommends -d $apt_list; then
             # The last attempt fetches from another origin, which is the one thing more attempts
             # on the configured pool cannot do. That pool is a mirrorlist, which `apt-get update`
             # reads as `Get:1 file:/etc/apt/apt-mirrors.txt Mirrorlist`, so the switch is an edit
             # of that file. The copy beside it is what was there; nothing puts it back, and
             # nothing has to, the runner being ephemeral and going with the job.
             mirrorlist=/etc/apt/apt-mirrors.txt
+            # Where the image stops shipping it, the copy below ends on `cp: cannot stat` and the
+            # log names no cause, so the file is tested here and the error is the step's own.
+            [ -f "$mirrorlist" ] || {
+              echo "::error::there is no $mirrorlist, so the fallback origin cannot be set;" \
+                "the package download ends here"
+              exit 1
+            }
             sudo cp "$mirrorlist" "$mirrorlist.orig"
             sudo sed -i 's,^\(https\?://\)[^/]*,\1archive.ubuntu.com,' "$mirrorlist"
             cat "$mirrorlist"
@@ -2710,24 +2874,57 @@ jobs:
             # than a tidy exit.
             attempts 1 "apt-get update for the fallback origin" sudo timeout 90 apt-get update ||
               echo "::warning::the fallback origin's lists were not read; the attempt below uses what is on disk"
-            attempts 1 "the package download from the fallback origin" sudo timeout 300 apt-get install -y --no-install-recommends -d $packages || {
+            attempts 1 "the package download from the fallback origin" sudo timeout 300 \
+              apt-get install -y --no-install-recommends -d $apt_list || {
               echo "::error::the package download failed three times, the last of them on another origin;" \
                 "the step ends here rather than leaving the job's budget to cancel the browser step after it"
               exit 1
             }
           fi
           # Unbounded and unretried: the archive is on disk now, so this takes no network.
-          sudo apt-get install -y --no-install-recommends $packages
+          sudo apt-get install -y --no-install-recommends $apt_list
+          # What apt has now, kept for the save below. The save runs only on a push to main whose
+          # restore missed, since an entry is never replaced, so on a hit or a branch run this
+          # copy goes unused. apt's archive directory is root's and the cache action runs as the
+          # runner user, so the copies change hands.
+          shopt -s nullglob
+          kept=(/var/cache/apt/archives/*.deb)
+          shopt -u nullglob
+          mkdir -p "$HOME/apt-archives"
+          [ "${#kept[@]}" -eq 0 ] || {
+            sudo cp "${kept[@]}" "$HOME/apt-archives/"
+            sudo chown "$(id -u):$(id -g)" "$HOME"/apt-archives/*.deb
+          }
+          echo "apt archives: seeded ${#seeded[@]} .deb files, keeping ${#kept[@]}"
+          # Is each decoder WebKit plays through in the GStreamer registry? One call per element:
+          # `gst-inspect-1.0 --exists` reads one element argument and discards the rest, so a
+          # single call with five names would report on the first alone. Each element is written
+          # with the package that carries it, and this is what fails the step by its own name
+          # where one of those packages has gone missing from the list above.
+          probed=()
+          for probe in matroskademux:gstreamer1.0-plugins-good vp8dec:gstreamer1.0-plugins-good \
+            h264parse:gstreamer1.0-plugins-bad avdec_h264:gstreamer1.0-libav \
+            vorbisdec:gstreamer1.0-plugins-base; do
+            element=${probe%%:*}
+            gst-inspect-1.0 --exists "$element" || {
+              echo "::error::GStreamer has no $element, which WebKit plays media through;" \
+                "${probe#*:} carries it: packages= above must hold it, and if it does, the plugin" \
+                "did not load: gst-inspect-1.0 -b lists the files GStreamer could not load"
+              exit 1
+            }
+            probed+=("$element")
+          done
+          echo "the decoders WebKit plays through are in the registry: ${probed[*]}"
           # The browsers alone. Named, because with no argument Playwright resolves its own
           # default set rather than this job's three.
           bunx playwright install chromium webkit firefox
           # Has the pinned list fallen behind Playwright? The check is the repository's
           # .github/scripts/playwright-deps-current.sh, and it runs here, against the list it is
           # given on this line: $packages, unquoted so it splits into words, as apt takes it
-          # above. It holds every package Playwright asks for against that list and the four
-          # media packages this step drops. It runs after the install, so Playwright's list, its
-          # missing set and the apt closure they are held against are read from the same state.
-          # The step's working-directory is packages/dispatch, so the script is reached through
+          # above. It holds the two lists against each other both ways: every name Playwright
+          # asks for is one the pinned list holds, and every pinned name is one Playwright asks
+          # for. It runs after the install, so it expects nothing left missing. The step's
+          # working-directory is packages/dispatch, so the script is reached through
           # $GITHUB_WORKSPACE, the checkout root GitHub sets, and the bunx it runs resolves
           # this suite's Playwright.
           "$GITHUB_WORKSPACE/.github/scripts/playwright-deps-current.sh" $packages
@@ -2741,6 +2938,12 @@ jobs:
         with:
           path: ~/.cache/ms-playwright
           key: ${{ steps.playwright-cache.outputs.cache-primary-key }}
+      # The .deb files the install step kept, under the same rule as the save before it.
+      - if: github.event_name == 'push' && success() && steps.apt-debs.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/apt-archives
+          key: ${{ steps.apt-debs.outputs.cache-primary-key }}
       - name: Wait for the S3-compatible server
         # The readiness wait of the step that started the container, after the install the
         # container came up during. An anonymous PUT makes the bucket; each lane makes its own
@@ -3546,8 +3749,99 @@ jobs:
             ~/.cache/go-build
           key: go-envoy-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
           restore-keys: ${{ github.ref != 'refs/heads/main' && format('go-envoy-{0}-', runner.os) || '' }}
+      # Under the sampler, not bare: the race detector maps about four bytes of shadow memory per
+      # byte of heap, and this package's race binary asked for more than the runner's 16 GiB,
+      # which has no swap. The kernel killed this step three times with no output at all, which
+      # names no test (dispatch://INFRA-1085). .github/scripts/race_memory.py samples the largest
+      # process beside the run, writing a line every 5 s that names that process and the tests
+      # running at that moment, so a step the kernel does take still says what it reached. After
+      # the run it writes the peak, and fails this step when the peak passed RACE_MEM_LIMIT_KB,
+      # 8388608 kB, half the runner, naming the tests that were running at the highest sample.
+      # -json is the stream the sampler reads to know them; it writes every Output field back
+      # out, so the log still carries the --- FAIL lines and the package's own line. -count=1
+      # because the job restores the Go build cache above, and a cached pass must not stand in
+      # for a run.
       - name: Race-test the document service
-        run: go test -race -timeout 60m ./internal/dispatch/docs/
+        run: RACE_MEM_LIMIT_KB=8388608 ../../.github/scripts/race_memory.py go test -json -race -count=1 -timeout 60m ./internal/dispatch/docs/
+        working-directory: packages/envoy
+
+      - name: Report ci-ok when this is the run's last job
+        if: always()
+        uses: ./.github/actions/ci-ok-report
+        with:
+          changes: ${{ toJSON(needs.changes) }}
+          job-status: ${{ job.status }}
+
+  # The same package under Go's cleanup detector, which names what the memory above went to:
+  # GODEBUG=checkfinalizers=1 makes the runtime report a cleanup or a finalizer whose closure or
+  # argument reaches the object it is attached to, a cycle that keeps that object alive for the
+  # life of the process, and that is the defect that held this package's memory
+  # (dispatch://INFRA-1085). This is the only package of the repository that registers a cleanup,
+  # so no other job needs it. It runs without -race: the detector is the runtime's own
+  # bookkeeping, and a plain binary leaves the runner room the race binary does not. It reads the
+  # same closure as envoy-go-race-docs, so it reuses that filter and that `changes` output rather
+  # than taking one of its own.
+  envoy-go-docs-finalizers:
+    needs: changes
+    if: needs.changes.outputs.envoy_go_race_docs == 'true'
+    runs-on: ubuntu-24.04
+    # The step's -timeout 29m must fire before the runner cancels the job, so a hung test prints
+    # the dump that names it. Both numbers come from this job's own green runs, the slowest of
+    # them 128148376484: 1022 s in the package, against 950 s in 127770782204 and 927 s in
+    # 127053239518, and 55 s of checkout, setup and compile before any of them. The package has
+    # grown twice under this pull request, first when main took in #2414's tests (953 services
+    # built to 1068) and again on the merge of #2870, which moved work into this lane. The step's
+    # deadline is the smallest whole minute at which the slowest package time is at most 60 % of
+    # it, and this limit is six minutes above that. Measure again before changing either, and
+    # from the slowest run rather than the newest: a package that has grown past 60 % of its
+    # deadline is a deadline to raise, not a flake to re-run.
+    timeout-minutes: 35
+    services:
+      postgres:
+        # ghcr.io/cybermonklabs/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
+        image: ghcr.io/cybermonklabs/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
+        env:
+          POSTGRES_PASSWORD: ci
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    # Load-bearing, not boilerplate: this package's TestMain is storetest.Main
+    # (internal/dispatch/docs/persistence_test.go:19), and storetest.Open skips every test that
+    # opens the store when DISPATCH_TEST_DATABASE_URL is unset
+    # (internal/dispatch/store/storetest/storetest.go:67-71). A skip is a pass, so without the
+    # service this job would be green having run almost nothing.
+    env:
+      DISPATCH_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: setup-go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: packages/envoy/go.mod
+          cache: false
+      # go-envoy, restored only: its modules are the envoy module's, but this job builds the
+      # document service's test binary, not the listener and natsd the family's saving jobs build,
+      # so it saves none.
+      - id: go-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-envoy-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
+          restore-keys: ${{ github.ref != 'refs/heads/main' && format('go-envoy-{0}-', runner.os) || '' }}
+      # -v, because the package's leak check prints its line from TestMain after the tests have
+      # run: go test in package-list mode buffers the test binary's own output and drops it when
+      # the package passes, so without -v a green run would carry the `ok` line and nothing else,
+      # and the count of services the tests left alive is the half of this job that no detector
+      # of Go's reports.
+      - name: Test the document service under the cleanup detector
+        run: GODEBUG=checkfinalizers=1 go test -v -count=1 -timeout 29m ./internal/dispatch/docs/
         working-directory: packages/envoy
 
       - name: Report ci-ok when this is the run's last job
@@ -3920,11 +4214,25 @@ jobs:
           echo "4dbcd9defa0fb03999cdfeab50bd461451b7c65e8566927994f63ee956055ffe  $tarball" | sha256sum -c -
           echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
         working-directory: packages/envoy/infra
+      # The live tests build container images on this runner's disk, and a job that runs out of
+      # space says only that it did. The pair around the step measures it: `start` prints what
+      # each file system the job writes to has free and leaves a sampler watching the one that
+      # holds /tmp, `report` stops the sampler and prints the free space the step began with,
+      # the least it ever had and the difference, with `margin short` when the step used more
+      # than half of what it started with (dispatch://INFRA-1085). The report prints and never
+      # fails the job: this is the measurement, not a new gate. The two steps share their state
+      # through a file under $RUNNER_TEMP rather than $GITHUB_ENV, which every later step of the
+      # job would inherit and check-ci-filters.sh treats as reaching the job's go commands.
+      - name: Start the disk watch over the live tests
+        run: .github/scripts/disk_watch.py start --path /tmp --state "$RUNNER_TEMP/disk-watch.json"
       - name: Live tests of envoy-infra's host:Listener
         run: go test -tags pulumilive -v -timeout 15m ./host/
         working-directory: packages/envoy/infra
         env:
           ENVOY_INFRA_DOCKER_PLUGIN: ${{ steps.docker-plugin.outputs.tarball }}
+      - name: Report the disk the live tests used
+        if: always()
+        run: .github/scripts/disk_watch.py report --state "$RUNNER_TEMP/disk-watch.json"
       # The schema carries both of the things the release build stamps into the plugin: the
       # version, and the download URL .github/scripts/repo-paths.sh derives from the repository
       # the run is in (release-envoy-infra.yaml's "Derive the plugin's download URL" and its

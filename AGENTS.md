@@ -294,7 +294,7 @@ the shim runs `legion claude-bridge -- claude -p …`, which speaks the shim's O
   - with no cache named (the cache's own process) it clones from GitHub
 
   - it is the only process holding the provisioning token (LEGION_PROVISION_TOKEN_FILE;
-    an implement role later reads the same App's token from its own gh files, a review role never), and `workspace-init provision --issue <KEY> --repo <owner>/<repo> --default-branch <name> [--root /legion] --credential-helper <git helper> --feed <dir>` builds the issue's clone (a plain local `git clone` of the feed, which hard-links its objects where the filesystem allows and borrows none, so it has no alternates) and jj workspace on the pod's own disk from that feed without the token, an issue with no branch starting at the repository's default branch as GitHub names it, which the daemon reads and the pod's command names
+    an implement role later reads the same App's token from its own gh files, a review role never), and `workspace-init provision --issue <KEY> --repo <owner>/<repo> --default-branch <name> [--root /legion] --credential-helper <git helper> --feed <dir>` builds the issue's clone (a plain local `git clone --no-checkout` of the feed, which holds no working tree, so the pod writes the working copy once, in the issue's own workspace, and which hard-links its objects where the filesystem allows and borrows none, so it has no alternates) and jj workspace on the pod's own disk from that feed without the token, an issue with no branch starting at the repository's default branch as GitHub names it, which the daemon reads and the pod's command names
     — one clone per issue pod, under no lock and waiting on no other pod, since no other pod mounts the disk, after removing every stale git lock file (`<file>.lock`) in the clone's git directory and the issue's own worktree entry, each logged with its age, since the pod's launcher container has not started either and a retry of the container works on the disk its killed first attempt left (docs/kubernetes.md "Anatomy of a Sandbox pod")
     — and records when it created the issue's workspace (`.jj/legion-created`, which the role launcher compares with a resumed session's last write, so an agent resumed into a workspace younger than its session starts with LEGION_WORKSPACE_RECREATED=true and its plugin tells it so)
 
@@ -372,6 +372,9 @@ projects:
 
 A project's repositories are Dispatch's mapping (Settings → Repositories → Projects), one of them the project's default;
 `legion.yaml` names none, and refuses `projects.<KEY>.repo`.
+Its one exception names no repository of the project either:
+`projects.<KEY>.commit_issue_trailer_repos` selects, among the repositories Dispatch maps to the project, the ones whose commits carry their issue key, as a `Dispatch: <KEY>` trailer the pane's jj appends;
+a name the project does not serve selects nothing, and boot warns about it.
 The daemon reads the mapping at boot and on Dispatch's `settings.repo_project.updated`, serves each mapped repository both GitHub Apps are installed on, and leaves out, and reports in `legion state --json` (`repositories.refused`), one either App is missing from.
 A repository whose installation read GitHub does not answer (any failure but a 404) is left out for now the same way and read again, 30 s doubling to 10 min, until GitHub answers;
 a served one whose read fails stays served.
