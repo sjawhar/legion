@@ -133,9 +133,12 @@ func pane() error {
 	ghRoot, gh := "", ""
 	if req.GHToken != "" {
 		// ghconfig's one writer of a role's gh bundle, so the rig's directory is the daemon's layout;
-		// the App label and expiry only feed the runtime's log lines, which the rig does not write.
+		// the App label and expiry only feed the runtime's log lines, which the rig does not write. The
+		// rig's project serves one repository of one owner, so its bundle holds that owner's directory
+		// alone, where a daemon serving more holds a `<owner>/<repo>` directory beside it per sibling
+		// repository.
 		ghRoot = runtime.GHConfigDir(req.StateDir, token)
-		bundle := ghconfig.Bundle{Default: rigOwner, Owners: map[string]ghconfig.Rendered{rigOwner: ghconfig.Render(req.GHToken, "", time.Time{})}}
+		bundle := ghconfig.Bundle{Default: rigOwner, Dirs: map[string]ghconfig.Rendered{rigOwner: ghconfig.Render(req.GHToken, "", time.Time{})}}
 		if _, err := ghconfig.WriteBundle(ghRoot, bundle); err != nil {
 			return fmt.Errorf("write the claim's gh files: %w", err)
 		}

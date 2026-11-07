@@ -79,7 +79,7 @@ type State struct {
 	// credential file path left out, keyed as the file is (SettingsOf). Required, never null
 	// inside: every collection in it is emitted non-nil (contract 35).
 	Settings Settings `json:"settings"`
-	// Consumers is the lag of the daemon's three durable consumers (ConsumerLagView), read from
+	// Consumers is the lag of the daemon's durable consumers (ConsumerLagView), read from
 	// NATS at the request after the state's transaction commits, so no NATS read holds the
 	// snapshot open. Never null: a daemon with no workflow has none (contract 43).
 	Consumers []ConsumerLagView `json:"consumers"`

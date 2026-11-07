@@ -94,6 +94,9 @@ func (f approvalFixture) baseEnv(databaseURL, publicURL string) []string {
 		"BROKER_K8S_OIDC_ISSUER=" + f.issuer.URL(),
 		"BROKER_K8S_OIDC_AUDIENCE=" + approvalPodAudience,
 		"BROKER_SERVICE_LOGINS=" + approvalLauncherService + "=" + approvalLauncherAccount,
+		// The account this fixture's pods run as, bound to the service its launcher logs in as:
+		// what lets that login enrol them (enroll.Service.podUnderTokenLogin).
+		"BROKER_SERVICES=" + approvalLauncherService + "=" + approvalPodAccount,
 		"BROKER_API_ACCOUNTS=dispatch=" + approvalDispatchAccount,
 		// A stopped broker exits at once rather than draining requests no row leaves in flight.
 		"BROKER_DRAIN_SECONDS=0",
@@ -387,8 +390,8 @@ func TestTheBinaryApprovesASecretOnItsOwnPage(t *testing.T) {
 		t.Logf("ada's block for pod-d's request, which named no reason, reads: %s", block)
 		for _, want := range []string{
 			"Reason No reason given",
-			"Lasts once approved for 12h0m0s",
-			"Approve gives this session the value of these secrets for 12h0m0s.",
+			"Lasts once approved for 15m0s",
+			"Approve gives this session the value of these secrets for 15m0s.",
 			"Deny refuses them, and so does leaving the request until it expires.",
 		} {
 			if !strings.Contains(block, want) {

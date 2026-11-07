@@ -12,6 +12,8 @@ import {
   listIssueAsks,
 } from "./api";
 import { blockId, openedThreadCard, setSheet } from "./editor";
+import { READING_PANE_WIDTH } from "./inbox-pane";
+import { replyRowId } from "./inbox-threads";
 
 /**
  * The one world every reference spec is walked across, and the surfaces it is read on.
@@ -19,7 +21,8 @@ import { blockId, openedThreadCard, setSheet } from "./editor";
  * One fixture rather than four: the forms a reference is written in (a `dispatch://` reference, a
  * dashboard address, an issue key on its own, a `#` and a question block's id, and any of their
  * ids written short) all resolve against the same records, so the margin, the Conversation, the
- * Inbox, the Replies page, the live editor and a past version are read against one seeding.
+ * Inbox's thread rows, the Answers page, the live editor and a past version are read against
+ * one seeding.
  * `seedReferenceWorld` makes it; the helpers below are how each surface is reached.
  */
 
@@ -331,13 +334,37 @@ export async function closeMarginThread(page: Page, project: string): Promise<vo
   await expect(thread).toHaveCount(0);
 }
 
-/** The one-line preview of a thread's newest reply on the Replies page. The row is one control,
- *  so a reference there reads as link-styled text with no link inside it. */
-export function repliesPreview(page: Page, threadId: string): Locator {
+/**
+ * The inert one-line preview a reader still meets: an answered ask's question on the Answers
+ * page (`web/src/features/answers/AnswersPage.tsx`, a `MarkdownPreview` with no `links` prop,
+ * which is what makes it inert).
+ *
+ * The Replies page's own row carried this before INFRA-450, and that page is gone: `/replies`
+ * lands on the Inbox, and the Inbox draws a thread row's thread whole with `MarkdownBody` and
+ * live links (`features/inbox/ThreadBody.tsx`), so no one-line preview of a reply is left to
+ * read. A preview is one control's text, so a reference in it reads as link-styled text with no
+ * link inside it.
+ */
+export function answeredQuestionPreview(page: Page, askId: string): Locator {
+  return page.locator(`[data-answer-row="${askId}"]`).locator("[data-markdown-preview]").first();
+}
+
+/** Opens the Inbox narrowed to its Reply rows, below the reading column's width so every row is
+ *  the card that draws its own thread rather than a title alone (`e2e/inbox-pane.ts`'s
+ *  `READING_PANE_WIDTH`). `/replies` lands on this same address. */
+export async function openInboxReplies(page: Page): Promise<void> {
+  await page.setViewportSize({ height: 900, width: READING_PANE_WIDTH - 256 });
+  await page.goto("/?type=reply");
+}
+
+/** One turn of the thread an Inbox Reply row draws: the row is `[data-inbox-row="reply:<thread
+ *  id>"]` (`features/inbox/list-row.ts`, `replyRowId`) and each turn in it carries the comment's
+ *  or message's own id, as `refresh-freshness.e2e.ts` reads the same row. The turn's body is
+ *  rendered rather than previewed, so a reference there is a live link. */
+export function inboxReplyTurn(page: Page, threadId: string, turnId: string): Locator {
   return page
-    .locator(`[data-replies-row="${threadId}"]`)
-    .locator("[data-markdown-preview]")
-    .first();
+    .locator(`[data-inbox-row="${replyRowId(threadId)}"]`)
+    .locator(`[data-inbox-thread-turn="${turnId}"]`);
 }
 
 /** A Conversation turn: the comment, message or ask the id names. */
