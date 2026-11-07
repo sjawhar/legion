@@ -9,24 +9,14 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("the Pipeline rail entry opens the page @phone", async ({ browser }) => {
+test("the Pipeline rail entry opens the page", async ({ browser }) => {
   await seedPipelineFixture();
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
 
-  // From another page, so the sidebar's own Pipeline link is what opens it. Below `xl` the sidebar
-  // is a sheet behind "Open navigation"; each branch of the race catches its own rejection, as
-  // delivery.e2e.ts's rail test explains.
+  // From another page, so the sidebar's own Pipeline link is what opens it.
   await page.goto("/");
-  const menuButton = page.getByRole("button", { name: "Open navigation" });
   const pipelineLink = page.getByRole("link", { name: /^Pipeline/ });
-  await Promise.race([
-    menuButton.waitFor({ state: "visible" }).catch(() => {}),
-    pipelineLink.waitFor({ state: "visible" }).catch(() => {}),
-  ]);
-  if (await menuButton.isVisible()) {
-    await menuButton.click();
-  }
   await expect(pipelineLink).toBeVisible();
   await pipelineLink.click();
 
@@ -37,7 +27,7 @@ test("the Pipeline rail entry opens the page @phone", async ({ browser }) => {
   await context.close();
 });
 
-test("the Pipeline page shows each stage's timing and the failing jobs @phone", async ({
+test("the Pipeline page shows each stage's timing and the failing jobs", async ({
   browser,
 }, testInfo) => {
   await seedPipelineFixture();
@@ -79,21 +69,30 @@ test("the Pipeline page shows each stage's timing and the failing jobs @phone", 
   await expect(failing.locator('[data-failing-job="checks-complete"]')).toHaveCount(0);
   await expect(failing.locator('[data-failing-job="typecheck"]')).toHaveCount(0);
 
-  // On a phone the six cards stack in one column: the page is narrower than the 46rem the
-  // second column needs.
-  const viewport = page.viewportSize();
-  if (viewport !== null && viewport.width < 768) {
-    const first = await page.locator('[data-metric="pr_ci"]').boundingBox();
-    const second = await page.locator('[data-metric="staging_e2e"]').boundingBox();
-    expect(first).not.toBeNull();
-    expect(second).not.toBeNull();
-    if (first !== null && second !== null) {
-      expect(second.y).toBeGreaterThanOrEqual(first.y + first.height);
-      expect(Math.abs(second.x - first.x)).toBeLessThan(2);
-    }
-  }
-
   await page.screenshot({ path: testInfo.outputPath("pipeline.png"), fullPage: true });
+  await context.close();
+});
+
+// The narrow-screen half of the row above: the six cards stack in one column on a phone, where
+// the page is narrower than the 46rem the second column needs.
+test("the Pipeline page stacks its cards in one column on a phone @phone", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "iphone", "the cards only stack below 768 px");
+  await seedPipelineFixture();
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  await page.goto(`/pipeline?at=${PIPELINE_AT}`);
+
+  const first = page.locator('[data-metric="pr_ci"]');
+  await expect(first).toBeVisible();
+  const firstBox = await first.boundingBox();
+  const secondBox = await page.locator('[data-metric="staging_e2e"]').boundingBox();
+  if (firstBox === null || secondBox === null) throw new Error("the metric cards are hidden");
+  expect(secondBox.y).toBeGreaterThanOrEqual(firstBox.y + firstBox.height);
+  expect(Math.abs(secondBox.x - firstBox.x)).toBeLessThan(2);
+
+  await page.screenshot({ path: testInfo.outputPath("pipeline-phone.png"), fullPage: true });
   await context.close();
 });
 

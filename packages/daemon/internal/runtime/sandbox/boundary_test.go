@@ -45,11 +45,12 @@ import (
 // readable, and nothing planted outlives the pod whose disk it is on.
 //
 // What the boundary protects is identity, not a repository-write token kept off the issue's disk:
-// an implement role now holds the implement App's token — the same lease as the
-// provisioning token — read-only in its own gh directory (GHConfigDir), and a review role the
-// review App's. What the fetch container's boundary still keeps is that no review role ever holds
-// the implement App's token, which is what lets the daemon's fix-attempt counting read a push's App
-// from the App that made it. A plant that
+// an implement role now holds the implement App's token — for the issue's owner the App's own
+// installation token, which writes, where the provisioning token is that same App narrowed to
+// reading, so the two are no longer one lease (INFRA-1254) — read-only in its own gh directory
+// (GHConfigDir), and a review role the review App's. What the fetch container's boundary still
+// keeps is that no review role ever holds the implement App's token, which is what lets the
+// daemon's fix-attempt counting read a push's App from the App that made it. A plant that
 // an agent's own git triggers after provisioning runs under that agent's role: its clone's
 // helper is `legion git-credential` (workspace.GitHubCredentialHelper), which answers from the gh
 // files of the process running it (its LEGION_GH_OWNERS_DIR and GH_CONFIG_DIR), and here, with
@@ -688,11 +689,19 @@ func TestWhatAnIssuePlantsNeitherReadsTheProvisioningTokenNorOutlivesItsPod(t *t
 		},
 		// A clean filter of the agent's, in the clone's legacy workspace config, and a changed file
 		// it filters. The restart's jj meets both in the retained clone; the next pod's has neither.
+		// The live check gives the clone's working copy the whole tree before it snapshots, with the
+		// `jj sparse reset` provisioning runs on a workspace (workspace.Provision's checkout): a
+		// pod's shared clone holds no working tree and no sparse pattern, since workspace.feedClone
+		// clones it with `git clone --no-checkout` and then clears its patterns, so no jj command of
+		// Legion's snapshots a file there. An agent's filter in the clone becomes live only once the
+		// agent gives that working copy a pattern itself, which is an agent's own command like any
+		// other: what the empty patterns take from the plant is reach, not a way in.
 		{
 			name:  "a working-copy filter in the clone",
 			plant: func(rig *initRig, pod *rigPod) { rig.plantFilter(pod.clone(), "clone filter") },
 			live: func(rig *initRig, pod *rigPod) {
 				rig.plantFilter(pod.clone(), "clone filter")
+				rig.jj(pod.clone(), "sparse", "reset", "-R", pod.clone())
 				rig.jj(pod.clone(), "status", "-R", pod.clone())
 			},
 		},

@@ -79,8 +79,9 @@ type Config struct {
 	// no person ever types a code.
 	MachineLoginURL string
 	// BROKER_API_ACCOUNTS: the accounts that call the broker's named-caller routes — the
-	// approval routes Dispatch's server calls on a person's behalf, and the introspection route
-	// a resource server reads one of the broker's access tokens back through —
+	// approval routes Dispatch's server calls on a person's behalf, the introspection route
+	// a resource server reads one of the broker's access tokens back through, and the grant-log
+	// route a quarterly access review reads the broker's audit trail through —
 	// whitespace-separated <caller>=<account> entries. An account is a Kubernetes service
 	// account, written as the subject a projected token carries
 	// (dispatch=system:serviceaccount:example-ns:example-dispatch), or a Google service
@@ -102,9 +103,14 @@ type Config struct {
 	// BROKER_VM_SERVICES, since a token from one proves nothing about which machine is asking.
 	//
 	// The caller's name decides what the account may do, and the broker
-	// knows two: dispatch reaches every one of those routes, the ten Dispatch's server relays a
-	// person's decisions and reads through as well as introspection, and listener reaches
-	// introspection alone, since the Envoy listener reads a token back and relays no decision. A
+	// knows three: dispatch reaches every one of those routes, the ten Dispatch's server relays
+	// a person's decisions and reads through as well as introspection; listener reaches
+	// introspection alone, since the Envoy listener reads a token back and relays no decision;
+	// and access-review reaches GET /v1/grant-log alone, which answers every audit row of a
+	// closed period, so whoever runs the quarterly review reads the whole trail and can decide
+	// nothing, release no secret value and write no row. Dispatch's server is deliberately not
+	// given that last one: it already holds approval authority over every person's secrets, and
+	// the review is a reader, so the two stay separate names and separate accounts. A
 	// name the broker does not know refuses the boot naming it and the names it knows, so a typo
 	// never quietly produces a caller that reaches nothing, and a new caller is a deliberate
 	// edit to the broker's own table (api.AccountFor). A listed caller reaching a route its name
@@ -320,6 +326,22 @@ type Config struct {
 	// sweep of 1 or 5 seconds, 105 s at 10, 225 s at 30 and 360 s at 60. The broker refuses a
 	// shorter pair at boot and names the shortest lease that survives that sweep.
 	LeaseSeconds int
+	// BROKER_SESSION_CARRY_SECONDS: how long what a session holds — its grants and its pending
+	// requests — waits on the enrollment of a box the session has left, for the next enrollment of
+	// that session name under the same principal to take it. An enrollment that ends while it
+	// holds either is left dormant instead of having them revoked (enroll.endEnrollment), and the
+	// sweep ends it for good once this long has passed since it went dormant
+	// (enroll.Service.EndCarried).
+	//
+	// 12 hours is requests.DefaultGrantLifetime, the life the broker already gives a grant whose
+	// request named none, so the default carry never outlives the grant it carries; and it is what
+	// an overnight approval takes, a request filed in the morning, the box replaced an hour later
+	// and the approval granted later that day. 0 turns the carry off: the next sweep ends every
+	// dormant enrollment it finds, which is what every end did before the carry. The maximum is
+	// one day, because a dormant enrollment holds a grant no session is proving and the approval
+	// behind it was given for one day's work: past a day the person who approved yesterday has not
+	// approved today, and the session asking again is the right outcome.
+	SessionCarrySeconds int
 	// BROKER_PROOF_SKEW_SECONDS: how far the issue time of a signed proof or request object may
 	// differ from the broker's clock.
 	ProofSkewSeconds int
@@ -395,7 +417,7 @@ const noRulesFile = "the broker reads each secret's owner and tier from the secr
 const noGrantCap = "a request's --ttl chooses a shorter grant lifetime, otherwise its grant lasts 12 hours, or until the requesting session ends for a secret tagged default-grant=session"
 
 // noMintTargets is why BROKER_MINT_TARGETS is gone: each secret's kind tag names its minter.
-const noMintTargets = "the broker no longer mints service account tokens; a secret's kind tag selects what it mints"
+const noMintTargets = "the broker no longer reads one list of mint targets; each secret's kind tag names the minter it is served by"
 
 // removedVars are environment variables the broker no longer reads. A stale deployment still
 // setting one must fail loudly rather than silently running on configuration that means nothing
@@ -1123,6 +1145,7 @@ func Load(getenv func(string) string) (Config, error) {
 		min, max int
 	}{
 		{"BROKER_LEASE_SECONDS", &cfg.LeaseSeconds, 900, 1, 3600},
+		{"BROKER_SESSION_CARRY_SECONDS", &cfg.SessionCarrySeconds, 43200, 0, 86400},
 		{"BROKER_PROOF_SKEW_SECONDS", &cfg.ProofSkewSeconds, 60, 1, 300},
 		{"BROKER_ACCESS_TOKEN_SECONDS", &cfg.AccessTokenSeconds, 900, 1, 3600},
 		{"BROKER_LAUNCHER_CREDENTIAL_SECONDS", &cfg.LauncherCredentialSeconds, 2592000, 1, 2592000},

@@ -192,6 +192,11 @@ func NewRig(t *testing.T, options ...Option) *Rig {
 	serviceLogins := map[string]string{DaemonAccount: "legion-daemon"}
 	enr := &enroll.Service{Store: st, Lease: config.lease, Pod: enroll.K8sPodVerifier{Verifier: podVerifier}, ServiceLogins: serviceLogins}
 	enr.Chain = enroll.NewChainVerifier(st, srv.URL, time.Minute)
+	// A session name belongs to one principal here as it does on the real broker: the binder is
+	// a store on the same pool the OAuth provider's own store uses (NewOAuthProvider, built
+	// below), so a name the token exchange binds and a name an enrollment binds are the one
+	// table's.
+	enr.Sessions = oauthstore.New(st.Pool)
 
 	reqMachine := &requests.Machine{
 		Store: st, Policy: cur, Secrets: policytest.Store(local), PendingTTL: 12 * time.Hour,

@@ -33,18 +33,22 @@ const signInSecret = "do-not-print-this-client-secret"
 // are required.
 var signInSecretFile string
 
-func TestMain(m *testing.M) {
+func TestMain(m *testing.M) { os.Exit(runWithASignInSecretFile(m)) }
+
+// runWithASignInSecretFile writes the sign-in secret file every test's environment names and
+// removes its directory afterwards. The removal is deferred, so it also runs when the panics
+// below fire. A run killed by a signal still keeps the directory, which nothing here can help.
+func runWithASignInSecretFile(m *testing.M) int {
 	dir, err := os.MkdirTemp("", "broker-config-signin")
 	if err != nil {
 		panic(err)
 	}
+	defer os.RemoveAll(dir)
 	signInSecretFile = dir + "/client-secret"
 	if err := os.WriteFile(signInSecretFile, []byte("\n  "+signInSecret+"  \n"), 0o600); err != nil {
 		panic(err)
 	}
-	code := m.Run()
-	_ = os.RemoveAll(dir)
-	os.Exit(code)
+	return m.Run()
 }
 
 // validEnv is a complete, minimal valid environment: every test starts from a copy of this and
@@ -222,9 +226,10 @@ func TestLoadDefaultsTheIntegerSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 	if cfg.LeaseSeconds != 900 || cfg.ProofSkewSeconds != 60 || cfg.AccessTokenSeconds != 900 ||
-		cfg.LauncherCredentialSeconds != 2592000 || cfg.SweepSeconds != 5 || cfg.DrainSeconds != 5 {
-		t.Fatalf("defaults wrong: LeaseSeconds=%d ProofSkewSeconds=%d AccessTokenSeconds=%d LauncherCredentialSeconds=%d SweepSeconds=%d DrainSeconds=%d",
-			cfg.LeaseSeconds, cfg.ProofSkewSeconds, cfg.AccessTokenSeconds, cfg.LauncherCredentialSeconds, cfg.SweepSeconds, cfg.DrainSeconds)
+		cfg.LauncherCredentialSeconds != 2592000 || cfg.SweepSeconds != 5 || cfg.DrainSeconds != 5 ||
+		cfg.SessionCarrySeconds != 43200 {
+		t.Fatalf("defaults wrong: LeaseSeconds=%d ProofSkewSeconds=%d AccessTokenSeconds=%d LauncherCredentialSeconds=%d SweepSeconds=%d DrainSeconds=%d SessionCarrySeconds=%d",
+			cfg.LeaseSeconds, cfg.ProofSkewSeconds, cfg.AccessTokenSeconds, cfg.LauncherCredentialSeconds, cfg.SweepSeconds, cfg.DrainSeconds, cfg.SessionCarrySeconds)
 	}
 }
 

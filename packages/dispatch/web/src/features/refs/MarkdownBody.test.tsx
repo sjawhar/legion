@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, fireEvent, render, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, waitFor, within } from "@testing-library/react";
 import type { Window as HappyDOMWindow } from "happy-dom";
 import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
 
+import { renderWithQueries as render } from "../../__tests__/query-provider";
 import { api } from "../../api/client";
 import type {
   AskRead,
@@ -767,16 +768,25 @@ test("a code span containing tag-shaped text renders the literal characters with
 });
 
 test("raw unsupported HTML renders as literal text with no element created", async () => {
-  const view = render(<MarkdownBody markdown="<img src=x onerror=alert(1)>" />);
+  // The engine draws a block of HTML as a paragraph whose one child is that block's text as
+  // inline HTML (`remarkHtmlBlockParagraphs`), so a body that is nothing but a tag parses and the
+  // literal-text fallback never runs for it. What a reader sees is what it was: the characters
+  // the author wrote, and no element built from them.
+  for (const [markdown, tag] of [
+    ["<img src=x onerror=alert(1)>", "img"],
+    ["<div>y</div>", "div"],
+  ] as const) {
+    const view = render(<MarkdownBody markdown={markdown} />);
 
-  try {
-    expect(await within(view.container).findByText("<img src=x onerror=alert(1)>")).not.toBeNull();
-    expect(view.container.querySelector("img")).toBeNull();
-    await waitFor(() =>
-      expect(view.container.firstElementChild?.getAttribute("data-markdown-fallback")).toBe("true")
-    );
-  } finally {
-    view.unmount();
+    try {
+      expect(await within(view.container).findByText(markdown)).not.toBeNull();
+      const body = view.container.firstElementChild as HTMLElement;
+      expect(body.querySelector(tag)).toBeNull();
+      expect(body.querySelector("p")?.textContent).toBe(markdown);
+      await waitFor(() => expect(body.getAttribute("data-markdown-fallback")).toBeNull());
+    } finally {
+      view.unmount();
+    }
   }
 });
 
@@ -823,6 +833,7 @@ test("a bare dispatch ask reference renders an inline link to the ask route with
     route: null,
     route_status: null,
     route_holder: null,
+    route_status_reason: null,
     replies: [],
   };
   const getAsk = spyOn(api, "getAsk").mockResolvedValue(askRead);
@@ -834,7 +845,11 @@ test("a bare dispatch ask reference renders an inline link to the ask route with
   );
 
   try {
-    const link = await within(view.container).findByRole("link", { name: "CORE-1 ask" });
+    // Until the ask is read the link shows the reference as its author wrote it, never a short
+    // form of it: a target that never resolves then reads as the words on the page.
+    const link = await within(view.container).findByRole("link", {
+      name: "dispatch://CORE-1/ask/ask-1",
+    });
     expect(link.getAttribute("href")).toBe("/issues/CORE-1/asks/ask-1");
     await waitFor(() => expect(link.textContent).toBe("Ship it?"));
     expect(within(view.container).getAllByRole("link")).toHaveLength(1);
@@ -954,6 +969,7 @@ test("two references in one body each resolve their own inline link and title, r
     route: null,
     route_status: null,
     route_holder: null,
+    route_status_reason: null,
     replies: [],
   };
   const getAsk = spyOn(api, "getAsk").mockResolvedValue(askRead);
@@ -1038,6 +1054,7 @@ test("a hand-authored Markdown link to a dispatch:// target resolves through dat
     route: null,
     route_status: null,
     route_holder: null,
+    route_status_reason: null,
     replies: [],
   };
   const getAsk = spyOn(api, "getAsk").mockResolvedValue(askRead);

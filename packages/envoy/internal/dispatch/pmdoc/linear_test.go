@@ -21,9 +21,8 @@ import (
 
 // Parse and Render finish in time linear in the text on the shapes that cost quadratic time
 // before LEGION-465. Each shape is timed at growthStep's fraction of its target size and then at
-// the full size (parseFullTarget/renderFullTarget: linear_sizes.go, and a smaller pair under
-// -race, linear_sizes_race.go, so a -count=N run stays well inside go test's own default
-// per-package timeout even there), through growsLinearly (below).
+// the full size (parseFullTarget/renderFullTarget: linear_sizes.go), through growsLinearly
+// (below).
 //
 // What each shape's closure measures is the CPU time this process spends on the call alone
 // (cpuTimeOf), not wall time. A loaded box's scheduler can inflate wall time on either side of a
@@ -53,9 +52,9 @@ import (
 // the parse here is a read-back's, which counts none and reads all of it. Render's target is
 // smaller than parse's (linear_sizes.go): this loop's own ratio check is `<a`'s live linearity
 // measurement, at whatever parseFullTarget/renderFullTarget currently are, not a one-time aside
-// recorded in a comment to go stale - but -race's own per-access instrumentation costs real CPU
-// time a reintroduced O(n²) bug would cost far more of; the margin this loop checks is that
-// difference, not a hang (which perCallDeadline catches on its own, independent of the ratio).
+// recorded in a comment to go stale. The margin it checks is between the CPU time healthy linear
+// work costs and the far greater time a reintroduced O(n²) bug would cost, not a hang (which
+// perCallDeadline catches on its own, independent of the ratio).
 func TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText(t *testing.T) {
 	for _, shape := range []string{"a_", "a_b*", "a~b_"} {
 		full := parseFullTarget / len(shape)
@@ -66,6 +65,62 @@ func TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText(t *testing.T) {
 				return cpuTimeOf(again(func() {
 					if _, err := ParseRendering(text); err != nil {
 						t.Fatalf("parse %d bytes of %q: %v", size, shape, err)
+					}
+				}))
+			})
+		})
+	}
+	// A block shape: a list item whose typed block holds one list item per blank line. Reading a
+	// blank line inside such a block as the item's walked the whole block once for each of them,
+	// and the list again for each node of it, which is quadratic in a block of blank lines; the
+	// reading is taken once over the document now (readSpreads). A write is
+	// what reads it, so this one is timed through ParseForWrite. The unit is one item and 200
+	// blank lines, so the items and the lines grow together and a mebibyte of them stays under
+	// MaxDocumentElements: the write is accepted at every size here, and any refusal - of the
+	// elements above all, which would stop the read before the cost - fails the case rather than
+	// passing it.
+	{
+		open, closer := "- a\n  :::callout{#c1 kind=\"note\" title=\"T\"}\n", "  :::\n"
+		repeat := "  - p\n" + strings.Repeat("\n", 200)
+		full := parseFullTarget / len(repeat)
+		small := full / growthStep
+		name := "a typed block of spaced items in a list item"
+		t.Run(name, func(t *testing.T) {
+			growsLinearly(t, name, []int{small * len(repeat), full * len(repeat)}, linearSlack, func(size int) (time.Duration, error) {
+				text := open + strings.Repeat(repeat, size/len(repeat)) + closer
+				return cpuTimeOf(again(func() {
+					if _, err := ParseForWrite(text, nil); err != nil {
+						t.Fatalf("%s at %d bytes: %v", name, size, err)
+					}
+				}))
+			})
+		})
+	}
+	// A block shape of bare exits: a quoted typed block whose last line holds the quote's marker
+	// alone, then the blank lines that make the cost show. Each such block ends where its content
+	// did, which puts its exits into the stream before the events of the lines already read;
+	// writing them in one by one moved the stream and walked every line's marks per block, so the
+	// cost was the blocks times the lines, and the inserts are collected and written once now
+	// (insertEvents, writeInserts). The unit is one block and 200 blank lines, so the blocks and
+	// the lines grow together and a mebibyte of them stays under MaxDocumentElements: the write is
+	// accepted at every size here, and any refusal - of the elements above all, which would stop
+	// the read before the cost - fails the case rather than passing it.
+	{
+		repeat := "> :::callout{#c%d kind=\"note\" title=\"T\"}\n>\nb\n" + strings.Repeat("\n", 200)
+		unit := len(fmt.Sprintf(repeat, 1000))
+		full := parseFullTarget / unit
+		small := full / growthStep
+		name := "quoted typed blocks ending on a bare line"
+		t.Run(name, func(t *testing.T) {
+			growsLinearly(t, name, []int{small * unit, full * unit}, linearSlack, func(size int) (time.Duration, error) {
+				var text strings.Builder
+				for index := 0; index < size/unit; index++ {
+					fmt.Fprintf(&text, repeat, index)
+				}
+				body := text.String()
+				return cpuTimeOf(again(func() {
+					if _, err := ParseForWrite(body, nil); err != nil {
+						t.Fatalf("%s at %d bytes: %v", name, size, err)
 					}
 				}))
 			})
@@ -200,9 +255,7 @@ const linearSlack = 3
 //
 // Each shape runs at two sizes through growsLinearly, measuring process CPU time rather than a
 // fixed wall-clock budget. The sizes are eightfold apart, so a quadratic renderer grows 64x where
-// a linear renderer may grow 24x (linearSlack*growthStep). renderFullTarget and parseFullTarget
-// use smaller targets under -race, where the instrumentation makes healthy work slower but cannot
-// change its growth ratio.
+// a linear renderer may grow 24x (linearSlack*growthStep).
 func TestRenderIsLinearOnRunsFootnoteLabelsAndLineFeeds(t *testing.T) {
 	paragraph := func(text string) *Node {
 		return &Node{Type: "paragraph", Children: []*Node{{Type: "text", Text: text}}}
@@ -308,8 +361,8 @@ func TestParseIsLinearInATableOfEscapedPipes(t *testing.T) {
 // A paragraph that reads back in no spelling is written in every spelling runSpellings lists for
 // it, and unreadableRun calls for every family of them. The plain text after it is in each writing,
 // and each distinct writing is read back once (TestRenderReadsEachWritingBackUnderAReaderOnce). It
-// is timed up to renderFullTarget, which -race shrinks, as
-// TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText times a render.
+// is timed up to renderFullTarget, as TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText
+// times a render.
 func TestBareURLShapesParseAndRenderLinearly(t *testing.T) {
 	sizes := []int{16 << 10, 256 << 10, 1 << 20}
 	for _, shape := range []string{
@@ -400,7 +453,7 @@ func readsAndWritesLinearly(t *testing.T, head, shape, tail string, sizes []int)
 //
 // Replaced blocks that stand apart are not linear. ygo's Delete and Insert walk the fragment from
 // its start to the index each is given (crdt/yxml.go leftChildAt, deleteChildRange, in the pinned
-// sjawhar/ygo v1.51.3-sami.1), and a replaced block between two kept ones is a run of its own, so a
+// sjawhar/ygo v1.55.1-sami.2), and a replaced block between two kept ones is a run of its own, so a
 // document whose every other block changes type costs a walk per replaced block, as it did before
 // runs were batched. That shape is held to ygo's own walks instead: Update may take no more than
 // alternatingAllowance times what a Delete and an Insert at each replaced index take on the same

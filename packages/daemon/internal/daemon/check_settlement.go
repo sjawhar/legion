@@ -19,9 +19,11 @@ import (
 // readSettlement is the required-checks pass's read of the check runs on the head of pr, an open
 // pull request no CI settlement stands for (classify.Settled). Envoy's listener settles a head
 // from its check_run webhooks, and a
-// delivery it lost, a run GitHub sent with no pull request named (which the listener never
-// records), or a record it marked overflowed leaves the head with no settlement and the issue with
-// no CI verdict. The read is one request per hundred runs, and only while no settlement stands.
+// delivery it lost, a run GitHub sent with no pull request named whose check suite's head branch
+// does not name one either (packages/envoy/internal/contracts' GithubCIObservations records one
+// whose suite is on refs/pull/<n>/head under n), or a record it marked overflowed leaves the head
+// with no settlement and the issue with no CI verdict. The read is one request per hundred runs,
+// and only while no settlement stands.
 // When GitHub lists at least one run, every run is completed and the newest completed at least
 // requiredChecksInterval ago - the listener, had it seen them, would have settled by then - it
 // applies the settlement the listener would have published (listenerSettlement), at
@@ -66,9 +68,9 @@ func (w *workflowRuntime) readSettlement(ctx, read context.Context, github githu
 }
 
 // reviewerVerdicts are the check names a Legion role's verdict is published under. Envoy's listener
-// records a run of one only when the review App created it (packages/envoy/internal/webhook's
-// reviewerVerdict and its reviewer App id), so a run of the same name from any other App passes
-// for no verdict.
+// records a run of one only when the review App created it (packages/envoy/internal/contracts'
+// ReviewerVerdictDecision and its reviewer App id), so a run of the same name from any other App
+// passes for no verdict.
 var reviewerVerdicts = map[string]bool{"tester": true, "architect": true}
 
 // maxCheckNameRunes is how much of a check's name Envoy's listener keys its CI record by

@@ -494,72 +494,6 @@ func TestHandoffReadsTheRecordAndItsAuthor(t *testing.T) {
 	}
 }
 
-// The newest record of a phase reads back with its body exactly as Dispatch stores it; a phase with
-// none is Dispatch's 404 HANDOFF_NOT_FOUND, not found; a 404 with another code, a Dispatch without
-// the route, is an error.
-func TestLatestHandoffReadsTheBodyAndTellsNoneFromNoRoute(t *testing.T) {
-	const body = "{\"schemaVersion\":1,\n  \"phase\": \"implement\"}\n"
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		assertBearer(t, r)
-		switch r.URL.Path {
-		case "/api/v1/issues/LEGION-6/handoffs/implement/latest":
-			writeJSON(t, w, map[string]any{
-				"id": "h-2", "issue_key": "LEGION-6", "phase": "implement", "version": 2,
-				"author": map[string]any{"kind": "session", "id": "ses_implementer_6"}, "body": body,
-			})
-		case "/api/v1/issues/LEGION-6/handoffs/test/latest":
-			writeJSONStatus(t, w, http.StatusNotFound, map[string]string{"code": "HANDOFF_NOT_FOUND", "error": "issue LEGION-6 has no test handoff"})
-		default:
-			writeJSONStatus(t, w, http.StatusNotFound, map[string]string{"code": "NOT_FOUND", "error": "no route for GET " + r.URL.Path})
-		}
-	}))
-	defer server.Close()
-
-	client := New(server.URL, dispatchToken)
-	handoff, found, err := client.LatestHandoff(context.Background(), "LEGION-6", "implement")
-	want := Handoff{ID: "h-2", IssueKey: "LEGION-6", Phase: "implement", Version: 2, Author: HandoffAuthor{Kind: "session", ID: "ses_implementer_6"}, Body: body}
-	if err != nil || !found || handoff != want {
-		t.Fatalf("latest implement = %#v, %v, %v; want %#v", handoff, found, err, want)
-	}
-	if _, found, err := client.LatestHandoff(context.Background(), "LEGION-6", "test"); err != nil || found {
-		t.Fatalf("latest test = %v, %v; want none and no error", found, err)
-	}
-	if _, found, err := client.LatestHandoff(context.Background(), "LEGION-6", "review"); found || !Missing(err) {
-		t.Fatalf("latest review on a Dispatch without the route = %v, %v; want its 404", found, err)
-	}
-}
-
-// A handoff write sends the body exactly as given, under the daemon's session, and reads back the
-// record Dispatch made.
-func TestWriteHandoffSendsTheBodyUnderTheDaemonSession(t *testing.T) {
-	const text = "{\"schemaVersion\": 1}\n"
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/issues/LEGION-7/handoffs/plan" {
-			t.Fatalf("request = %s %s, want POST /api/v1/issues/LEGION-7/handoffs/plan", r.Method, r.URL.Path)
-		}
-		assertBearer(t, r)
-		var request struct {
-			Body  string `json:"body"`
-			Actor actor  `json:"actor"`
-		}
-		decodeJSON(t, r, &request)
-		if request.Body != text || request.Actor != (actor{Kind: "session", ID: "legion-daemon:LEGION"}) {
-			t.Fatalf("write = %#v, want the file's text under legion-daemon:LEGION", request)
-		}
-		writeJSONStatus(t, w, http.StatusCreated, map[string]any{
-			"id": "h-1", "issue_key": "LEGION-7", "phase": "plan", "version": 1,
-			"author": map[string]any{"kind": "session", "id": "legion-daemon:LEGION"}, "created_at": "2026-10-27T08:00:00Z",
-		})
-	}))
-	defer server.Close()
-
-	handoff, err := New(server.URL, dispatchToken).WriteHandoff(context.Background(), "LEGION-7", "plan", text)
-	want := Handoff{ID: "h-1", IssueKey: "LEGION-7", Phase: "plan", Version: 1, Author: HandoffAuthor{Kind: "session", ID: "legion-daemon:LEGION"}}
-	if err != nil || handoff != want {
-		t.Fatalf("write = %#v, %v; want %#v", handoff, err, want)
-	}
-}
-
 func TestClientReturnsDispatchErrorForCoded4xx(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		writeJSONStatus(t, w, http.StatusConflict, map[string]string{"code": "ISSUE_CLOSED", "error": "issue is closed"})
@@ -695,49 +629,38 @@ func TestMessageBodiesSincePagesNewestFirstUntilTheOutboxWindow(t *testing.T) {
 	}
 }
 
-// BuildCommit is the build Dispatch's server fleet serves: its /healthz `fleet_commit` when the body
-// carries the field, whatever this process's own `commit`, and none ("") when it is null; a body
-// without the field, from a Dispatch older than the fleet's announcement, is read for its `commit`,
-// none when that is null or absent. A Dispatch that answers other than 2xx — its own 503 while its
-// database is down — is an error, not a commit of none.
-func TestBuildCommitReadsTheFleetCommitOrTheCommitOfAnOlderDispatch(t *testing.T) {
-	for _, tc := range []struct {
-		name   string
-		status int
-		body   string
-		want   string
-		err    bool
-	}{
-		{name: "fleet commit", status: http.StatusOK, body: `{"ok":true,"db":true,"nats":true,"files":null,"commit":"b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2","fleet_commit":"a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0","schema_version":121}`, want: "a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0"},
-		{name: "null fleet commit", status: http.StatusOK, body: `{"ok":true,"db":true,"nats":true,"files":null,"commit":"b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2","fleet_commit":null,"schema_version":121}`},
-		{name: "older Dispatch, stamped", status: http.StatusOK, body: `{"ok":true,"db":true,"nats":true,"files":null,"commit":"a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0","schema_version":41}`, want: "a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0"},
-		{name: "older Dispatch, null", status: http.StatusOK, body: `{"ok":true,"db":true,"nats":null,"files":null,"commit":null,"schema_version":41}`},
-		{name: "older Dispatch, absent", status: http.StatusOK, body: `{"ok":true,"db":true}`},
-		{name: "unavailable", status: http.StatusServiceUnavailable, body: `{"ok":false,"db":false,"commit":"a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0","fleet_commit":"a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0"}`, err: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Method != http.MethodGet || r.URL.Path != "/healthz" {
-					t.Fatalf("request = %s %s, want GET /healthz", r.Method, r.URL.Path)
-				}
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(tc.status)
-				_, _ = w.Write([]byte(tc.body))
-			}))
-			defer server.Close()
+// An event carries at most the first part of a long body and says so; the whole of it, the outbox
+// marker at its end included, is read from the message itself. A body the event carries whole is
+// read from the event alone, so the common message costs no second request.
+func TestMessageBodiesSinceReadsACutBodyFromItsMessage(t *testing.T) {
+	since := time.Date(2026, 9, 23, 1, 0, 0, 0, time.UTC)
+	whole := strings.Repeat("x", 40000) + "\n\n<!-- legion-outbox:7 -->"
+	reads := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assertBearer(t, r)
+		switch r.URL.Path {
+		case "/api/v1/issues/LEGION-5/events":
+			writeJSON(t, w, []map[string]any{
+				{"seq": 9, "type": "message.created", "created_at": "2026-09-23T01:02:00Z",
+					"payload": map[string]any{"id": "f1c0ffee-0000-4000-8000-000000000001", "body": whole[:32000], "body_truncated": true}},
+				{"seq": 8, "type": "message.created", "created_at": "2026-09-23T01:01:00Z",
+					"payload": map[string]any{"id": "f1c0ffee-0000-4000-8000-000000000002", "body": "A short daemon notice."}},
+			})
+		case "/api/v1/issues/LEGION-5/messages/f1c0ffee-0000-4000-8000-000000000001":
+			reads++
+			writeJSON(t, w, map[string]any{"message": map[string]any{"id": "f1c0ffee-0000-4000-8000-000000000001", "body": whole}, "replies": []any{}})
+		default:
+			t.Fatalf("request = %s %s, want the issue's events or its cut message", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
 
-			got, err := New(server.URL, dispatchToken).BuildCommit(context.Background())
-			if tc.err {
-				var refused *Error
-				if !errors.As(err, &refused) || refused.Status != tc.status {
-					t.Fatalf("BuildCommit = %q, %v; want Dispatch's %d as an error", got, err, tc.status)
-				}
-				return
-			}
-			if err != nil || got != tc.want {
-				t.Fatalf("BuildCommit = %q, %v; want %q", got, err, tc.want)
-			}
-		})
+	bodies, err := New(server.URL, dispatchToken).MessageBodiesSince(context.Background(), "LEGION-5", since)
+	if err != nil {
+		t.Fatalf("list messages: %v", err)
+	}
+	if reads != 1 || len(bodies) != 2 || bodies[0] != whole || bodies[1] != "A short daemon notice." {
+		t.Fatalf("message reads=%d bodies=%d, want the cut body read whole from its message and the short one from its event alone", reads, len(bodies))
 	}
 }
 

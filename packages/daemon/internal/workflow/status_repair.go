@@ -33,8 +33,11 @@ import (
 //     the outbox writes a status only where Dispatch shows the row's observed or target status
 //     (daemon's (*outbox).status), which an empty observed status never matches;
 //  5. the status recorded and the phase's status agree, so there is nothing to correct;
-//  6. its tree's root is missing from byKey, holds no admission slot, or lingers. Its key goes in
-//     the run line's passed-over list;
+//  6. its tree's root is missing from the records this run reads, or that tree is not running by
+//     the one rule every reader of the question asks (record.TreeRuns, read here through
+//     record.RunningRoots): its lifecycle is not open under the workflow, the root lingers after
+//     its close, or the root is itself still waiting in the line for the tree to be opened. Its
+//     key goes in the run line's passed-over list;
 //  7. it already has an unfinished dispatch_status row of any kind (PendingStatusWrites), so a
 //     write is on its way. Its key goes in the run line's pending list.
 //
@@ -54,7 +57,7 @@ import (
 // daemon lost, so any notice would name both, and most of them would be the person's own move
 // arriving a moment before its event.
 func (e *Engine) correctStatuses(ctx context.Context, tx pgx.Tx, issues []record.Issue,
-	byKey map[string]record.Issue, slotted map[string]bool, trigger string) error {
+	running map[string]struct{}, trigger string) error {
 	pendingWrites, err := e.store.PendingStatusWrites(ctx, tx, e.cfg.Project)
 	if err != nil {
 		return err
@@ -66,14 +69,14 @@ func (e *Engine) correctStatuses(ctx context.Context, tx pgx.Tx, issues []record
 	passedOver, pending := []string{}, []string{}
 	queued := 0
 	for _, issue := range issues {
-		if issue.Project != e.cfg.Project || !InWorkflow(issue) {
+		if issue.Project != e.cfg.Project || !record.InWorkflow(issue) {
 			continue
 		}
 		want := PhaseStatus(issue.Phase)
 		if want == "" || issue.DispatchStatus == "" || record.OutOfWorkflow(issue.DispatchStatus) || issue.DispatchStatus == want {
 			continue
 		}
-		if _, running := runningTree(byKey, slotted, issue); !running {
+		if _, runs := running[issue.Tree]; !runs {
 			passedOver = append(passedOver, issue.Key)
 			continue
 		}
@@ -123,20 +126,18 @@ func (e *Engine) correctStatuses(ctx context.Context, tx pgx.Tx, issues []record
 // fact's cost must not grow with the done records a project holds for good
 // (admit's TestAFactReadsAsManyRowsWhateverNumberOfFinishedRecordsTheProjectKeeps, which the tick
 // is one of the facts of). The repair selects the same issues from either list: every issue it can
-// act on is short of phase done, which LiveIssues holds, and every root that could pass the
-// tree-runs rule holds a slot, which LiveIssues holds too — a root it leaves out is done and holds
-// none, so the issue under it is passed over either way, by the missing root rather than by the
-// missing slot. The boot reads the whole table once for its resume and hands the repair that list
-// (booted).
+// act on is short of phase done, which LiveIssues holds, and a root LiveIssues leaves out is one
+// whose own record is done and holds no slot, whose tree has closed and lingers — so the issue
+// under it is passed over either way, by the missing root rather than by the tree-runs rule. The
+// boot reads the whole table once for its resume and hands the repair that list (booted).
 func (e *Engine) statusRepairTick(ctx context.Context, tx pgx.Tx) (intake.Result, error) {
 	issues, err := e.store.LiveIssues(ctx, tx, e.cfg.Project)
 	if err != nil {
 		return intake.Result{}, err
 	}
-	slots, err := e.store.Slots(ctx, tx)
+	running, err := record.ReadRunningRoots(ctx, tx, e.store, e.cfg.Project, issues)
 	if err != nil {
 		return intake.Result{}, err
 	}
-	byKey, slotted := indexIssues(issues, slots)
-	return intake.Result{}, e.correctStatuses(ctx, tx, issues, byKey, slotted, "tick")
+	return intake.Result{}, e.correctStatuses(ctx, tx, issues, running, "tick")
 }

@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"sort"
+	"strings"
 
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
@@ -108,17 +110,20 @@ var writeClasses = map[string]writeScope{
 	// names, so a credential scoped to one project runs it over that project and no other.
 	"POST /api/v1/projects/{key}/related": scopeProject,
 
-	"POST /api/v1/artifacts/{id}/blocks/{block_id}/keep":     scopeProject,
-	"POST /api/v1/artifacts/{id}/asks":                       scopeProject,
-	"POST /api/v1/artifacts/{id}/comments":                   scopeProject,
-	"DELETE /api/v1/artifacts/{id}/subscribers/{session_id}": scopeProject,
-	"POST /api/v1/artifacts/{id}/rebuild":                    scopeProject,
-	"POST /api/v1/artifacts/{id}/reviews":                    scopeProject,
-	"POST /api/v1/artifacts/{id}/plan-reviews":               scopeProject,
-	"POST /api/v1/artifacts/{id}/approval-requests":          scopeProject,
-	"POST /api/v1/artifacts/{id}/versions":                   scopeProject,
-	"POST /api/v1/artifacts/{id}/edits":                      scopeProject,
-	"POST /api/v1/artifacts/{id}/_test/outside-schema":       scopeProject,
+	"POST /api/v1/artifacts/{id}/blocks/{block_id}/keep":            scopeProject,
+	"POST /api/v1/artifacts/{id}/asks":                              scopeProject,
+	"POST /api/v1/artifacts/{id}/comments":                          scopeProject,
+	"DELETE /api/v1/artifacts/{id}/subscribers/{session_id}":        scopeProject,
+	"POST /api/v1/artifacts/{id}/rebuild":                           scopeProject,
+	"POST /api/v1/artifacts/{id}/reviews":                           scopeProject,
+	"POST /api/v1/artifacts/{id}/plan-reviews":                      scopeProject,
+	"POST /api/v1/artifacts/{id}/approval-requests":                 scopeProject,
+	"POST /api/v1/artifacts/{id}/versions":                          scopeProject,
+	"POST /api/v1/artifacts/{id}/edits":                             scopeProject,
+	"POST /api/v1/artifacts/{id}/_test/outside-schema":              scopeProject,
+	"POST /api/v1/artifacts/{id}/_test/hold-persistence":            scopeProject,
+	"PUT /api/v1/artifacts/{id}/_test/live-write-pauses/{point}":    scopeProject,
+	"DELETE /api/v1/artifacts/{id}/_test/live-write-pauses/{point}": scopeProject,
 
 	"PUT /api/v1/asks/{id}/followers/{session_id}":    scopeProject,
 	"DELETE /api/v1/asks/{id}/followers/{session_id}": scopeProject,
@@ -135,6 +140,11 @@ var writeClasses = map[string]writeScope{
 	"POST /api/v1/comments/{id}/reject":     scopeProject,
 
 	"POST /api/v1/messages/{id}/deliveries": scopeProject,
+
+	// The question an answer run is recorded for belongs to the project its body names, as an
+	// issue create's does, so a credential scoped to one project asks only of that project
+	// (createGoingRequest makes the check itself).
+	"POST /api/v1/going/requests": scopeProjectInBody,
 
 	// The rows that write what belongs to the calling session: its own conversation, its answer
 	// to its own delivery, and the caller-private `me` rows.
@@ -176,6 +186,201 @@ var writeClasses = map[string]writeScope{
 	"POST /api/v1/writes/_test/slow":                       scopeDeployment,
 }
 
+// idRoute is what the id wildcards of one route's pattern name, which is what the prefix layer
+// reads before the scope checks and the handler see those values (resolveIDPrefixes).
+//
+// Kind is the kind the pattern's {id} names — ask, comment, message or artifact, as
+// refs.ResolvePrefix reads a kind — and WithinIssue whether a prefix of it is looked for among
+// the items of the issue the pattern's {key} names rather than among every item of that kind.
+// Blocks is whether the pattern's {block_id} is a block of the document its {id} names, matched
+// among that document's blocks once the {id} itself is resolved.
+//
+// NotFound is the code of the 404 this route already answers for a whole id of its kind that
+// names no item, which is the answer a prefix that names none gets too: a short id resolves
+// wherever a whole one does, so it fails where a whole one fails. It is read from the route
+// rather than assumed, and the routes disagree — a document's read answers ARTIFACT_NOT_FOUND,
+// a comment's thread NOT_FOUND and a comment's delivery COMMENT_NOT_FOUND — so it is written
+// per route and not per kind. BlockNotFound is the same for the {block_id}. notFoundNone is the
+// route that answers no 404 at all for an id it does not hold, which then keeps that answer.
+//
+// Reason is why a route looks up no prefix, written exactly where Kind is empty and Blocks is
+// false: an id of a kind refs.ResolvePrefix does not read, so nothing is looked for and the
+// handler makes of the value what it always made of it. Such a route is wrapped all the same,
+// because its {id} is still rewritten to the canonical spelling where it is a whole uuid
+// written another of uuid.Parse's ways, as it is on every route that takes an id
+// (canonicalizeUUIDPath).
+type idRoute struct {
+	Kind          string
+	WithinIssue   bool
+	Blocks        bool
+	NotFound      string
+	BlockNotFound string
+	Reason        string
+}
+
+// notFoundNone is the NotFound of a route that answers no 404 for an id it does not hold, so a
+// prefix that names nothing is left as written and that route answers what it always answers.
+// Only DELETE /api/v1/me/asks/{id}/snooze is one: un-snoozing a row nobody snoozed is the state
+// the caller asked for, and it answers 204 whatever ask the id names.
+const notFoundNone = "none"
+
+// resolves reports whether the route looks a prefix up at all, which is what makes Reason
+// required. It does not decide the wrapping: register wraps every route idRoutes names, since
+// one that resolves nothing still has its {id} canonicalized there (resolveIDPrefixes).
+func (route idRoute) resolves() bool { return route.Kind != "" || route.Blocks }
+
+// idRoutes is, by "<method> <pattern>", what the {id} and {block_id} of every route that
+// carries one name: the kind whose prefix is resolved into it and the 404 that route answers
+// for an id of that kind it does not hold, or the reason it resolves none. It stands beside the
+// table for writeClasses' reason — the columns would have to be written on all 164 rows, and
+// most rows carry no id at all — and it is keyed by method and pattern as writeClasses is,
+// because two methods of one pattern can answer a missing row differently: PUT
+// /api/v1/me/asks/{id}/snooze answers 404 and DELETE answers 204.
+//
+// TestEveryIDRouteIsNamed holds the two in exact correspondence: a route with an id wildcard
+// this table does not name, a row that names neither a kind nor a reason, a resolving row with
+// no 404 of its own, and a name that is no route the server serves, each fail it, so a route
+// added later cannot silently stop resolving prefixes.
+//
+// The ids this layer never sees are no part of it: an id a request's body carries (reply_to,
+// ask_id, in_reply_to) and the ?artifact= filters are in no path value, and the resolver that
+// rewrites a body's short ids as its text is indexed is their one reader (refs.Resolver).
+var idRoutes = map[string]idRoute{
+	// A document's own routes, and the caller's read mark on one: the {id} is an artifact,
+	// looked for among every document and file, as a whole artifact id is. Every one of them
+	// reads the row through loadArtifact, which answers ARTIFACT_NOT_FOUND.
+	"GET /api/v1/artifacts/{id}":                             {Kind: "artifact", NotFound: "ARTIFACT_NOT_FOUND"},
+	"POST /api/v1/artifacts/{id}/_test/outside-schema":       {Kind: "artifact", NotFound: "ARTIFACT_NOT_FOUND"},
+	"POST /api/v1/artifacts/{id}/approval-requests":          {Kind: "artifact", NotFound: "ARTIFACT_NOT_FOUND"},
+	"GET /api/v1/artifacts/{id}/asks":                        {Kind: "artifact", NotFound: "ARTIFACT_NOT_FOUND"},
+	"POST /api/v1/artifacts/{id}/asks":                       {Kind: "artifact", NotFound: "ARTIFACT_NOT_FOUND"},
+	"GET /api/v1/artifacts/{id}/blocks":                      {Kind: "artifact", NotFound: "ARTIFACT_NOT_FOUND"},
+	"GET /api/v1/artifacts/{id}/comments":                    {Kind: "artifact", NotFound: "ARTIFACT_NOT_FOUND"},
+	"POST /api/v1/artifacts/{id}/comments":                   {Kind: "artifact", NotFound: "ARTIFACT_NOT_FOUND"},
+	"POST /api/v1/artifacts/{id}/edits":                      {Kind: "artifact", NotFound: "ARTIFACT_NOT_FOUND"},
+	"GET /api/v1/artifacts/{id}/events":                      {Kind: "artifact", NotFound: "ARTIFACT_NOT_FOUND"},
+	"POST /api/v1/artifacts/{id}/plan-reviews":               {Kind: "artifact", NotFound: "ARTIFACT_NOT_FOUND"},
+	"POST /api/v1/artifacts/{id}/rebuild":                    {Kind: "artifact", NotFound: "ARTIFACT_NOT_FOUND"},
+	"GET /api/v1/artifacts/{id}/references":                  {Kind: "artifact", NotFound: "ARTIFACT_NOT_FOUND"},
+	"GET /api/v1/artifacts/{id}/reviews":                     {Kind: "artifact", NotFound: "ARTIFACT_NOT_FOUND"},
+	"POST /api/v1/artifacts/{id}/reviews":                    {Kind: "artifact", NotFound: "ARTIFACT_NOT_FOUND"},
+	"GET /api/v1/artifacts/{id}/subscribers":                 {Kind: "artifact", NotFound: "ARTIFACT_NOT_FOUND"},
+	"DELETE /api/v1/artifacts/{id}/subscribers/{session_id}": {Kind: "artifact", NotFound: "ARTIFACT_NOT_FOUND"},
+	"GET /api/v1/artifacts/{id}/text":                        {Kind: "artifact", NotFound: "ARTIFACT_NOT_FOUND"},
+	"POST /api/v1/artifacts/{id}/versions":                   {Kind: "artifact", NotFound: "ARTIFACT_NOT_FOUND"},
+	"GET /api/v1/artifacts/{id}/versions/{number}":           {Kind: "artifact", NotFound: "ARTIFACT_NOT_FOUND"},
+	"GET /api/v1/me/documents/{id}/read":                     {Kind: "artifact", NotFound: "ARTIFACT_NOT_FOUND"},
+	"PUT /api/v1/me/documents/{id}/read":                     {Kind: "artifact", NotFound: "ARTIFACT_NOT_FOUND"},
+
+	// The two routes that also name a block of that document, each answering TARGET_NOT_FOUND
+	// for a block id the document does not hold.
+	"GET /api/v1/artifacts/{id}/blocks/{block_id}":       {Kind: "artifact", Blocks: true, NotFound: "ARTIFACT_NOT_FOUND", BlockNotFound: "TARGET_NOT_FOUND"},
+	"POST /api/v1/artifacts/{id}/blocks/{block_id}/keep": {Kind: "artifact", Blocks: true, NotFound: "ARTIFACT_NOT_FOUND", BlockNotFound: "TARGET_NOT_FOUND"},
+
+	// An ask's own routes and the caller's snooze of one. Each reads the row through loadAsk
+	// or loadAskOwner, whose missing row is writeHandlerError's NOT_FOUND; the snooze write
+	// answers its own NOT_FOUND, and the un-snooze answers 204 for any ask at all.
+	"GET /api/v1/asks/{id}":                           {Kind: "ask", NotFound: "NOT_FOUND"},
+	"PATCH /api/v1/asks/{id}":                         {Kind: "ask", NotFound: "NOT_FOUND"},
+	"POST /api/v1/asks/{id}/answer":                   {Kind: "ask", NotFound: "NOT_FOUND"},
+	"POST /api/v1/asks/{id}/resolve":                  {Kind: "ask", NotFound: "NOT_FOUND"},
+	"GET /api/v1/asks/{id}/followers":                 {Kind: "ask", NotFound: "NOT_FOUND"},
+	"PUT /api/v1/asks/{id}/followers/{session_id}":    {Kind: "ask", NotFound: "NOT_FOUND"},
+	"DELETE /api/v1/asks/{id}/followers/{session_id}": {Kind: "ask", NotFound: "NOT_FOUND"},
+	"PUT /api/v1/me/asks/{id}/snooze":                 {Kind: "ask", NotFound: "NOT_FOUND"},
+	"DELETE /api/v1/me/asks/{id}/snooze":              {Kind: "ask", NotFound: notFoundNone},
+
+	// A comment's own routes. The reads and the thread writes answer writeHandlerError's
+	// NOT_FOUND; the two delivery routes answer COMMENT_NOT_FOUND of their own.
+	"GET /api/v1/comments/{id}":             {Kind: "comment", NotFound: "NOT_FOUND"},
+	"PATCH /api/v1/comments/{id}":           {Kind: "comment", NotFound: "NOT_FOUND"},
+	"GET /api/v1/comments/{id}/blocks":      {Kind: "comment", NotFound: "NOT_FOUND"},
+	"POST /api/v1/comments/{id}/accept":     {Kind: "comment", NotFound: "NOT_FOUND"},
+	"POST /api/v1/comments/{id}/reject":     {Kind: "comment", NotFound: "NOT_FOUND"},
+	"POST /api/v1/comments/{id}/reopen":     {Kind: "comment", NotFound: "NOT_FOUND"},
+	"POST /api/v1/comments/{id}/resolve":    {Kind: "comment", NotFound: "NOT_FOUND"},
+	"POST /api/v1/comments/{id}/deliveries": {Kind: "comment", NotFound: "COMMENT_NOT_FOUND"},
+	"POST /api/v1/comments/{id}/reply":      {Kind: "comment", NotFound: "COMMENT_NOT_FOUND"},
+
+	// A message, by any id in its conversation. The issue form names an owner, so a prefix of
+	// it is looked for among that issue's messages alone; the owner-free forms look among
+	// every message, a direct conversation's included. The reads answer NOT_FOUND and the
+	// three delivery routes MESSAGE_NOT_FOUND.
+	"GET /api/v1/messages/{id}":                              {Kind: "message", NotFound: "NOT_FOUND"},
+	"GET /api/v1/messages/{id}/blocks":                       {Kind: "message", NotFound: "NOT_FOUND"},
+	"POST /api/v1/messages/{id}/deliveries":                  {Kind: "message", NotFound: "MESSAGE_NOT_FOUND"},
+	"POST /api/v1/messages/{id}/deliveries/{attempt}/accept": {Kind: "message", NotFound: "MESSAGE_NOT_FOUND"},
+	"POST /api/v1/messages/{id}/reply":                       {Kind: "message", NotFound: "MESSAGE_NOT_FOUND"},
+	"GET /api/v1/issues/{key}/messages/{id}":                 {Kind: "message", WithinIssue: true, NotFound: "NOT_FOUND"},
+
+	// The routes whose id names none of the five kinds a prefix shortens — an ask, a comment,
+	// a message, a document, a document block — so no prefix is looked for and the handler
+	// answers for the value as it always has. A whole uuid an {id} spells another of
+	// uuid.Parse's ways is still rewritten to the canonical spelling, as it is on every route
+	// that takes an id (canonicalizeUUIDPath).
+	"GET /api/v1/broadcasts/{id}":                   {Reason: "a broadcast id: one send to many sessions"},
+	"POST /api/v1/credential-grants/{id}/revoke":    {Reason: "a credential grant id"},
+	"POST /api/v1/credential-requests/{id}/approve": {Reason: "a credential request id"},
+	"POST /api/v1/credential-requests/{id}/deny":    {Reason: "a credential request id"},
+	"GET /api/v1/delivery/runs/{id}":                {Reason: "a deploy-repository run id, a positive integer and no uuid at all"},
+	"PATCH /api/v1/delivery/session-groups/{id}":    {Reason: "a Delivery session group id"},
+	"DELETE /api/v1/delivery/session-groups/{id}":   {Reason: "a Delivery session group id"},
+	"GET /api/v1/going/requests/{id}/stream":        {Reason: "a going request's run id, which the route reads for its own author alone and answers for itself"},
+	"GET /api/v1/handoffs/{id}":                     {Reason: "a handoff id: one phase's record on an issue"},
+	"POST /api/v1/machine-logins/{id}/revoke":       {Reason: "a machine login id"},
+	"POST /api/v1/signins/{id}/revoke":              {Reason: "a sign-in id at the secrets broker"},
+	"DELETE /api/v1/me/agent-tokens/{id}":           {Reason: "a personal agent token id"},
+	"PATCH /api/v1/me/agent-tokens/{id}":            {Reason: "a personal agent token id"},
+	"PUT /api/v1/me/threads/{id}/read":              {Reason: "a thread id: the root of a conversation, and no read of the message it names"},
+
+	// The document test hooks, which address the live room this process holds under the
+	// document's own id and read no row of the artifacts table, so they answer no 404 of a
+	// document that does not exist and resolve no prefix: a short id written at one of them
+	// reaches the hook as the caller wrote it, as every other value does.
+	"POST /api/v1/artifacts/{id}/_test/hold-persistence":            {Reason: "a test hook's document id, naming a live room rather than a stored document"},
+	"GET /api/v1/artifacts/{id}/_test/room-counters":                {Reason: "a test hook's document id, naming a live room rather than a stored document"},
+	"PUT /api/v1/artifacts/{id}/_test/live-write-pauses/{point}":    {Reason: "a test hook's document id, naming a live room rather than a stored document"},
+	"GET /api/v1/artifacts/{id}/_test/live-write-pauses/{point}":    {Reason: "a test hook's document id, naming a live room rather than a stored document"},
+	"DELETE /api/v1/artifacts/{id}/_test/live-write-pauses/{point}": {Reason: "a test hook's document id, naming a live room rather than a stored document"},
+}
+
+// hasIDWildcard reports whether a pattern carries an id the prefix layer could resolve.
+func hasIDWildcard(pattern string) bool {
+	return strings.Contains(pattern, "{id}") || strings.Contains(pattern, "{block_id}")
+}
+
+// undecidedIDRoutes names every route whose pattern carries an id wildcard that idRoutes
+// leaves undecided: one it does not name, one that resolves nothing and gives no reason, one
+// that names a kind and a reason at once, one that resolves an id or a block without saying
+// what 404 that route answers for one it does not hold, and one that resolves nothing and
+// names such an answer anyway.
+func undecidedIDRoutes(routes []apiRoute) []string {
+	var undecided []string
+	for _, route := range routes {
+		if !hasIDWildcard(route.Pattern) {
+			continue
+		}
+		name := route.Method + " " + route.Pattern
+		entry, named := idRoutes[name]
+		switch {
+		case !named:
+			undecided = append(undecided, name+": idRoutes says neither what its id names nor why no prefix is resolved there")
+		case entry.resolves() && entry.Reason != "":
+			undecided = append(undecided, name+": idRoutes names a kind to resolve and a reason not to")
+		case !entry.resolves() && strings.TrimSpace(entry.Reason) == "":
+			undecided = append(undecided, name+": idRoutes resolves no prefix there and gives no reason")
+		case entry.Kind != "" && entry.NotFound == "":
+			undecided = append(undecided, name+": idRoutes resolves an id there and does not say what 404 the route answers for one it does not hold")
+		case entry.Blocks && entry.BlockNotFound == "":
+			undecided = append(undecided, name+": idRoutes resolves a block id there and does not say what 404 the route answers for one the document does not hold")
+		case !entry.resolves() && (entry.NotFound != "" || entry.BlockNotFound != ""):
+			undecided = append(undecided, name+": idRoutes resolves nothing there and names a not-found answer anyway")
+		}
+	}
+	sort.Strings(undecided)
+	return slices.Compact(undecided)
+}
+
 // routeScopeSet is the OAuth scopes one route needs of the credential that calls it, every one
 // of which that credential must hold (gateRouteScopes). An empty set is a route any authenticated
 // caller may reach.
@@ -183,7 +388,7 @@ type routeScopeSet []string
 
 // routeScopes is the set each route needs, by "<method> <pattern>", and it stands beside the
 // table for the reason writeClasses does: Go leaves no field out of a positional composite
-// literal, so a sixth value on the row would have to be written on all 154 rows, and most rows
+// literal, so a sixth value on the row would have to be written on all 164 rows, and most rows
 // need no scope. routes() stamps it onto the row, so apiRoute.OAuthScopes is what every reader
 // of a route sees — GET /api/v1 and `envoy-dispatch routes` among them — and
 // scopedRoutesNotMounted holds the map to the table, a name that is no row refusing to mount
@@ -196,6 +401,13 @@ type routeScopeSet []string
 // personal tokens and their machine logins hold both; the shared token, a pod's service-account
 // token, a project-scoped session's token and a broker-issued token that names a service and no
 // person hold neither.
+//
+// A route that takes an id written short needs no scope of its own for it: the prefix layer
+// (resolveIDPrefixes, idRoutes) runs inside this gate - register wraps the gate around it, so
+// the row's scopes are the first thing a request is held to and a credential that holds none is
+// refused before any id is read - and it only rewrites the path value, so a short id reaches
+// exactly the scopes the whole id reaches, and a row that needs none with a whole id needs none
+// with a prefix.
 var routeScopes = map[string]routeScopeSet{
 	// The rows that read or write what belongs to the calling person: their inbox, their own
 	// answers and replies, their read marks, their conversations with sessions, and the people
@@ -317,14 +529,15 @@ func (s *server) routes() []apiRoute {
 	rows := []routeRow{
 		{http.MethodGet, "/api/v1", authPublic, "This index: every route with its method, auth, and purpose.", s.getRouteIndex},
 		{http.MethodGet, "/api/v1/schema/blocks", authPublic, "The typed document block schema as JSON.", s.getBlockSchema},
+		{http.MethodGet, "/api/v1/limits", authAny, "The bounds a write is held to: how long one block of a body may be and how many blocks a body may hold, how many options an ask may have and how long its question and options are together, how long a body an event carries whole may be, and the bytes a request, a document and a handoff body may hold.", s.getLimits},
 		{http.MethodGet, "/api/v1/projects", authAny, "List projects.", s.listProjects},
 		{http.MethodPost, "/api/v1/projects", authAny, fmt.Sprintf("Create a project {key, name}: any signed-in person or agent session; a bearer names its session in actor. A key that is not a project key, an empty name, a name holding a control character or a bidi embedding, override or isolate, or a name with no visible character (a letter, number, punctuation or symbol other than the blank fillers U+115F, U+1160, U+3164, U+FFA0 and U+2800, or a code point Go's Unicode tables leave unassigned, such as an emoji newer than them, other than a noncharacter (U+FDD0-U+FDEF and each code point ending in FFFE or FFFF) or a reserved default-ignorable (U+2065, U+FFF0-U+FFF8, U+E0000-U+E0FFF); combining marks, format characters, private-use characters and whitespace don't count) is 400 INVALID_PROJECT; a name over %d characters is 400 CAP_EXCEEDED; a key that already exists is 409 PROJECT_EXISTS.", contracts.ProjectNameMax), s.createProject},
 		{http.MethodGet, "/api/v1/projects/{key}/artifacts", authAny, "List a project's documents.", s.listProjectArtifacts},
 		{http.MethodPost, "/api/v1/projects/{key}/artifacts", authAny, "Upload a project document or file (JSON or multipart); a file's kind is read from its bytes, and a new artifact's name held to its bound, as an issue upload's are.", s.uploadProjectArtifact},
 		{http.MethodGet, "/api/v1/projects/{key}/related", authAny, fmt.Sprintf("Run the related-item check an issue create runs, over ?title= and ?text= (checked as the title, a newline and the text; either alone is enough), without writing anything: no issue, ask, suggestion or related_checks record. ?exclude_issue= leaves that issue of the project and everything it holds out of the results and out of the word statistics (400 EXCLUDE_ISSUE_INPUT when it is not an issue of the project); ?keywords_only=true skips meaning search. It waits at most 5 seconds and answers the create's advice.suggestions shape: outcome found, none or not_made (a blank text is 200 not_made, the reason in missing), search, search_note, search_query, related and decision. Title and text over %d characters together are 400 CAP_EXCEEDED; POST takes a longer text. An unknown project is 404 PROJECT_NOT_FOUND.", contracts.SearchQueryMax), s.getRelated},
 		{http.MethodPost, "/api/v1/projects/{key}/related", authAny, fmt.Sprintf("The GET form of this route with its fields in a JSON body {title, text, exclude_issue, keywords_only}: the related-item check over a title and a text as long as an issue's spec (the body's 1 MiB bound; a title over %d characters is 400 CAP_EXCEEDED), writing nothing and waiting at most 5 seconds; answers the same suggestions shape.", contracts.IssueTitleMax), s.postRelated},
-		{http.MethodGet, "/api/v1/settings/repo-projects", authAny, "List GitHub repository to project mappings, each marked whether it is its project's default.", s.listRepoProjects},
-		{http.MethodPut, "/api/v1/settings/repo-projects/{owner}/{repo}", authAny, "Map a GitHub repository to a project {project, default?}; default true makes it the project's one default.", s.putRepoProject},
+		{http.MethodGet, "/api/v1/settings/repo-projects", authAny, "List GitHub repository to project mappings, each marked whether it is its project's default and what repository it was renamed to, null for one that was never renamed.", s.listRepoProjects},
+		{http.MethodPut, "/api/v1/settings/repo-projects/{owner}/{repo}", authAny, `Map a GitHub repository to a project {project, default?, renamed_to?}; default true makes it the project's one default. renamed_to is the owner/name this repository is called today, which every comparison of a repository canonicalises through: absent or null leaves the stored one alone, "" clears it, and a pair naming this repository, one naming a repository that is itself renamed, or one on a repository another mapping is already renamed to is 400 INVALID_REPO_PROJECT.`, s.putRepoProject},
 		{http.MethodDelete, "/api/v1/settings/repo-projects/{owner}/{repo}", authAny, "Remove a repository mapping no issue names as its repo.", s.deleteRepoProject},
 		{http.MethodGet, "/api/v1/github/app-installation/{owner}/{repo}", authAny, "Whether Dispatch's GitHub App, which GitHub sends the repository's webhook events through, is installed on the repository: 200 {installed}, false when GitHub answers 404; 503 GITHUB_APP_UNCONFIGURED when Dispatch holds no App key, 502 GITHUB_UNREADABLE naming the repository and GitHub's error on any other failure.", s.getAppInstallation},
 		{http.MethodGet, "/api/v1/settings/architecture-sources", authAny, "List every project's architecture sources, by project and then in the order each project added them.", s.listArchitectureSources},
@@ -364,14 +577,15 @@ func (s *server) routes() []apiRoute {
 		{http.MethodDelete, "/api/v1/issues/{key}/claim", authAny, "Release the issue's claim: its holder, a caller whose credential holds the person scope, or anyone when the holding session is no longer live. The status does not move. The answer is the issue with legion_managed_status beside it: true when the issue carries the legion label in any case, or sits under one that does, which means the Legion daemon owns the status and a status another writer sets is undone. 409 ISSUE_CLAIMED names the holder this caller may not release (there is no force on this route); 409 CLAIM_CONTENDED means the holder changed twice while the request ran, so nothing was applied and nobody's liveness was checked.", s.releaseIssueClaim},
 		{http.MethodGet, "/api/v1/issues/{key}/events", authAny, "Page an issue's event log (after, before, ids, order, limit).", s.listIssueEvents},
 		{http.MethodGet, "/api/v1/issues/{key}/references", authAny, "The eight-hop closure of documents the issue's content references: {members, truncated}, each member a document in the closure with its depth and the node it was reached via, under an ETag (If-None-Match answers 304). ?versions=latest leaves each member's artifact.versions holding only its latest version, under its own ETag; absent, empty or all is the full answer; another value, or versions given more than once, is 400 INVALID_QUERY.", s.getIssueReferences},
-		{http.MethodGet, "/api/v1/references", authAny, "Edges of one node in the reference graph: ?to=<dispatch ref> backlinks or ?from= links; ?kind=, ?since=<events.id> (mentions only, read up to the event log's safe horizon: every mention committed before the read, unless an open transaction holds the horizon back past 1 s, when the read answers the mentions at or below it and a later read the rest). A caller with no cursor starts from since=0, which lists every mention committed before the read that carries a source_seq, and after that reads again from the highest source_seq an answer showed it. A mention written with no event (a rebuild, a backfill, an older build) carries no source_seq until a later write of its source stamps it with that write's event, and until then only a read without since lists it. A signed-in page may start from GET /auth/whoami's event_head instead, which takes a cookie or a trusted header and not a bearer, so a bearer caller starts from 0. Never take a since from max(events.id) read straight from the database: event ids are not commit order, and an id taken that way can stand above an edge that commits later. An empty answer is not proof that nothing is new, so the caller reads again with the id it holds.", s.getReferences},
+		{http.MethodGet, "/api/v1/references", authAny, "Edges of one node in the reference graph: ?to=<dispatch ref> backlinks or ?from= links; ?kind=, ?since=<events.id> (mentions only, read up to the event log's safe horizon: every mention committed before the read, unless an open transaction holds the horizon back past 1 s, when the read answers the mentions at or below it and a later read the rest). A caller with no cursor starts from since=0, which lists every mention committed before the read that carries a source_seq, and after that reads again from the highest source_seq an answer showed it. A mention written with no event (a rebuild, a backfill, an older build) carries no source_seq until a later write of its source stamps it with that write's event, and until then only a read without since lists it. A signed-in page may start from GET /auth/whoami's event_head instead, which takes a cookie or a trusted header and not a bearer, so a bearer caller starts from 0. Never take a since from max(events.id) read straight from the database: event ids are not commit order, and an id taken that way can stand above an edge that commits later. An empty answer is not proof that nothing is new, so the caller reads again with the id it holds. A ?to= reference whose item id or block id is written short (8 characters or more, never a whole uuid) names the one item of the owner the reference names that carries it: the issue of dispatch://<KEY>/ask/<prefix>, the document of a #b-<prefix>; the node answered carries the whole id, a prefix two of them carry is 409 ID_AMBIGUOUS listing both, and one nothing carries is the 404 the reference as written always gave. A whole id is read whatever owner the reference names, as it always was.", s.getReferences},
+		{http.MethodGet, "/api/v1/references/questions", authAny, "The question map of one reference source's document: ?kind= one of artifact, ask, comment or message and ?id= that source's whole uuid or a unique prefix of 8 characters or more. Answers {document, questions}: document the uuid of the document the source's text belongs to - its own for a document version, the document an ask or a comment is written on or anchored to, its issue's spec for an issue message - and questions each `:::ask{#id}` block that document's latest version declares, by block id, with the whole id of the ask settlement made for it and that ask's `dispatch://` address, which is what a `#id` in the source's text names and the address its edge is stored under (empty for an ask on an agent conversation's document, which no address names). A block no ask is settled for yet is absent, and a document declaring none answers []. A source whose text belongs to no document - a direct message, an id nothing holds - is 404 NOT_FOUND; a kind that is none of the four is 400 INVALID_KIND; a missing id is 400 INVALID_QUERY; an id prefix two sources carry is 409 ID_AMBIGUOUS.", s.getReferenceQuestions},
 		{http.MethodGet, "/api/v1/block-links", authAny, "Links from blocks of one document to blocks of another: ?from=<document ref>&to=<document ref>; both block nodes, the edge kind, and when and in which version the source wrote each, newest first.", s.getBlockLinks},
 		{http.MethodGet, "/api/v1/issues/{key}/subscribers", authAny, "Sessions subscribed to an issue's topics.", s.listIssueSubscribers},
 		{http.MethodDelete, "/api/v1/issues/{key}/subscribers/{session_id}", authAny, "Unsubscribe a session from an issue.", s.unsubscribeIssueSession},
 		{http.MethodGet, "/api/v1/issues/{key}/artifacts", authAny, "List an issue's documents and files.", s.listArtifacts},
 		{http.MethodPost, "/api/v1/issues/{key}/artifacts", authAny, fmt.Sprintf("Upload an issue document or file (JSON or multipart). A text/markdown upload is a document; any other is an image only when its bytes are a PNG, JPEG, GIF or WebP, stored under the type its bytes are whatever was declared, and otherwise a file under its declared type. A name no artifact has yet is 400 INVALID_ARTIFACT when it, or the reference key <owner>/<slug> it gives the new artifact, is over %d bytes; an upload under an existing artifact's name is never refused for its length.", maxNewArtifactKeyBytes), s.uploadArtifact},
-		{http.MethodGet, "/api/v1/issues/{key}/results", authAny, "The checks of the issue's Verification document in document order, each with its attributes (when, surface, run, negative_control), the version its words last changed in and their digest, and every result recorded against it from any issue, newest first: {issue, verification_artifact_id, checks}. Each result carries currency: current (its commit is the head of an open pull request attributed to the check's issue or the final head of a merged one, or, for an after_merge or default_branch check, a commit on the default branch of that issue's repository, and the check's words have not changed since), older, or unknown (the check's issue resolves to no repository, or Dispatch's GitHub App cannot read it). An issue with no Verification document answers no checks.", s.listCheckResults},
-		{http.MethodPost, "/api/v1/issues/{key}/results", authAny, "Record one result of one check: {check, role, verdict, commit, surface?, run?, observed?, negative_control?, failed?, skipped?, excluded?, screenshots?}. {key} is the issue the result is recorded on; check names a check block of its Verification document or of one of its ancestors', by block id or, when a block id is not unique in that set, by its canonical reference (409 CHECK_AMBIGUOUS); any other id is 400 UNKNOWN_CHECK. role is at most 32 characters of a-z and -, verdict is pass or fail, commit is 40 lowercase hex, and the counts default to 0; a pass counting any failed, skipped or excluded case is 400 RESULT_CONTRADICTS. A screenshot names an image document of the recording issue or of the check's issue. The result is appended as result.recorded on the check's issue. A closed issue, recording or the check's, takes a result only for a check whose when is after_merge or default_branch; every other result there is 409 ISSUE_CLOSED. The answer is {result, line}, line being the pull-request body line the result implies, which carries no link to Dispatch.", s.recordCheckResult},
+		{http.MethodGet, "/api/v1/issues/{key}/results", authAny, "The checks of the issue's Verification document in document order, each with its attributes (when, surface, run, negative_control), the version its words last changed in and their digest, and every result recorded against it from any issue, newest first: {issue, verification_artifact_id, checks}. A check's results come newest first by created_at, the time the recording transaction began, with id descending breaking a tie, and a client reading one result per check reads the first; two results recorded in transactions that overlapped can come back in either order. Each result carries currency: current (its commit is the head of an open pull request attributed to the check's issue or the final head of a merged one, or, for an after_merge or default_branch check, a commit on the default branch of that issue's repository, and the check's words have not changed since), older, or unknown (the check's issue resolves to no repository, or Dispatch's GitHub App cannot read it). An issue with no Verification document answers no checks.", s.listCheckResults},
+		{http.MethodPost, "/api/v1/issues/{key}/results", authAny, "Record one result of one check: {check, role, verdict, commit, surface?, run?, observed?, negative_control?, failed?, skipped?, excluded?, screenshots?}. {key} is the issue the result is recorded on; check names a check block of its Verification document or of one of its ancestors', by block id or, when a block id is not unique in that set, by its canonical reference (409 CHECK_AMBIGUOUS); any other id is 400 UNKNOWN_CHECK. role is at most 32 characters of a-z and -, verdict is pass or fail, commit is 40 lowercase hex, and the counts default to 0; a pass counting any failed, skipped or excluded case is 400 RESULT_CONTRADICTS. A commit the repository the check's issue resolves to does not hold is 400 RESULT_COMMIT_UNKNOWN, naming the commit and that owner/repo; a repository Dispatch cannot read, or none at all, stores the result as before. A screenshot names an image document of the recording issue or of the check's issue. The result is appended as result.recorded on the check's issue. A closed issue, recording or the check's, takes a result only for a check whose when is after_merge or default_branch; every other result there is 409 ISSUE_CLOSED. The answer is {result, line}, line being the pull-request body line the result implies, which carries no link to Dispatch.", s.recordCheckResult},
 		{http.MethodGet, "/api/v1/issues/{key}/coverage", authAny, "What each requirement of the issue's spec lacks: {issue, spec_artifact_id, has_plan, requirements, gaps}. A requirement is a `requirement` block of the spec; requirements lists them in document order, each with its reference, its words, and how many `check` and `plan_task` blocks of any document of the issue or of any descendant issue, at any status, name it in serves. gaps is one line per gap - `<block id> has no check`, and `<block id> has no plan task` only once the issue has a plan document - or the single line `the spec marks no requirements` for a spec that marks none. Nothing is ever refused for a gap. This is not GET /api/v1/search/coverage, which reports how much of what meaning search ranks carries a vector.", s.getIssueCoverage},
 		{http.MethodPost, "/api/v1/issues/{key}/messages", authAny, "Post an issue message; target and delivery address a session or role. A reply names the message it answers in in_reply_to, and one block of it in in_reply_to_block.", s.createMessage},
 		{http.MethodGet, "/api/v1/issues/{key}/messages", authAny, "List an issue's message threads: every root message, oldest first, each with its deliveries and its replies.", s.listIssueMessages},
@@ -381,7 +595,7 @@ func (s *server) routes() []apiRoute {
 		{http.MethodGet, "/api/v1/issues/{key}/handoffs/{phase}/latest", authAny, "The newest handoff of one phase of an issue with its body, the exact text written; 404 HANDOFF_NOT_FOUND when the phase has none. A closed issue's read too.", s.getLatestHandoff},
 		{http.MethodGet, "/api/v1/handoffs/{id}", authAny, "One handoff by id with its body, the exact text written; 404 HANDOFF_NOT_FOUND when there is none, 400 HANDOFF_ID_INPUT for an id that is not a uuid.", s.getHandoff},
 		{http.MethodGet, "/api/v1/messages/{id}", authAny, "Read the conversation a message belongs to by any message id in it, issue-less or not: the thread root with its deliveries and every reply, oldest first. An issue thread follows the issue's rule. A direct (issue-less) thread is read whole by a credential holding the person scope, since the conversation is that person's own; every other credential names its session in ?session= and reads only one whose root targets that session or that it replied in (403 THREAD_FORBIDDEN), a guard against reading another session's conversation by mistake, not an authorization boundary. Direct-conversation text also reaches every authenticated caller through that caller's events view on GET /ws/live; nothing in Dispatch restricts it by session.", s.getMessageThread},
-		{http.MethodGet, "/api/v1/messages/{id}/blocks", authAny, "A message's current blocks in body order: {item, indexed, blocks: [{id, type, text, ref, from, to}]}, item the message's graph node, from and to UTF-16 code units into its stored body, ref absent for a direct message's block (it has no address). Read under GET /api/v1/messages/{id}'s rule: a credential without the person scope reading a direct message names its session in ?session= (400 SESSION_REQUIRED, 403 THREAD_FORBIDDEN). While the message is owed a block index, indexed is false and blocks empty; the read writes nothing.", s.getMessageBlocks},
+		{http.MethodGet, "/api/v1/messages/{id}/blocks", authAny, "A message's current blocks in body order: {item, indexed, blocks: [{id, type, text, ref, from, to, embedding}]}, item the message's graph node, from and to UTF-16 code units into its stored body, ref absent for a direct message's block (it has no address), embedding where meaning search stands on the block (embedded, pending, or none while no window covers it). Read under GET /api/v1/messages/{id}'s rule: a credential without the person scope reading a direct message names its session in ?session= (400 SESSION_REQUIRED, 403 THREAD_FORBIDDEN). While the message is owed a block index, indexed is false and blocks empty; the read writes nothing.", s.getMessageBlocks},
 		{http.MethodPost, "/api/v1/messages/{id}/deliveries", authAny, "Retry delivering a targeted message.", s.createDelivery},
 		{http.MethodPost, "/api/v1/messages/{id}/deliveries/{attempt}/accept", authBearer, "The attempt's session records that it took the message as its user's own turn; the session names itself in actor (403 ACCEPT_FORBIDDEN for another's attempt). One compare-and-set: only a direct message to that session, on no issue, neither a broadcast's copy nor a reply in a broadcast's thread, in a thread whose root targets it (409 ACCEPT_NOT_DIRECT), that a person wrote (409 ACCEPT_NOT_WRITTEN_BY_PERSON), sent as a Send or an Aside (409 ACCEPT_NOT_ASIDE_OR_STEER); only the message's latest attempt (409 ACCEPT_SUPERSEDED), when no attempt of it was accepted before (409 ACCEPT_ALREADY_ACCEPTED), which a person requested (409 ACCEPT_NOT_REQUESTED_BY_PERSON), that person being the message's author (409 ACCEPT_NOT_REQUESTED_BY_AUTHOR), which did not fail (409 ACCEPT_FAILED; a pending or sent attempt is taken), within the last minute (409 ACCEPT_STALE). Answers the attempt with accepted_at and accepted_as and the message's stored body; leaves the attempt's state to the send, and appends message.accepted.", s.acceptDelivery},
 		{http.MethodPost, "/api/v1/messages/{id}/reply", authBearer, "The targeted session's reply to a delivery; the session names itself in actor. Once the attempt is answered, ?follow_up=true posts other text as the session's follow-up, threaded under its first reply; with follow_up=false or absent, or with text the session already posted there, nothing is posted and the stored message comes back marked duplicate. Any other follow_up is 400 MESSAGE_INPUT.", s.replyMessage},
@@ -390,8 +604,11 @@ func (s *server) routes() []apiRoute {
 		{http.MethodGet, "/api/v1/me/replies", authAny, "The threads the caller wrote in (an ask, a comment thread, an issue message thread) where someone else has written since the caller last read it, newest reply first, less an open ask the Inbox lists: each row names the thread, its owner, its subject, its root's deep link and the newest reply's author, first line and time. ?issue= or ?artifact= narrows to one owner (both is 400 INVALID_QUERY); pages with limit (1-200, default 50) and offset; {rows, total, limit, offset}.", s.listMyReplies},
 		{http.MethodPut, "/api/v1/me/threads/{id}/read", authAny, "Move the caller's read mark on one thread forward to {read_through} (RFC3339; stored as no later than now; more than a minute ahead of the server is 400 INVALID_STATE). It only moves forward; a thread the caller never wrote in writes nothing; 204 either way. A non-uuid id is 400 THREAD_ID_INPUT.", s.putThreadRead},
 		{http.MethodGet, "/api/v1/search", authAny, fmt.Sprintf("Full-text search ?q= across issues, documents, asks, comments, and messages, within ?project= when given: each kind ranked on its own and merged by reciprocal rank fusion, one page of ?limit= (1-50, default 20) from ?offset=, with the total match count and how many the pages can reach (each kind's best %d); a q over %d characters is 400 CAP_EXCEEDED, and a project that is not a project key is 400 INVALID_PROJECT.", contracts.SearchKindDepth, contracts.SearchQueryMax), s.search},
-		{http.MethodGet, "/api/v1/search/coverage", authAny, "Meaning search's coverage {identity, place, model, total, kinds}: the configured embedder's identity, its place (bedrock or azure) and model, all three null with none configured; then, in total and for each kind (issue, document, comment, ask, message), the searchable items, how many carry a current vector from that identity, how many lack one, how many failed for good, and how many seconds the oldest lacking item has waited (null when none lacks).", s.searchCoverage},
+		{http.MethodGet, "/api/v1/search/coverage", authAny, "Meaning search's coverage {identity, place, model, total, kinds}: the configured embedder's identity, its place (bedrock, azure, or dev for a local harness) and model, all three null with none configured; then, in total and for each kind (issue, document_block, comment_block, message_block, ask_part), the searchable items, how many carry a current vector from that identity, how many lack one, how many failed for good, and how many seconds the oldest lacking item has waited (null when none lacks).", s.searchCoverage},
 		{http.MethodGet, "/api/v1/related-checks", authAny, "Count the related-item checks recorded when an issue, an ask or a new decision block was written, within [from, to) (RFC3339, each optional) and of ?project= and ?source_kind= (issue, ask or decision_block; any other is 400 INVALID_QUERY) when given: {project, source_kind, from, to} echo the filters (null when absent), total, by_source_kind, by_outcome (found, none, not_made), by_search (meaning_and_keywords, keywords_only, not_made), by_reason (each reason a check was not made or searched by keywords only), completed (found or none), skipped_for_time (reason timeout), and keyword_ms and total_ms each {count, p50, p95, max, over_300ms}: the checks holding that time, its discrete percentiles and largest value (null with no check), and how many took over 300 ms.", s.getRelatedChecks},
+		{http.MethodPost, "/api/v1/going/requests", authAny, fmt.Sprintf("Ask a question of what Dispatch holds {words, project}: records the question and answers 201 with its run - {id, author, project, words, created_at, ends_at}, whose ends_at is the %s the run has to answer in - and answers it behind that, each frame of the answer stored for GET /api/v1/going/requests/{id}/stream to carry. words is required (400 GOING_INPUT when it is blank) and at most %d characters (400 CAP_EXCEEDED); project is the project key the question is asked of, empty asking of every project (400 INVALID_PROJECT when it is not a key), and a credential scoped to one project asks only of that project. The run belongs to the credential that asked it, which the stream compares its reader with, so a credential that names nobody - the deployment's shared token - is refused 403 %s and records nothing: no reader of that run could ever be served it. With no model configured the run is recorded all the same and its stream carries the error frame %s, so a reader learns that from the stream, where every other failure of a run is reported, and not from a status of this route's own.", contracts.GoingRunWindow, contracts.GoingWordsMax, codeGoingAskerNamesNobody, contracts.GoingErrorNoModelConfigured), s.createGoingRequest},
+		{http.MethodGet, "/api/v1/going/requests/{id}/stream", authAny, fmt.Sprintf("One run's answer as server-sent events: each frame is `id:` its sequence, `event:` its name (%s, %s, %s, %s, %s, %s, %s) and `data:` the JSON that frame carries, flushed as it is written, and the stream ends on %s or %s. Last-Event-ID resumes after that sequence, so a reader that drops rereads nothing. Any pod serves it, since the frames are rows and not the memory of the process that took the POST: a run past its ends_at that stored no ending is ended by the reader itself, with the error %s, which is how a stream ends when the pod that took the POST is gone. A run the record does not hold, an id that is not a uuid, and a run that is another caller's are one answer, 404 %s, so an id tells a caller nothing it did not already know.", contracts.GoingEventText, contracts.GoingEventItem, contracts.GoingEventCut, contracts.GoingEventChanged, contracts.GoingEventNone, contracts.GoingEventEnd, contracts.GoingEventError, contracts.GoingEventEnd, contracts.GoingEventError, contracts.GoingErrorAnswerDidNotArrive, codeGoingRequestNotFound), s.streamGoingAnswer},
+		{http.MethodGet, "/api/v1/going/capability", authAny, "Whether this deployment has a text model configured: {model_configured} and nothing else, so no endpoint, deployment name or credential can appear in it. Any caller Dispatch admits reads it, a pod's own agent token included.", s.getGoingCapability},
 		{http.MethodGet, "/api/v1/agents", authAny, "Live sessions with roles, capabilities, open asks, and last activity, from Dispatch's copy of the Envoy listener's session list, at most 5 s old.", s.listAgents},
 		{http.MethodGet, "/api/v1/agents/{session_id}/answers", authAny, "What people wrote that Dispatch delivered to one session, newest first by at, then by id: each ask's current answer (replaced when it changed an earlier answer), each comment at its current body (edited_at when edited; a resolved comment stays) and each message, once however it arrived. It reads the ask.answered, comment.created, message.created and message.answered events a person wrote whose published_destinations hold the session's own topic, the session's sent message deliveries (targeted and broadcast messages) and its sent comment deliveries (mentions); it never lists an agent's or the system's words, an ask's resolution or hand-back, or a delivery to a role: route's topic. Each item names its relation to the session (mentioned_you over replied_on_your_ask over replied_in_a_comment_thread over commented_on_a_document over commented_on_an_issue for a comment; replied_to_your_message over sent_you_a_message for a message; answered_your_ask for an answer), the ask and its whole question on an answer and on a reply in an ask's thread, its owner, dispatch:// ref and href (null owner and ref, and /agents/<session_id>/live, for a direct message). ?since= (RFC3339, default 72 hours ago; older than 7 days or in the future is 400 INVALID_QUERY) starts the window; ?max_chars= (1-100000, else 400 INVALID_QUERY) stops the list after the item whose text takes the running sum of text lengths (UTF-16 units) past it, while total counts every item in the window; {session_id, since, total, items}. A session_id that is not a session id is 400 INVALID_SESSION_ID, as on the agent artifact routes. Not an authorization boundary: direct-message text already reaches every authenticated caller through GET /api/v1/events, and a person may read any session's list.", s.listSessionAnswers},
 		{http.MethodGet, "/api/v1/agents/{session_id}/messages", authAny, "A session's targeted messages, newest first.", s.listAgentMessages},
@@ -418,7 +635,7 @@ func (s *server) routes() []apiRoute {
 		{http.MethodPost, "/api/v1/comments/{id}/resolve", authAny, "Resolve a comment thread.", s.resolveComment},
 		{http.MethodPost, "/api/v1/comments/{id}/reopen", authAny, "Reopen a resolved comment thread.", s.reopenComment},
 		{http.MethodGet, "/api/v1/comments/{id}", authAny, "Read one comment with its thread.", s.getComment},
-		{http.MethodGet, "/api/v1/comments/{id}/blocks", authAny, "A comment's current blocks in body order: {item, revision, indexed, blocks: [{id, type, text, ref, from, to, changed_revision, changed_at}]}, item the comment's graph node, revision its indexed revision, from and to UTF-16 code units into its stored body, changed_revision and changed_at the revision its block's text last changed in. While the comment is owed a block index, or was indexed from another body than it stores, indexed is false and blocks empty; the read writes nothing. A non-uuid id is 400 COMMENT_ID_INPUT.", s.getCommentBlocks},
+		{http.MethodGet, "/api/v1/comments/{id}/blocks", authAny, "A comment's current blocks in body order: {item, revision, indexed, blocks: [{id, type, text, ref, from, to, changed_revision, changed_at, embedding}]}, item the comment's graph node, revision its indexed revision, from and to UTF-16 code units into its stored body, changed_revision and changed_at the revision its block's text last changed in, embedding where meaning search stands on the block (embedded, pending, or none while no window covers it). While the comment is owed a block index, or was indexed from another body than it stores, indexed is false and blocks empty; the read writes nothing. An id written short - 8 characters or more of the hex digits and hyphens an id starts with - names the one comment that carries it, is 409 ID_AMBIGUOUS where two or more do, and is 404 NOT_FOUND where none does; any other non-uuid id is 400 COMMENT_ID_INPUT.", s.getCommentBlocks},
 		{http.MethodPost, "/api/v1/comments/{id}/deliveries", authAny, "Retry a comment mention delivery; target is required when it has multiple mentions.", s.createCommentDelivery},
 		{http.MethodPost, "/api/v1/comments/{id}/reply", authBearer, "The mentioned session's reply to a delivery; the session names itself in actor.", s.replyComment},
 		{http.MethodPost, "/api/v1/comments/{id}/accept", authAny, "Accept a suggestion, applying its replacement.", s.acceptComment},
@@ -438,7 +655,7 @@ func (s *server) routes() []apiRoute {
 		{http.MethodPost, "/api/v1/artifacts/{id}/reviews", authAny, "Approve or request changes on a document's latest settled version; answers the open approval ask when present, preserving its thread, and reviews every document that ask named.", s.createArtifactReview},
 		{http.MethodPost, "/api/v1/artifacts/{id}/plan-reviews", authAny, "Record a plan review's approval of a plan version: {version}, on an issue's plan.md alone (409 NOT_PLAN_DOCUMENT otherwise). A plan is never sent to a person for approval, so POST /api/v1/artifacts/{id}/approval-requests refuses it with 409 PLAN_APPROVED_BY_REVIEW; a later plan version makes this approval stale, as a spec's goes stale.", s.createArtifactPlanReview},
 		{http.MethodPost, "/api/v1/artifacts/{id}/approval-requests", authAny, "Open an approval ask for a document's latest version, with an optional summary, and with include_verification for the issue's Verification document beside it (409 NO_VERIFICATION_DOCUMENT when it has none), each at its own current version; the answer reviews every document the ask names. include_verification is for the issue's spec alone: on any other document, the Verification document itself included, it is 409 NOT_SPEC_DOCUMENT. A document a human approved before carries that approval on the ask (approval.approved: version, at, by). An open ask follows later versions of any document it names and waits on its agent until this route hands the same row back to a human. Every answer carries coverage, one line per requirement of the issue's spec with no check, or the single line `the spec marks no requirements` for a spec that marks none (GET /api/v1/issues/{key}/coverage), and none at all for a spec every requirement of which has a check; it is empty for a document that is not a spec, never names a missing plan task, and a gap refuses nothing. A coverage read that fails answers coverage_unread true and records the request all the same.", s.requestArtifactApproval},
-		{http.MethodGet, "/api/v1/artifacts/{id}/blocks", authAny, "A document's blocks with markdown ranges, tokens, and reference counts; a typed block carries attributes, its type's attributes in declaration order as its opening line writes them ({name, value, kind}, the value unescaped and unquoted and the kind the one the block schema declares it, so a reader follows a block[] value as the pointers it holds and reads every other kind as text), and a table block lists its rows and cells by the indexes delete_row and delete_column take.", s.getArtifactBlocks},
+		{http.MethodGet, "/api/v1/artifacts/{id}/blocks", authAny, "A document's blocks with markdown ranges, tokens, reference counts and each block's embedding, where meaning search stands on it (embedded, pending, or none while no window covers it); a typed block carries attributes, its type's attributes in declaration order as its opening line writes them ({name, value, kind}, the value unescaped and unquoted and the kind the one the block schema declares it, so a reader follows a block[] value as the pointers it holds and reads every other kind as text), and a table block lists its rows and cells by the indexes delete_row and delete_column take.", s.getArtifactBlocks},
 		{http.MethodGet, "/api/v1/artifacts/{id}/blocks/{block_id}", authAny, "Where one block stands in a document: its path from the top-level block down (type, id, child index), and for a table block, row or cell the table's id, the row index (0 is the header), the cell's column index, the text of the header cell drawn above it and the row's cells; 404 TARGET_NOT_FOUND for an id the live document does not hold.", s.getArtifactBlockPath},
 		{http.MethodPost, "/api/v1/artifacts/{id}/blocks/{block_id}/keep", authAny, "Record that the caller agrees with the decision that block opens, as the text they read it at: {text_sha256}, the decision's own text_sha256 from GET /api/v1/issues/{key}/decisions. A decision whose text changed since is 409 DECISION_CHANGED with nothing written, and a body without the sum is 400 INVALID_KEEP; a repeat of the sum as it stands moves the row. The block must be the heading block of a decision of an issue's decisions.md outside `## Replaced`: any other block is 404 TARGET_NOT_FOUND. Answers the keep and appends decision.kept, which wakes nobody.", s.keepDecision},
 		{http.MethodGet, "/api/v1/artifacts/{id}/text", authAny, "A document's canonical markdown and whole-document token.", s.getArtifactText},
@@ -481,8 +698,8 @@ func (s *server) routes() []apiRoute {
 	// The live-socket disconnect, live-socket rotate, quiesce and publish hooks (the 1st, 2nd, 3rd
 	// and 5th below) act on every process serving the database, answering once each has
 	// (test_hooks_fanout.go); outside-schema (the 4th) writes the stored history, which every
-	// process reads, and the slow-write arm (the 6th) delays the keyed writes of the process it
-	// armed, so each runs only where its call lands.
+	// process reads, and the room, room-counter, persistence and live-write hooks and the
+	// slow-write arm (the last) each act on the process whose call they land on.
 	if s.deps.TestHooksEnabled {
 		rows = append(rows,
 			routeRow{http.MethodPost, "/api/v1/live/_test/disconnect", authAny, "Test hook: close every open live socket on every process with 1012, as a restart does.", s.disconnectLiveSockets},
@@ -490,6 +707,12 @@ func (s *server) routes() []apiRoute {
 			routeRow{http.MethodPost, "/api/v1/artifacts/_test/quiesce", authAny, "Test hook: close every live document on every process and finish the settlements in flight.", s.quiesceDocuments},
 			routeRow{http.MethodPost, "/api/v1/artifacts/{id}/_test/outside-schema", authAny, "Test hook: write a crafted tree outside the Proof schema.", s.injectArtifactSchemaFailure},
 			routeRow{http.MethodPost, "/api/v1/agents/{session_id}/stream/_test/publish", authAny, "Test hook: publish one frame to a session's conversation viewers on every process.", s.publishAgentStreamFrame},
+			routeRow{http.MethodGet, "/api/v1/artifacts/_test/rooms", authAny, "Test hook: list the documents this process holds a room of.", s.listResidentRooms},
+			routeRow{http.MethodGet, "/api/v1/artifacts/{id}/_test/room-counters", authAny, "Test hook: count this process's room failures, lock-waiting compactions and room closes of a document, time its settlement resumptions of it, and read the awareness client entries its room holds now.", s.getRoomCounters},
+			routeRow{http.MethodPost, "/api/v1/artifacts/{id}/_test/hold-persistence", authAny, "Test hook: hold this process's appends of a document's browser updates for a duration.", s.holdRoomPersistence},
+			routeRow{http.MethodPut, "/api/v1/artifacts/{id}/_test/live-write-pauses/{point}", authAny, "Test hook: park the document's next live write at a point (after-first-append, after-commit).", s.armLiveWritePause},
+			routeRow{http.MethodGet, "/api/v1/artifacts/{id}/_test/live-write-pauses/{point}", authAny, "Test hook: wait until a live write parks at the armed pause.", s.awaitLiveWriteParked},
+			routeRow{http.MethodDelete, "/api/v1/artifacts/{id}/_test/live-write-pauses/{point}", authAny, "Test hook: release the live write parked at the pause and disarm it.", s.releaseLiveWritePause},
 			routeRow{http.MethodPost, "/api/v1/writes/_test/slow", authAny, "Test hook: {method, path, delay_ms} delays every keyed run of that method and path by delay_ms after its key is claimed, on the handler's own context; 0 disarms.", s.armSlowWrite},
 		)
 	}

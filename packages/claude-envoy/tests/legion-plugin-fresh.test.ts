@@ -6,8 +6,8 @@ import { buildLegionPlugin, claudeAgent } from "../scripts/build"
 
 // The daemon's boot requires legion/.claude-plugin/plugin.json under LEGION_CLAUDE_PLUGIN_DIR
 // (packages/daemon/internal/daemon/tools.go), and a Claude Code pane loads the directory with
-// --plugin-dir. It is generated from the repository's skills/ and pi-legion's agents, and only main's
-// Rebuild Claude Envoy plugin workflow commits it, so the test below reads a fresh generation.
+// --plugin-dir. It is generated from the repository's skills/ and pi-legion's agents, and nothing
+// commits it, so the test below reads a fresh generation.
 test("the Legion plugin is named legion, so its skills and agents load as legion:<name>", async () => {
   const scratch = await mkdtemp(join(tmpdir(), "claude-envoy-legion-"))
   try {
@@ -16,6 +16,12 @@ test("the Legion plugin is named legion, so its skills and agents load as legion
       await readFile(join(scratch, ".claude-plugin", "plugin.json"), "utf8"),
     ) as { readonly name: string }
     expect(manifest.name).toBe("legion")
+    // The reviewer's pair ships in this package, not in the generated plugin, so its agents must
+    // name the rubric as claude-envoy:<skill>: a legion:<skill> there resolves to nothing.
+    for (const agent of ["thermonuclear-deep-review", "thermonuclear-code-quality"]) {
+      const text = await readFile(join(scratch, "agents", `${agent}.md`), "utf8")
+      expect(text).toContain(`skills: [claude-envoy:${agent}]`)
+    }
   } finally {
     await rm(scratch, { recursive: true, force: true })
   }
@@ -31,14 +37,16 @@ test("an agent's tools take Claude Code's names, and its autoloaded skills its s
     "# a comment about the model role",
     'model: ["@deep"]',
     "tools: read, glob, grep, bash, edit, write, todo",
-    "autoloadSkills: [legion-worker, ce-simplify-code]",
+    "autoloadSkills: [legion-worker, simplify-settled-diff]",
     "color: cyan",
     "---",
     "",
     "The body, kept as it is: read, glob.",
     "",
   ].join("\n")
-  expect(claudeAgent("worker.md", source)).toBe(
+  expect(
+    claudeAgent("worker.md", source, new Set(["legion-worker", "simplify-settled-diff"])),
+  ).toBe(
     [
       "---",
       "name: worker",
@@ -46,7 +54,7 @@ test("an agent's tools take Claude Code's names, and its autoloaded skills its s
       "  Two lines",
       "  of description.",
       "tools: Read, Bash, Edit, Write",
-      "skills: [legion:legion-worker, legion:ce-simplify-code]",
+      "skills: [legion:legion-worker, legion:simplify-settled-diff]",
       "color: cyan",
       "---",
       "",

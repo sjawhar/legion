@@ -53,6 +53,8 @@ import { CopyRefButton } from "../refs/CopyRefButton";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { buildIssuePath, documentItemPath, sessionOfAddress } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
+import { textSourceOf } from "../refs/text-references";
+import { Unfurl } from "../refs/Unfurl";
 import { useMarkThreadRead } from "../replies/useMarkThreadRead";
 import { PHONE_VIEWPORT_QUERY, useDialog, useMediaQuery } from "../shell/useDialog";
 import { type DwellRef, useDwell } from "../shell/useDwell";
@@ -186,7 +188,7 @@ function ConversationReply({
   replyDisabled,
   root,
 }: {
-  agents: readonly Agent[];
+  agents: readonly Agent[] | undefined;
   currentReplyId: string | undefined;
   isClosed: boolean;
   issueKey: string;
@@ -217,7 +219,12 @@ function ConversationReply({
       actions={<CopyRefButton route={{ id: reply.id, key: issueKey, kind: "message" }} />}
       at={reply.created_at}
       author={reply.author}
-      body={<MarkdownBody markdown={reply.body} />}
+      body={
+        <>
+          <MarkdownBody markdown={reply.body} source={textSourceOf("message", reply.id)} />
+          <Unfurl body={reply.body} source={textSourceOf("message", reply.id)} />
+        </>
+      }
       current={reply.id === currentReplyId}
       markRef={markRef}
       delivery={
@@ -263,7 +270,7 @@ function Thread({
   replyDisabled,
   root,
 }: {
-  agents: readonly Agent[];
+  agents: readonly Agent[] | undefined;
   currentReplyId: string | undefined;
   isClosed: boolean;
   issueKey: string;
@@ -318,7 +325,7 @@ function MessageTurn({
   register,
   replyDisabled,
 }: {
-  agents: readonly Agent[];
+  agents: readonly Agent[] | undefined;
   current: boolean;
   currentReplyId: string | undefined;
   isClosed: boolean;
@@ -346,7 +353,8 @@ function MessageTurn({
             <Timestamp at={item.root.created_at} />
             {item.unread ? <UnreadMark /> : null}
           </p>
-          <MarkdownBody markdown={item.root.body} />
+          <MarkdownBody markdown={item.root.body} source={textSourceOf("message", item.root.id)} />
+          <Unfurl body={item.root.body} source={textSourceOf("message", item.root.id)} />
         </div>
         <TurnActions>
           <CopyRefButton route={{ id: item.root.id, key: issueKey, kind: "message" }} />
@@ -522,7 +530,7 @@ function CommentDeliveryList({
   onRetry,
   retrying,
 }: {
-  agents: readonly Agent[];
+  agents: readonly Agent[] | undefined;
   deliveries: readonly CommentDeliveryAttempt[];
   disabled: boolean;
   onRetry: (delivery: CommentDeliveryAttempt) => void;
@@ -616,7 +624,9 @@ function CommentTurn({
   viewerLogin,
 }: {
   actionFailure: CommentActionFailure | undefined;
-  agents: readonly Agent[];
+  /** The roster delivery capabilities are judged against; `undefined` while the agent list's
+   *  read is not current, when every capability is unknown (`capabilitiesForTarget`). */
+  agents: readonly Agent[] | undefined;
   issueArtifacts: ConversationTabProps["issueArtifacts"];
   composerClassName?: string;
   current: boolean;
@@ -806,7 +816,7 @@ function TargetedMessageTurn({
   register,
   replyDisabled,
 }: {
-  agents: readonly Agent[];
+  agents: readonly Agent[] | undefined;
   current: boolean;
   currentReplyId: string | undefined;
   isClosed: boolean;
@@ -839,7 +849,8 @@ function TargetedMessageTurn({
             <CopyRefButton route={{ id: item.root.id, key: issueKey, kind: "message" }} />
             {item.unread ? <UnreadMark /> : null}
           </p>
-          <MarkdownBody markdown={item.root.body} />
+          <MarkdownBody markdown={item.root.body} source={textSourceOf("message", item.root.id)} />
+          <Unfurl body={item.root.body} source={textSourceOf("message", item.root.id)} />
         </>
       }
       canAside={capabilities?.includes("aside") !== false}
@@ -1057,7 +1068,10 @@ export function ConversationTab({
     onFirstPlacement,
     ownSendCount,
   });
-  const { agents } = useAgents(visible);
+  const { agents: listedAgents, current: agentsCurrent } = useAgents(visible);
+  // Delivery capabilities come only from a current list: one that is refilling or unreachable
+  // leaves every mode unknown, never "not supported".
+  const agents = agentsCurrent ? listedAgents : undefined;
   const scrolledToFocus = useRef<string | undefined>(undefined);
 
   useEffect(() => {

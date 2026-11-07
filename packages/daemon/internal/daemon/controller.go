@@ -106,6 +106,12 @@ func (k *controllerKeeper) keep() error {
 	var request supervise.Event
 	switch state := m.Claim().State; state {
 	case supervise.StateQueued:
+		// No request of this keeper marks itself exempt from the wake pacing, this spawn
+		// included: the machine exempts the controller's claim by identity, which covers the
+		// launches no request raises as well (supervise's reserveWake, claim.IsController). The
+		// controller is the one session the operator's own read of a running wave relies on, so
+		// it comes up ahead of the queue it is reading: holding it behind a wave of workers
+		// would leave nobody able to say what that wave is doing.
 		request = supervise.RequestSpawn{Claim: token}
 	case supervise.StateSuspended:
 		// The daemon keeps its controller running by rule, which holds an operator's suspension:
@@ -240,7 +246,7 @@ func watchController(ctx context.Context, st *store.Store, cfg config.Config, p 
 	launched := cfg.ControllerLaunch == config.ControllerLaunchDaemon
 	log = log.With("mode", string(cfg.ControllerLaunch))
 	prober := controller.NewProber(controller.ProberOptions{
-		EnvoyURL: cfg.EnvoyURL, EnvoyToken: p.secrets["ENVOY_TOKEN"], Project: p.project, BootTimeout: cfg.WorkerBootTimeout, Log: log,
+		EnvoyURL: cfg.EnvoyURL, EnvoyToken: p.secrets["ENVOY_TOKEN"], Project: p.project, Log: log,
 	})
 	ticker := time.NewTicker(p.orphanSweep)
 	defer ticker.Stop()
@@ -258,7 +264,7 @@ func watchController(ctx context.Context, st *store.Store, cfg config.Config, p 
 			liveness = prober.Probe(ctx, record.Session)
 		}
 		switch liveness {
-		case controller.Alive:
+		case controller.Live:
 			logged = time.Time{}
 		case controller.Gone:
 			if logged.IsZero() || time.Since(logged) >= cfg.WorkerBootTimeout {

@@ -295,6 +295,9 @@ type Client struct {
 
 	reconnectHooksMu sync.Mutex
 	reconnectHooks   []func(*nats.Conn) error
+	// disconnectHooks run on each disconnect of the client's connection (AddDisconnectHook), under
+	// reconnectHooksMu as the reconnect hooks are.
+	disconnectHooks []func()
 	// drainHooks run once in Drain, after the delivery subscriptions and before the connection's
 	// own drain (AddDrainHook), under reconnectHooksMu as the reconnect hooks are.
 	drainHooks []func(context.Context)
@@ -447,7 +450,7 @@ func newClient(urls []string, ownsStream bool, opts connectOpts) (*Client, error
 	}
 	stream := opts.streamConfig()
 	dial := func(first nats.Option) (*nats.Conn, error) {
-		return connect(c.name, urls, allOf(c.connectionSettings, first), dialer, c.onReconnect, c.connectionChanged, c.onClosed, c.onAsyncError, c.reconnectErrClock)
+		return connect(c.name, urls, allOf(c.connectionSettings, first), dialer, c.onReconnect, c.onDisconnect, c.onClosed, c.onAsyncError, c.reconnectErrClock)
 	}
 	if opts.background {
 		c.awaitingConnection = true
@@ -565,8 +568,10 @@ func (c *Client) Connected() bool {
 	return c.Conn != nil && c.Conn.Status() == nats.CONNECTED
 }
 
-// currentConn is the client's connection now, read under its lock.
-func (c *Client) currentConn() *nats.Conn {
+// Connection is the client's connection now, read under its lock. A KV handle opened outside this
+// package is opened on it (OpenKeyValue, roles.Buckets), and so is re-opened on the replacement
+// after a connection event.
+func (c *Client) Connection() *nats.Conn {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.Conn
@@ -1280,7 +1285,7 @@ func (c *Client) ensureConnWithContext(ctx context.Context) error {
 			continue
 		}
 
-		nc, err := connectWithContext(ctx, c.name, c.urls, c.connectionSettings, c.dialer, c.onReconnect, c.connectionChanged, c.onClosed, c.onAsyncError, c.reconnectErrClock)
+		nc, err := connectWithContext(ctx, c.name, c.urls, c.connectionSettings, c.dialer, c.onReconnect, c.onDisconnect, c.onClosed, c.onAsyncError, c.reconnectErrClock)
 		if err != nil {
 			return err
 		}
@@ -1375,10 +1380,8 @@ var ErrInvalidKey error = refusal("not a key nats.go accepts")
 // holds its byte limit (WithStreamMaxBytes): a full stream refuses new messages rather than drop
 // stored ones (streamCfg). It is not an ErrRefused: the same publish is taken once age has made
 // room or an operator raised the limit, so a caller retries it as any other failure, and the
-// webhook listener answers it 503, which GitHub redelivers. On a clustered stream, a retry under
-// the same MsgId is acknowledged a duplicate of the refused message instead (ErrNotStored), and
-// goes once more without the id, which the stream stores once it has room. The error still
-// matches nats-server's *nats.APIError.
+// webhook listener answers it 503, which GitHub redelivers. The error still matches nats-server's
+// *nats.APIError.
 var ErrStreamFull = errors.New("stream " + Stream + " is full")
 
 // jsStreamStoreFailed is nats-server's code for a message the stream did not store
@@ -1398,34 +1401,6 @@ func streamFull(err error) error {
 		return fmt.Errorf("%w: %w", ErrStreamFull, err)
 	}
 	return err
-}
-
-// ErrNotStored names a JetStream acknowledgement of a duplicate with no sequence: a repeat of a
-// message id the stream holds no message for. A clustered nats-server (v2.10.29 among them)
-// records a message id at sequence 0 before its store runs, and keeps that record on the stream's
-// leader, a purge notwithstanding, for the whole duplicate window when the store refuses the
-// message, as a full stream's does (ErrStreamFull), so every later publish under the id is
-// acknowledged `{"seq":0,"duplicate":true}` though nothing was stored; a repeat of a message still
-// being stored is acknowledged the same way. Publish and a window's send answer that
-// acknowledgement by sending the same envelope once more without its id, which no record matches:
-// the publish succeeds once that send is stored, at a sequence of its own, and otherwise fails
-// with an error wrapping ErrNotStored and that send's own error (ErrStreamFull while the stream is
-// still full), which is not an ErrRefused and never a success, so a caller retries it as any other
-// failure. The stream's MsgId drops no copy sent without the id: such a send stores a second copy
-// of a message that was still being stored, and once a refused message is stored without its id,
-// every later publish under that id stores another copy for as long as the leader keeps the record
-// (the duplicate window, or until the leader changes). A consumer of the stream sees each copy and
-// must drop the repeat itself.
-var ErrNotStored = errors.New("stream " + Stream + " acknowledged a duplicate of a message it does not hold")
-
-// notStored is ErrNotStored for ack, a JetStream acknowledgement, when it names a duplicate with no
-// sequence, and nil for one that names the message's sequence. Its caller then sends the envelope
-// again without its id.
-func notStored(ack *nats.PubAck) error {
-	if ack.Duplicate && ack.Sequence == 0 {
-		return ErrNotStored
-	}
-	return nil
 }
 
 // maxSubjectBytes bounds a subject the bus publishes on, or a KV call builds from a key. The server
@@ -1461,7 +1436,7 @@ func validSubject(subject string) bool {
 // would.
 func (c *Client) refused(err error, size int) error {
 	if errors.Is(err, nats.ErrMaxPayload) {
-		conn := c.currentConn()
+		conn := c.Connection()
 		return fmt.Errorf("%w: an envelope of %d bytes against the server's max payload of %d bytes",
 			ErrTooLarge, size, conn.MaxPayload())
 	}
@@ -1505,9 +1480,7 @@ func (c *Client) PublishWithin(ctx context.Context, item contracts.Envelope) err
 // True means "the stream already held this MsgId", not "this call published
 // nothing new": the reconnect retry below republishes after a failure that may
 // have landed, so the very publish that put the message on the subject can come
-// back a duplicate. A duplicate acknowledged with no sequence, of a message the
-// stream does not hold (ErrNotStored), is never true: the envelope goes once more
-// without its MsgId (publishJetStream), and a store of that is false.
+// back a duplicate.
 func (c *Client) PublishReportingDuplicate(item contracts.Envelope) (bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), publishBound)
 	defer cancel()
@@ -1551,12 +1524,6 @@ func (c *Client) PublishStoredAs(ctx context.Context, subject string, item contr
 // keeps the parent's deadline when that is the earlier one; publishBound is what bounds a caller
 // that passed none. The acknowledgement wait is still taken from publishAcknowledgementClock, the
 // seam a test uses to expire that bound without spending it.
-//
-// An acknowledgement of a duplicate with no sequence (ErrNotStored) names an id the server holds
-// at sequence 0 with no message under it, which on a clustered nats-server 2.10 lasts the whole
-// duplicate window once a full stream refused the message. So the same envelope goes once more,
-// within the same bound, without the MsgId: stored, the publish succeeds; refused, its error wraps
-// ErrNotStored and that send's own error.
 //
 // A publish the server refuses under the connection's own publish permissions is answered
 // ErrPublishDenied, as a publish window's sends are (window.acknowledged): a denied JetStream
@@ -1612,14 +1579,6 @@ func (c *Client) publishJetStreamOn(ctx context.Context, subject string, item co
 	ack, err := c.sendStored(ctx, subject, data, options...)
 	if err != nil {
 		return false, err
-	}
-	if err := notStored(ack); err != nil {
-		// The server holds the id at sequence 0 and no message under it, so the same envelope
-		// goes once more without the id, which no duplicate record can match.
-		if _, sendErr := c.sendStored(ctx, subject, data, nats.Context(ctx)); sendErr != nil {
-			return false, fmt.Errorf("%w, and its publish without its id failed: %w", err, sendErr)
-		}
-		return false, nil
 	}
 	return ack.Duplicate, nil
 }
@@ -1823,6 +1782,23 @@ func (c *Client) RequestCoreTo(subject string, item contracts.Envelope, msgID st
 // connection that never came back within timeout); every returned forward must be waited for, which
 // releases its reply subscription.
 func (c *Client) StartRequestCoreTo(subject string, item contracts.Envelope, msgID string, timeout time.Duration) (*PendingForward, error) {
+	return c.startForward(subject, item, msgID, timeout, false)
+}
+
+// StartRequestStoredTo publishes a forward as StartRequestCoreTo does, under the same msgID rule,
+// for a recipient that answers nothing: a session past its live window (session.Unresponsive),
+// which is still registered and still has the stream's copy waiting for it, but sends no receipt
+// while it is stalled. Its Wait succeeds on the stream's acknowledgement alone, which is that
+// copy, and ignores any receipt. No acknowledgement by the deadline, the stream's error answer, or
+// the server's no-responders answer (nothing captured the subject) is ErrForwardNotStored (wrapping
+// the reason, and the one publishConfirmed could not confirm the publish for, when it could not).
+func (c *Client) StartRequestStoredTo(subject string, item contracts.Envelope, msgID string, timeout time.Duration) (*PendingForward, error) {
+	return c.startForward(subject, item, msgID, timeout, true)
+}
+
+// startForward is what both publish: the forward, its reply subscription and the pending wait,
+// with storedOnly deciding which replies that wait needs.
+func (c *Client) startForward(subject string, item contracts.Envelope, msgID string, timeout time.Duration, storedOnly bool) (*PendingForward, error) {
 	if err := checkSubject(subject); err != nil {
 		return nil, err
 	}
@@ -1851,20 +1827,24 @@ func (c *Client) StartRequestCoreTo(subject string, item contracts.Envelope, msg
 		_ = receipt.Unsubscribe()
 		return nil, err
 	}
-	return &PendingForward{receipt: receipt, deadline: deadline, unconfirmed: err}, nil
+	return &PendingForward{receipt: receipt, deadline: deadline, unconfirmed: err, storedOnly: storedOnly}, nil
 }
 
-// PendingForward is a forward StartRequestCoreTo published, whose replies Wait reads.
+// PendingForward is a forward StartRequestCoreTo or StartRequestStoredTo published, whose replies
+// Wait reads.
 type PendingForward struct {
 	receipt  *nats.Subscription
 	deadline time.Time
 	// unconfirmed is publishConfirmed's error for a publish it could not confirm, which the replies
 	// may still overrule; nil when it confirmed the publish.
 	unconfirmed error
+	// storedOnly is set for StartRequestStoredTo's forward, which needs no receipt.
+	storedOnly bool
 }
 
 // Wait reads the forward's replies until its outcome is known or its window ends, and releases its
-// reply subscription. Its errors are RequestCoreTo's.
+// reply subscription. Its errors are RequestCoreTo's for a forward StartRequestCoreTo published,
+// and StartRequestStoredTo's for one that published.
 func (f *PendingForward) Wait() error {
 	defer f.receipt.Unsubscribe()
 	received, stored := false, false
@@ -1880,6 +1860,10 @@ func (f *PendingForward) Wait() error {
 			break
 		}
 		if err != nil {
+			// The server's no-responders answer: nothing, not even a stream, took the forward.
+			if f.storedOnly && errors.Is(err, nats.ErrNoResponders) {
+				return fmt.Errorf("%w: %w", ErrForwardNotStored, err)
+			}
 			return err
 		}
 		if len(response.Data) == 0 && len(response.Header) == 0 {
@@ -1891,12 +1875,27 @@ func (f *PendingForward) Wait() error {
 				stored = true
 			}
 		}
+		if f.storedOnly {
+			if stored {
+				return nil
+			}
+			if refused != nil {
+				return fmt.Errorf("%w: %w", ErrForwardNotStored, refused)
+			}
+			continue
+		}
 		if received && stored {
 			return nil
 		}
 		if received && refused != nil {
 			return fmt.Errorf("%w: %w", ErrForwardNotStored, refused)
 		}
+	}
+	if f.storedOnly {
+		if f.unconfirmed != nil {
+			return fmt.Errorf("%w: %w", ErrForwardNotStored, f.unconfirmed)
+		}
+		return ErrForwardNotStored
 	}
 	if !received {
 		return cmp.Or(f.unconfirmed, ErrReceiptTimeout)
