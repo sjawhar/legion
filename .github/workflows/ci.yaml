@@ -1677,6 +1677,9 @@ jobs:
       - name: Check every remote action is pinned to a commit SHA
         run: .github/scripts/check-action-pins.sh
 
+      - name: Check every download retries at the floor, through the one rule that holds it
+        run: .github/scripts/check-download-retry.sh
+
       - name: Check no file names the private deployment repository, company, internal host, or tailnet host
         run: .github/scripts/check-private-names.sh
 
@@ -2096,6 +2099,9 @@ jobs:
       - name: Test the action pin check
         run: .github/scripts/check-action-pins.test.sh
 
+      - name: Test the download retry check
+        run: .github/scripts/check-download-retry.test.sh
+
       - name: Test the private-name check
         run: .github/scripts/check-private-names.test.sh
 
@@ -2211,8 +2217,21 @@ jobs:
 
       # The tmux runtime's tests drive a real tmux server and skip without one, and the daemon
       # supervises under tmux and refuses to start without it.
+      # Both apt phases retry through .github/scripts/ci-retry.sh, in e2e.yaml's spelling for the
+      # same runner image and the same indexes: five attempts, the last starting 150 s after the
+      # first. What bounds an attempt is the inner `sudo timeout`, not `timeout sudo`, so the
+      # signal reaches apt-get itself rather than a sudo holding it; retry_fetch's own bound sits
+      # five seconds above it and backstops the sudo alone. 90 s for the index read, which is the
+      # bound ci.yaml's Playwright step derives for these indexes, and 120 s for one package of a
+      # few megabytes. The unpack after the download takes no network and stays bare, so an
+      # attempt the bound kills never stops a dpkg run part way.
       - name: Install tmux
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends tmux
+        run: |
+          . .github/scripts/ci-retry.sh
+          retry_fetch "apt's package lists" 95 -- sudo timeout 90 apt-get update
+          retry_fetch "tmux" 125 -- \
+            sudo timeout 120 apt-get install -y --no-install-recommends -d tmux
+          sudo apt-get install -y --no-install-recommends tmux
 
       # The workspace and boundary tests drive a real jj, the one the worker image ships (its
       # working-copy filters are among what they plant), and the daemon resolves jj at boot and
