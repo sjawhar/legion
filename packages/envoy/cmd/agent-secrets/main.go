@@ -20,6 +20,7 @@
 //
 //	agent-secrets keygen --out <dir>
 //	agent-secrets enroll --helper --runtime-id <id> --thumbprint <tp> [--session-id <id>]
+//	agent-secrets enroll --pod --service <name> [--pod-token-file <file>] [--out <dir>]
 //	agent-secrets unenroll --helper --enrollment <id>
 //	agent-secrets machine login|login-status|list [--json]|revoke <credential_id>
 //	agent-secrets grant list [--json]|revoke <grant_id>
@@ -50,17 +51,20 @@
 // broker that the broker's own answer carries as approve_url. The exec form's child keeps
 // AGENT_SECRETS_URL, AGENT_SECRETS_KEY_DIR and AGENT_SECRETS_HELPER_SOCK, since it is the same
 // session (buildChildEnv). A machine session enrolls automatically through the helper's own
-// enroll loop, and a pod's own enrollment is its launcher's job — this CLI has no direct
+// enroll loop, and a Legion pod's enrollment is its daemon's job — this CLI has no direct
 // enrollment path for either; on a devbox only a session key a launcher holds (a box's) enrolls
 // through it, and only via --helper (the shared broker contract has no launcher bearer token:
 // nothing on a devbox can enroll except through a helper or the Legion daemon, the two processes
-// that hold a launcher's proof-signing key). The secret forms read AWS_PROFILE (or --profile) for
-// the person's AWS sign-in against an AWS broker, or their Google sign-in (their Application
-// Default Credentials, or their gcloud login) against a GCP one, and need no session identity at
-// all. The machine and grant forms act under this machine's login: the helper signs each call
-// with its launcher credential (sign-launcher) for a process it can show is outside every
-// registered session's process tree, the operator's own shell, and only for the broker's four
-// operator routes.
+// that hold a launcher's proof-signing key). One runtime enrols itself: a Kubernetes pod an
+// operator launches by hand (`enroll --pod`, pod.go). It holds no credential a person installed;
+// the projected service-account token its own kubelet mounts is what the broker trusts instead,
+// so it needs no helper, no launcher and no approval. The secret forms
+// read AWS_PROFILE (or --profile) for the person's AWS sign-in against an AWS broker, or their
+// Google sign-in (their Application Default Credentials, or their gcloud login) against a GCP
+// one, and need no session identity at all. The machine and grant forms act under this machine's
+// login: the helper signs each call with its launcher credential (sign-launcher) for a process
+// it can show is outside every registered session's process tree, the operator's own shell, and
+// only for the broker's four operator routes.
 package main
 
 import (
@@ -115,8 +119,8 @@ type command struct {
 var commands = []command{
 	{"keygen", "agent-secrets keygen --out <dir>",
 		"Write a new signing key to <dir>/key.pem and print its thumbprint. A box's launcher runs it\ninside the box before enrolling it."},
-	{"enroll", "agent-secrets enroll --helper --runtime-id <id> --thumbprint <tp> [--session-id <id>]",
-		"Enroll a session key a launcher holds (a box's) through this machine's agent-secrets-helper.\nIt writes the enrollment id to AGENT_SECRETS_KEY_DIR/enrollment and prints it, alone, on\nstdout."},
+	{"enroll", "agent-secrets enroll --helper --runtime-id <id> --thumbprint <tp> [--session-id <id>] | --pod --service <name> [--pod-token-file <file>] [--out <dir>]",
+		"Enroll a session key a launcher holds (a box's) through this machine's agent-secrets-helper,\nor, with --pod, enroll this Kubernetes pod itself, for the broker-side service --service\nnames: a pod proves who it is with the projected service-account token its own kubelet\nmounts (--pod-token-file, default " + defaultPodTokenFile + ").\nEach writes the enrollment id to AGENT_SECRETS_KEY_DIR/enrollment and prints it, alone, on\nstdout. --pod also writes key.pem there, reusing the one already in --out: a re-run keeps\nthat key's enrollment and renews its lease, and runs on one directory take turns. A pod keeps\nits own lease alive with the command --pod prints, which names the key directory because renew\nreads AGENT_SECRETS_KEY_DIR and never --out:\n`AGENT_SECRETS_KEY_DIR=<dir> agent-secrets renew --pod-token-file <file>`."},
 	{"unenroll", "agent-secrets unenroll --helper --enrollment <id>",
 		"End an enrollment `enroll --helper` made, through this machine's agent-secrets-helper."},
 	{"machine login", "agent-secrets machine login",
@@ -525,8 +529,8 @@ func selectSigner(dir string) (string, Signer, error) {
 		}
 		id, idErr := readTrimmed(filepath.Join(dir, enrollmentFile))
 		if idErr != nil {
-			if reason, rerr := readTrimmed(filepath.Join(dir, "enrollment.error")); rerr == nil {
-				return "", nil, fmt.Errorf("%w (enrollment.error: %s)", idErr, reason)
+			if reason, rerr := readTrimmed(filepath.Join(dir, enrollmentErrorFile)); rerr == nil {
+				return "", nil, fmt.Errorf("%w (%s: %s)", idErr, enrollmentErrorFile, reason)
 			}
 			return "", nil, idErr
 		}
@@ -549,15 +553,17 @@ func selectSigner(dir string) (string, Signer, error) {
 	} else if signer != nil {
 		return signer.enrollmentID, signer, nil
 	}
-	return "", nil, fmt.Errorf("no session identity: the key dir %s has no key.pem (AGENT_SECRETS_KEY_DIR; an agent box or pod is enrolled by its launcher), nobody has run `agent-secrets login` here, this machine proves no identity of its own (%s), and no helper socket is set or at %s (AGENT_SECRETS_HELPER_SOCK; a machine session is registered by `agent-secrets register`)", dir, brokerclient.IdentityVar, sock)
+	return "", nil, fmt.Errorf("no session identity: the key dir %s has no key.pem (AGENT_SECRETS_KEY_DIR; an agent box or a Legion pod is enrolled by its launcher, and a Kubernetes pod enrols itself with `agent-secrets enroll --pod`, which names this directory in the renewal command it prints), nobody has run `agent-secrets login` here, this machine proves no identity of its own (%s), and no helper socket is set or at %s (AGENT_SECRETS_HELPER_SOCK; a machine session is registered by `agent-secrets register`)", dir, brokerclient.IdentityVar, sock)
 }
 
 // machineSigner is the signer of a machine that proves an identity of its own and holds no
-// launcher and no helper — a pod, which nobody enrols. It trades that identity for a launcher
-// credential, registers a key it makes here under it, and writes the key, the enrollment and
-// the marker that says whose session this is into the key dir, so the next call of this
-// machine's takes the file branch above and trades nothing. It answers nil where this machine
-// proves no identity, which is every deployment that has not turned the exchange on.
+// launcher and no helper — a pod no launcher enrols, and which has not enrolled itself with
+// `enroll --pod` either, since that writes the key the branch above would have taken. It trades
+// that identity for a launcher credential, registers a key it makes here under it, and writes
+// the key, the enrollment and the marker that says whose session this is into the key dir, so
+// the next call of this machine's takes the file branch above and trades nothing. It answers
+// nil where this machine proves no identity, which is every deployment that has not turned the
+// exchange on.
 func machineSigner(dir string) (*fileSigner, error) {
 	identity, err := brokerclient.MachineIdentity(os.Getenv)
 	if err != nil || identity == nil {
