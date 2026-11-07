@@ -114,7 +114,7 @@ async function measure(
  * budget working as designed, not a defect. Every other check answers in microtasks alone under
  * `fakeHost`, so no timer can defer one and its row reads the same on any machine.
  */
-function passingNamesOffDisk(report: LegionCapabilityReportBody): string[] {
+function passingNamesExceptTheDiskCheck(report: LegionCapabilityReportBody): string[] {
   return report.rows
     .filter((row) => row.ok && row.name !== "repository-extensions")
     .map((row) => row.name);
@@ -193,7 +193,7 @@ describe("the report", () => {
     const row = report.rows.find((candidate) => candidate.name === "web-search");
     expect(row).toEqual({ name: "web-search", ok: false, detail: "did not finish within 20 ms" });
     expect(seen?.aborted).toBe(true);
-    expect(passingNamesOffDisk(report)).toEqual([
+    expect(passingNamesExceptTheDiskCheck(report)).toEqual([
       "subagents",
       "mcp",
       "dispatch-envoy-tools",
@@ -213,7 +213,7 @@ describe("the report", () => {
     // `host.run` answers neither row, so nothing but a budget can end them: had the report waited
     // on them, the only budget left to name would be the 60 ms check budget.
     expect(report.rows.map((row) => row.detail)).not.toContain("did not finish within 60 ms");
-    expect(passingNamesOffDisk(report)).toEqual(["subagents", "web-search", "mcp"]);
+    expect(passingNamesExceptTheDiskCheck(report)).toEqual(["subagents", "web-search", "mcp"]);
   });
 
   test("a whole-second budget reads in seconds", async () => {
@@ -252,7 +252,7 @@ describe("the report", () => {
       detail: "did not finish within 20 ms",
     });
     expect(second.rows.map((row) => row.name)).toEqual([...LIVE_CAPABILITIES]);
-    expect(passingNamesOffDisk(second)).toEqual([
+    expect(passingNamesExceptTheDiskCheck(second)).toEqual([
       "subagents",
       "web-search",
       "mcp",
