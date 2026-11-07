@@ -23,8 +23,9 @@ export type TmuxPlaceCacheOptions = {
   /** One reading of where the session sits (`readTmuxPlace`). Never run twice over: a reading
    *  already away serves every ask that arrives while it runs. */
   readonly read: () => Promise<TmuxPlaceReading>;
-  /** How long one reading stands, asked at every refresh rather than once, so a session reading
-   *  its settings late (`tmuxPlaceCacheMs`) is not held to the value they had at start-up. */
+  /** How long one reading stands. The refresh timer's period is read once, when the first ask
+   *  arms it; the gate in `place()` reads it at every ask. A caller whose value can change after
+   *  the first ask gets a timer at the old period. */
   readonly lifetimeMs: () => number;
   /** The clock the lifetime is measured on; `Date.now` where none is given. */
   readonly now?: () => number;
@@ -95,11 +96,12 @@ export function createTmuxPlaceCache(options: TmuxPlaceCacheOptions): TmuxPlaceC
   };
 
   // The refresh timer, armed by the first ask at the lifetime that ask reads: a cache nobody has
-  // asked reads no tmux at all, which is what keeps a session outside any pane from polling a
-  // server it has no place on. Its tick reads outright rather than through the lifetime gate
-  // below, because a reading is stamped when it lands: a tick one lifetime after that stamp is
-  // always a hair short of the lifetime, and gating it would halve the refreshes and leave the
-  // held place up to two lifetimes old.
+  // asked reads no tmux at all. Every session's first registration asks, so a session outside
+  // any pane arms it too, and what keeps that session from running tmux is the reader itself,
+  // which refuses before any spawn when `TMUX` or `TMUX_PANE` is missing. Its tick reads
+  // outright rather than through the lifetime gate below, because a reading is stamped when it
+  // lands: a tick one lifetime after that stamp is always a hair short of the lifetime, and
+  // gating it would halve the refreshes and leave the held place up to two lifetimes old.
   const keepFresh = (): void => {
     if (stopRefreshing !== undefined || shuttingDown) return;
     stopRefreshing = repeat(options.lifetimeMs(), startReading);

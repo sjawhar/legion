@@ -44,10 +44,9 @@ function setup(): { readonly binary: string; readonly nats: string; readonly tmu
  *  loaded server still answers inside it, and short enough that a case waits seconds rather than
  *  the default half-minute. */
 const HEARTBEAT_MS = 3_000;
-/** How long one reading stands here. A heartbeat's worth would have every registration of a case
- *  report the window as the first reading found it, so this is short against `HEARTBEAT_MS`: the
- *  first registration past the lifetime starts a reading of the window as it is after a split,
- *  and a heartbeat behind it carries what that reading found. */
+/** How long one reading stands here, which is also the period the cache's own timer reads tmux
+ *  on. It is short against `HEARTBEAT_MS`, so the window is read again within a fraction of a
+ *  heartbeat after a split, and the registration after that reading carries the split window. */
 const PLACE_CACHE_MS = 500;
 /** How long a case waits for one thing the session owes it before failing on it. */
 const DEADLINE_MS = 60_000;

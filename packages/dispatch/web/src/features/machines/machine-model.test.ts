@@ -396,7 +396,7 @@ test("a window choice names its own server, so one window id on two servers pick
 
   expect(person).not.toBe(daemon);
   expect(chosenWindowId(person, SOCKET, "100")).toBe("@1");
-  // The other server reads no choice of its own from it, so it draws what it was drawing.
+  // The other server reads no choice of its own from it, so it draws its first window.
   expect(chosenWindowId(person, "/var/run/legion/tmux-daemon.sock", "200")).toBeUndefined();
   // Two servers on one socket are told apart by their pids here too.
   expect(chosenWindowId(person, SOCKET, "200")).toBeUndefined();

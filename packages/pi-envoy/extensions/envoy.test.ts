@@ -444,10 +444,11 @@ beforeEach(() => {
   delete process.env.TMUX;
   delete process.env.TMUX_PANE;
   // The place cache refreshes itself on a timer at its lifetime, and a case here boots sessions
-  // it never shuts down: at the 30 s default every one of them would read tmux again half a
-  // minute later, inside whatever case is running by then, and the readings a case counts are
-  // its own. The ceiling is as good as never; a case that wants a refresh names the lifetime it
-  // wants (`withEnvoyTimings`).
+  // it never shuts down: at the 30 s default each of them would read tmux again half a minute
+  // later, inside whatever case is running by then. The ceiling keeps that from happening for a
+  // case that names no lifetime. The tmux-place cases below name a 30 s one
+  // (`withEnvoyTimings`), so each of them still leaves a 30 s timer running; no later case counts
+  // the readings such a timer makes.
   process.env.ENVOY_TMUX_PLACE_CACHE_MS = "2147483647";
   process.env.DISPATCH_STATE_DIR = mkdtempSync(join(tmpdir(), "envoy-dispatch-state-"));
   delete process.env.DISPATCH_SESSION_ID;

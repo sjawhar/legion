@@ -351,8 +351,9 @@ describe("createTmuxPlaceCache", () => {
 
     // The first ask carries nothing — it is the one that starts the first reading, and waits on
     // no tmux call — and every ask after it carries a place one lifetime old, not one heartbeat.
-    // That is what the three minutes rests on: 90 s of registration, 5 s of roster, 15 s of poll
-    // and the lifetime, so a drawing a reader is shown as fresh is inside that of tmux.
+    // That is the sum the three-minute mark rests on: 90 s of registration, 5 s of roster, 15 s
+    // of poll and the lifetime, which is 140 s, so a session that keeps registering never draws
+    // a place older than that while its report is fresh.
     const oldestCarriedMs = Math.max(...carriedAgesMs.map((age) => age ?? 0));
     const worstCaseMs = DEFAULT_HEARTBEAT_MS + ROUTE_ROSTER_MS + PAGE_POLL_MS + oldestCarriedMs;
     expect({ carriedAgesMs, worstCaseMs }).toEqual({
@@ -376,8 +377,8 @@ describe("createTmuxPlaceCache", () => {
     expect(clock.live()).toEqual([]);
     await clock.advanceTo(3 * DEFAULT_HEARTBEAT_MS + 10 * LIFETIME_MS);
 
-    // And a session whose readings have stopped is a session the page calls behind: with nothing
-    // refreshing the place, its age passes the three minutes rather than sitting fresh forever.
+    // And with the refresh stopped, the held place only ages: nothing reads tmux again, so its
+    // age passes the three minutes rather than staying one lifetime old.
     expect(reader.startedAt).toHaveLength(readingsAtShutdown);
     expect(ageOf(cache.place(), clock.now())).toBeGreaterThan(DRAWING_STALE_AFTER_MS);
   });
