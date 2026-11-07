@@ -195,73 +195,96 @@ func checkAdmin(admin string, orNone bool) error {
 // flag that fixes it. It is this CLI's whole mirror of TagRules, so every reason that function
 // answers has an arm here: policy.ReasonScopesKind, policy.ReasonAdminTier,
 // policy.ReasonAdminRequesters, policy.ReasonMaxGrantRequired and
-// policy.ReasonRequestersNotOwner. The tier is one of the tags read, and not left empty as it
-// once was, because two of those rules turn on it: an admin secret is human tier, and a
-// google-service-account secret may list a registered service beside its owner at human tier
-// alone, so a check passing no tier would refuse a write the broker accepts. maxGrant is the
-// tag's own string, which ParseMaxGrant reads here rather than a second --max-grant rule: a
-// malformed one is no duration at all, which the flag's own rule (checkMaxGrant) refused for a
-// command that named it, and which the broker refuses as max-grant-malformed before it weighs
-// any rule below. admin says the tag the write leaves is adminTrue; a stored admin tag holding
-// anything else is no rule of TagRules but policy.ReasonAdminMalformed, which the broker answers
-// to the reread that follows the write, exactly as it answers for a stored requesters or scopes
-// tag this CLI cannot repair. The one field of the set left empty is BoundAccount, the
-// deployment's BROKER_SERVICE_ACCOUNT_SECRETS binding, which `agent-secrets` never sees, just as
-// it never sees BROKER_SERVICES and so calls ParseRequesterShapes rather than ParseRequesters:
-// the rule it feeds, the one refusing a service on a secret bound to a dev-<name> account, is the
-// broker's to apply on that reread.
-func checkTagsFor(kind, owner, tier, requesters, scopes, maxGrant string, admin bool) error {
-	duration, _ := policy.ParseMaxGrant(maxGrant)
-	switch policy.TagRules(policy.TagSet{
-		Kind:         kind,
-		Owner:        owner,
-		Tier:         tier,
-		Requesters:   requesters,
-		Scopes:       scopes,
+// policy.ReasonRequestersNotOwner.
+//
+// It reads those tags out of the map the write leaves behind — optionalTags with the owner and
+// tier create will send, the after map retag computes — rather than out of the flags, because
+// optionalTags has already dropped a flag left unset and a flag set to none, so the check reads
+// the tags the broker will read and never reads the word none as a kind: a check passed *kind
+// straight from the flag refused `secret create --kind none --scopes x` as though none were a
+// kind whose minter does not read scopes, when none is the word that removes the kind tag and
+// what it leaves is a stored secret. Reading the map also leaves the check and the write one
+// value, so no tag can be weighed in one form and written in another.
+//
+// The tier is one of the tags read, and not left empty as it once was, because two of those
+// rules turn on it: an admin secret is human tier, and a google-service-account secret may list
+// a registered service beside its owner at human tier alone, so a check passing no tier would
+// refuse a write the broker accepts. The max-grant tag is parsed here (policy.ParseMaxGrant)
+// rather than by a second --max-grant rule: a malformed one is no duration at all, which the
+// flag's own rule (checkMaxGrant) refused for a command that named it, and which the broker
+// refuses as max-grant-malformed before it weighs any rule below. The admin mark is the tag
+// being adminTrue; a stored admin tag holding anything else is no rule of TagRules but
+// policy.ReasonAdminMalformed, which the broker answers to the reread that follows the write,
+// exactly as it answers for a stored requesters or scopes tag this CLI cannot repair. The one
+// field of the set left empty is BoundAccount, the deployment's BROKER_SERVICE_ACCOUNT_SECRETS
+// binding, which `agent-secrets` never sees, just as it never sees BROKER_SERVICES and so calls
+// ParseRequesterShapes rather than ParseRequesters: the rule it feeds, the one refusing a
+// service on a secret bound to a dev-<name> account, is the broker's to apply on that reread.
+//
+// The set is built once and every refusal below reads it rather than the map or a flag, so no
+// message can name tags other than the ones the rules judged.
+func checkTagsFor(tags map[string]string) error {
+	duration, _ := policy.ParseMaxGrant(tags[policy.TagMaxGrant])
+	set := policy.TagSet{
+		Kind:         tags[policy.TagKind],
+		Owner:        tags[policy.TagOwner],
+		Tier:         tags[policy.TagTier],
+		Requesters:   tags[policy.TagRequesters],
+		Scopes:       tags[policy.TagScopes],
 		BoundAccount: "",
-		Admin:        admin,
+		Admin:        tags[policy.TagAdmin] == adminTrue,
 		MaxGrant:     duration,
-	}) {
+	}
+	switch policy.TagRules(set) {
 	case policy.ReasonScopesKind:
 		holder := "a stored secret"
-		if kind != "" {
-			holder = fmt.Sprintf("a %s secret", kind)
+		if set.Kind != "" {
+			holder = fmt.Sprintf("a %s secret", set.Kind)
 		}
 		return usageErr{fmt.Errorf("--scopes narrows the token a %s secret mints, and no other kind's minter reads it, so %s holds none: remove the scopes tag with --scopes none, in a retag of its own, or write --kind %s, or the broker refuses it as %s", policy.KindGoogleServiceAccount, holder, policy.KindGoogleServiceAccount, policy.ReasonScopesKind)}
 	case policy.ReasonAdminTier:
-		return usageErr{fmt.Errorf("an admin secret releases an administrator's credential, which a person approves each release of, so it is human tier, not %q: write --tier %s, or the broker refuses it as %s", tier, policy.TierHuman, policy.ReasonAdminTier)}
+		return usageErr{fmt.Errorf("an admin secret releases an administrator's credential, which a person approves each release of, so it is human tier, not %q: write --tier %s, or the broker refuses it as %s", set.Tier, policy.TierHuman, policy.ReasonAdminTier)}
 	case policy.ReasonAdminRequesters:
 		return usageErr{fmt.Errorf("an admin secret names who may ask for an administrator's credential, never leaving it to owner and tier alone: write --requesters, or the broker refuses it as %s", policy.ReasonAdminRequesters)}
 	case policy.ReasonMaxGrantRequired:
 		demands := fmt.Sprintf("a %s secret", policy.KindGoogleServiceAccount)
-		if admin {
+		if set.Admin {
 			demands = "an admin secret"
 		}
-		if duration == 0 {
+		if set.MaxGrant == 0 {
 			return usageErr{fmt.Errorf("%s releases a credential whose grant is reviewed while it is live, so it bounds its grants to an hour: name one with --max-grant 1h or less, or the broker refuses it as %s", demands, policy.ReasonMaxGrantRequired)}
 		}
-		return usageErr{fmt.Errorf("%s releases a credential whose grant is reviewed while it is live, so it bounds its grants to an hour, not %s: write --max-grant 1h or less, or the broker refuses it as %s", demands, maxGrant, policy.ReasonMaxGrantRequired)}
+		// The cap too long is quoted as the tag holds it, which is how whoever named it wrote
+		// it ("90m"), and not as the duration it parsed to ("1h30m0s"), which is the one thing
+		// the set says less plainly than the map.
+		return usageErr{fmt.Errorf("%s releases a credential whose grant is reviewed while it is live, so it bounds its grants to an hour, not %s: write --max-grant 1h or less, or the broker refuses it as %s", demands, tags[policy.TagMaxGrant], policy.ReasonMaxGrantRequired)}
 	case policy.ReasonRequestersNotOwner:
-		// The one entry the service arm below speaks of: TagRules tells a person from a service
-		// by the @ alone, each entry's own shape being checkRequesters' business, so a service
-		// is any entry without one. Read here rather than above the switch, since no other arm
-		// and no accepted write needs it.
-		service := ""
-		for _, entry := range strings.Fields(requesters) {
-			if !strings.Contains(entry, "@") {
-				service = entry
-				break
-			}
-		}
+		// The arms below are TagRules' own three conditions in TagRules' own order, most
+		// fundamental first — the owner is no person, the list names a service and the tier is
+		// not human, the list does not name that owner exactly once — so the flag each names
+		// fixes the rule that refused the write. Tested in another order they would blame
+		// another cause: a secret owned by a person, at agent tier, whose list names someone
+		// else beside a service is refused by the service rule, and a message naming the owner
+		// entry first would send the person to write --requesters and be refused again by the
+		// rule they never heard of; while one owned by shared is refused for its owner however
+		// its list and tier read, so naming its service first would send the person to change
+		// a tier that was never what refused it. The split of the list into people and services
+		// is policy.SplitRequesters, the same one the rules weigh, read here rather than above
+		// the switch since no other arm and no accepted write needs it.
+		people, services := policy.SplitRequesters(set.Requesters)
 		switch {
-		case !policy.ValidPersonOwner(owner):
-			return usageErr{fmt.Errorf("a %s secret mints a token acting as that account, so it is served to the one person who owns it, and %q is no person: own it with --owner me, or the broker refuses it as %s", kind, owner, policy.ReasonRequestersNotOwner)}
-		case service != "" && tier != policy.TierHuman:
-			return usageErr{fmt.Errorf("a %s secret lists a registered service, here %q, only at %s tier, where a person approves each pod that asks: write --tier %s, or leave the service out of --requesters, or the broker refuses it as %s", kind, service, policy.TierHuman, policy.TierHuman, policy.ReasonRequestersNotOwner)}
-		case requesters == "":
-			return usageErr{fmt.Errorf("a %s secret is served to the one person who owns it: write --requesters %s, or the broker refuses it as %s", kind, owner, policy.ReasonRequestersNotOwner)}
+		case !policy.ValidPersonOwner(set.Owner):
+			return usageErr{fmt.Errorf("a %s secret mints a token acting as that account, so it is served to the one person who owns it, and %q is no person: own it with --owner me, or the broker refuses it as %s", set.Kind, set.Owner, policy.ReasonRequestersNotOwner)}
+		case len(services) > 0 && set.Tier != policy.TierHuman:
+			return usageErr{fmt.Errorf("a %s secret lists a registered service, here %q, only at %s tier, where a person approves each pod that asks: write --tier %s, or leave the service out of --requesters, or the broker refuses it as %s", set.Kind, services[0], policy.TierHuman, policy.TierHuman, policy.ReasonRequestersNotOwner)}
+		case set.Requesters == "":
+			return usageErr{fmt.Errorf("a %s secret is served to the one person who owns it: write --requesters %s, or the broker refuses it as %s", set.Kind, set.Owner, policy.ReasonRequestersNotOwner)}
+		case len(people) == 0:
+			// Only services, at human tier, where the secret may keep them: the owner goes
+			// beside them rather than in their place, which the arm below would have asked for.
+			return usageErr{fmt.Errorf("a %s secret is served to the one person who owns it, beside the registered services a %s-tier one may list, and %q names no person: write --requesters %q, or the broker refuses it as %s", set.Kind, policy.TierHuman, set.Requesters, set.Owner+" "+set.Requesters, policy.ReasonRequestersNotOwner)}
 		default:
-			return usageErr{fmt.Errorf("a %s secret is served to the one person who owns it, so its requesters name %s once, not %q: write --requesters %s, or the broker refuses it as %s", kind, owner, requesters, owner, policy.ReasonRequestersNotOwner)}
+			return usageErr{fmt.Errorf("a %s secret is served to the one person who owns it, so its requesters name %s once, not %q: write --requesters %s, or the broker refuses it as %s", set.Kind, set.Owner, set.Requesters, set.Owner, policy.ReasonRequestersNotOwner)}
 		}
 	}
 	return nil

@@ -355,6 +355,29 @@ func parseRequesters(raw string, services []string, registered bool) (string, er
 	return strings.Join(slices.Compact(requesters), " "), nil
 }
 
+// SplitRequesters splits a requesters tag into the people it names and the services it names,
+// each list in the order the tag holds them and both nil for a tag that names nobody. The @ is
+// the whole of the test: both parsers behind the tag make every person entry a lowercase email,
+// which holds one, and every service entry a service name, which holds none (ParseRequesters
+// against the deployment's registered list, ParseRequesterShapes against a service name's shape
+// alone), so a reader of the split needs neither alphabet and no entry can be both. It is the
+// one statement of that split, which its two readers would otherwise each write out: TagRules,
+// whose google-service-account and dev-<name> rules weigh the people and the services apart,
+// and `agent-secrets`' checkTagsFor, which mirrors those rules to say which of them refused a
+// write. An entry is answered as it was written, since a tag the loader read is already sorted,
+// compacted and single-spaced and a caller comparing an entry against an owner tag compares it
+// as the sign-in writes it.
+func SplitRequesters(requesters string) (people, services []string) {
+	for _, entry := range strings.Fields(requesters) {
+		if strings.Contains(entry, "@") {
+			people = append(people, entry)
+		} else {
+			services = append(services, entry)
+		}
+	}
+	return people, services
+}
+
 // devServiceAccount is the id, the part before the @, of a service account the deployment binds
 // to one person: it binds each person's DEV_<NAME> secret to their own dev-<name> account, whose
 // token therefore goes to that person and to nobody else. TagRules reads it to refuse a service
@@ -408,7 +431,12 @@ type TagSet struct {
 //     which the requirement gives to the one person who owns the secret, so a secret owned by
 //     shared or by a service can carry no such kind: neither is a person, and neither can be
 //     that one requester. A human-tier secret may name registered services beside its owner,
-//     each of whose pods a person still approves.
+//     each of whose pods a person still approves. The three ways it is refused are weighed in
+//     this order, most fundamental first, and `agent-secrets`' checkTagsFor mirrors that order
+//     so that the flag it names fixes the rule that refused the write rather than another that
+//     happens to be true beside it: the owner is no person (ValidPersonOwner), so no list could
+//     make the secret servable; the list names a service and the tier is not human; the list
+//     does not name that owner exactly once.
 //   - ReasonRequestersNotOwner again: a secret the deployment binds to a dev-<name> account
 //     (BoundAccount, devServiceAccount) lists a service, at either tier. Such a token is one
 //     person's own, so no service may ask for it.
@@ -427,31 +455,20 @@ func TagRules(t TagSet) string {
 	}
 	// Each entry's own shape is ParseRequesters' and ParseRequesterShapes' business, and they
 	// answer the entries sorted and separated by single spaces, so the rules below read only the
-	// @ that tells a person from a service.
+	// @ that tells a person from a service (SplitRequesters), and read it once for both of them.
+	people, services := SplitRequesters(t.Requesters)
 	if t.Kind == KindGoogleServiceAccount {
-		owners := 0
-		for _, entry := range strings.Fields(t.Requesters) {
-			switch {
-			case !strings.Contains(entry, "@"):
-				if t.Tier != TierHuman {
-					return ReasonRequestersNotOwner
-				}
-			case !ValidPersonOwner(t.Owner) || entry != t.Owner:
-				return ReasonRequestersNotOwner
-			default:
-				owners++
-			}
-		}
-		if owners != 1 {
+		switch {
+		case !ValidPersonOwner(t.Owner):
+			return ReasonRequestersNotOwner
+		case len(services) > 0 && t.Tier != TierHuman:
+			return ReasonRequestersNotOwner
+		case len(people) != 1 || people[0] != t.Owner:
 			return ReasonRequestersNotOwner
 		}
 	}
-	if id, _, bound := strings.Cut(t.BoundAccount, "@"); bound && devServiceAccount.MatchString(id) {
-		for _, entry := range strings.Fields(t.Requesters) {
-			if !strings.Contains(entry, "@") {
-				return ReasonRequestersNotOwner
-			}
-		}
+	if id, _, bound := strings.Cut(t.BoundAccount, "@"); bound && devServiceAccount.MatchString(id) && len(services) > 0 {
+		return ReasonRequestersNotOwner
 	}
 	return ""
 }

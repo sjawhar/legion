@@ -178,20 +178,45 @@ func TestSecretKindFlagsRejectInvalidValues(t *testing.T) {
 	}
 	// The requesters list and the rules it brings with it, each refused before anything is
 	// written: the broker's own reading of the list (policy.ParseRequesters), and its cross-tag
-	// rules (policy.TagRules), named as the broker names them.
+	// rules (policy.TagRules), named as the broker names them. The last five rows pin that the
+	// client's refusal names the rule that refused the write and not another that happens to be
+	// true beside it: the check reads the tags the write leaves, so --kind none leaves a stored
+	// secret and never a kind called none, and its arms weigh TagRules' three conditions in
+	// TagRules' own order, most fundamental first, so a secret owned by shared is answered for
+	// its owner however its list and tier read, a list naming a service at agent tier is
+	// answered for the tier, and the same list at human tier for the person it names.
+	const other = "jason@example.com"
 	for _, tc := range []struct {
-		want string
-		args []string
+		want, absent string
+		args         []string
 	}{
-		{"spaces, not commas", []string{"create", "NEW_KEY", "--owner", "me", "--tier", "agent", "--requesters", "ada@example.com,builder", "--max-grant", "1h"}},
-		{"at least one person or service", []string{"create", "NEW_KEY", "--owner", "me", "--tier", "agent", "--requesters", "  ", "--max-grant", "1h"}},
-		{"lowercase sign-in email", []string{"create", "NEW_KEY", "--owner", "me", "--tier", "agent", "--requesters", "Ada@Example.com", "--max-grant", "1h"}},
-		{policy.ReasonRequestersNotOwner, []string{"create", "NEW_KEY", "--owner", "me", "--tier", "agent", "--kind", policy.KindGoogleServiceAccount, "--max-grant", "1h", "--requesters", "builder"}},
-		{policy.ReasonRequestersNotOwner, []string{"create", "NEW_KEY", "--owner", "me", "--tier", "agent", "--kind", policy.KindGoogleServiceAccount, "--max-grant", "1h"}},
+		{want: "spaces, not commas", args: []string{"create", "NEW_KEY", "--owner", "me", "--tier", "agent", "--requesters", "ada@example.com,builder", "--max-grant", "1h"}},
+		{want: "at least one person or service", args: []string{"create", "NEW_KEY", "--owner", "me", "--tier", "agent", "--requesters", "  ", "--max-grant", "1h"}},
+		{want: "lowercase sign-in email", args: []string{"create", "NEW_KEY", "--owner", "me", "--tier", "agent", "--requesters", "Ada@Example.com", "--max-grant", "1h"}},
+		{want: policy.ReasonRequestersNotOwner, args: []string{"create", "NEW_KEY", "--owner", "me", "--tier", "agent", "--kind", policy.KindGoogleServiceAccount, "--max-grant", "1h", "--requesters", "builder"}},
+		{want: policy.ReasonRequestersNotOwner, args: []string{"create", "NEW_KEY", "--owner", "me", "--tier", "agent", "--kind", policy.KindGoogleServiceAccount, "--max-grant", "1h"}},
+		// none removes the kind tag, so what the write leaves is a stored secret, which is what
+		// the refusal must say: a check reading the flag rather than the tags called it "a none
+		// secret".
+		{want: "a stored secret holds none", absent: "a " + tagNone + " secret", args: []string{"create", "NEW_KEY", "--owner", "me", "--tier", "agent", "--kind", tagNone, "--scopes", "bigquery"}},
+		// One list, two tiers. At agent tier the service is what TagRules refuses, so the client
+		// names the tier and not the person; at human tier the service is allowed and the person
+		// who is not the owner is what refuses, so the client names them and not the tier.
+		{want: "only at " + policy.TierHuman + " tier", absent: "once, not", args: []string{"create", "NEW_KEY", "--owner", "me", "--tier", "agent", "--kind", policy.KindGoogleServiceAccount, "--max-grant", "1h", "--requesters", other + " builder"}},
+		{want: "name ada@example.com once, not", absent: "only at " + policy.TierHuman + " tier", args: []string{"create", "NEW_KEY", "--owner", "me", "--tier", policy.TierHuman, "--kind", policy.KindGoogleServiceAccount, "--max-grant", "1h", "--requesters", other + " builder"}},
+		// A secret owned by shared can carry this kind under no list and no tier, so that is
+		// what the refusal names, and not the service beside it, which an owner arm tested
+		// after the service arm would have sent the person to change first.
+		{want: "is no person", absent: "only at " + policy.TierHuman + " tier", args: []string{"create", "NEW_KEY", "--owner", "shared", "--tier", "agent", "--kind", policy.KindGoogleServiceAccount, "--max-grant", "1h", "--requesters", "builder"}},
+		// A human-tier list of services alone: the owner goes beside them, never in their place.
+		{want: "names no person", args: []string{"create", "NEW_KEY", "--owner", "me", "--tier", policy.TierHuman, "--kind", policy.KindGoogleServiceAccount, "--max-grant", "1h", "--requesters", "builder"}},
 	} {
 		_, stderr, code := runSecret(tc.args...)
 		if code != exitUsageError || !strings.Contains(stderr, tc.want) {
 			t.Fatalf("%v: exit %d stderr %q; want a usage error naming %q", tc.args, code, stderr, tc.want)
+		}
+		if tc.absent != "" && strings.Contains(stderr, tc.absent) {
+			t.Fatalf("%v: stderr %q names %q, which is not the rule that refused it", tc.args, stderr, tc.absent)
 		}
 	}
 	if _, err := local.DescribeSecret(context.Background(), &secretsmanager.DescribeSecretInput{SecretId: aws.String(policytest.ID("NEW_KEY"))}); err == nil {

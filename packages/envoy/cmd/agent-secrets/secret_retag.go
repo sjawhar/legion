@@ -164,7 +164,7 @@ func cmdSecretRetag(args []string, stdout, stderr io.Writer) int {
 	if err := checkGitHubOwnersFor(after[policy.TagKind], after[policy.TagGitHubOwners], named); err != nil {
 		return secretFailIn(stderr, form, s, err)
 	}
-	if err := checkTagsFor(after[policy.TagKind], after[policy.TagOwner], after[policy.TagTier], after[policy.TagRequesters], after[policy.TagScopes], after[policy.TagMaxGrant], after[policy.TagAdmin] == adminTrue); err != nil {
+	if err := checkTagsFor(after); err != nil {
 		return secretFailIn(stderr, form, s, err)
 	}
 	if len(remove) > 0 {
