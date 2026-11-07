@@ -492,3 +492,44 @@ func TestARegisterWaitAnswersWithinTheBoundWhenTheBrokerNeverAnswers(t *testing.
 		t.Fatalf("register --wait 10 answered %+v (%v) after %s; want NO_CREDENTIAL at the bound (%s): well inside the 10 s wait, since a broker that never answers must not hold a launcher's gate for the helper's whole client timeout, and no sooner than the bound, since this register waits for the confirmation in flight", got.resp, got.err, elapsed, bound)
 	}
 }
+
+// TestANameTakenDuringAnEnrollRetryConfirmsItsInheritedEnrollmentAtOnce: a launcher cannot name
+// a fresh session before its exec, so a resumed one registers unnamed first and is named
+// seconds later. That first registration starts an enroll the helper cannot make for want of a
+// launcher credential, and its retry backs off towards a minute; the name then brings a parked
+// identity with it, whose inherited enrollment a renew signed by the session's own key confirms
+// with no credential at all. The `register --wait N` carrying the name is already waiting for
+// that renew (Session.confirmSettled), so the rename's wake must start it at once: a retry
+// woken by a login alone leaves the renew unsent until the backoff comes round, and the
+// launcher gate spends its wait on a backoff this confirmation has no part in.
+func TestANameTakenDuringAnEnrollRetryConfirmsItsInheritedEnrollmentAtOnce(t *testing.T) {
+	r, _, _, release := reclaimedIdentityRig(t)
+	release() // nothing holds the confirming renew here: this fake answers it as a healthy broker does
+
+	// The unnamed register, which starts the enroll loop. Every enroll fails at once for want
+	// of a credential, so from here on the loop is in its backoff.
+	if first := r.call(t, Request{Op: "register"}); first.Code != CodeNoCredential {
+		t.Fatalf("register with no name: %+v; want NO_CREDENTIAL", first)
+	}
+
+	// Far enough into that backoff that nothing but the rename's own wake can answer the
+	// register below inside a second. The attempts fall at 0 s, 1 s, 3 s and 7 s — one second
+	// doubling after each failure — so four seconds in sits inside the 4 s between the third
+	// and the fourth with about three of them left to run, past the second this row allows and
+	// a second clear of each end of that window on a loaded host. The delay is the whole of
+	// what the row costs, so it is as short as proving the point leaves it. A mistimed delay
+	// could only weaken the negative control, never make this row flaky: with the rename's
+	// wake in place the answer is immediate wherever in the ladder the register lands.
+	time.Sleep(4 * time.Second)
+
+	// The name, with the wait the dotfiles launcher gate asks for
+	// (scripts/agent-secrets-session). The rename installs the record's enrollment and wakes
+	// the enroll retry; the woken attempt reads the new generation, ends that retry
+	// (errRenamed), and the pass that follows renews the inherited enrollment straight away.
+	id := testSessionID
+	started := time.Now()
+	resp := r.call(t, Request{Op: "register", WaitSeconds: 10, SessionID: &id})
+	if elapsed := time.Since(started); elapsed > time.Second || !resp.OK || resp.State != "enrolled" || resp.EnrollmentID != "enr-before" {
+		t.Fatalf("register --session-id --wait 10 answered %+v after %s; want OK, enrolled and enr-before within a second: the renew that confirms an inherited enrollment needs no launcher credential, so the rename must start it rather than leave it to the enroll retry's backoff", resp, elapsed)
+	}
+}

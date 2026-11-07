@@ -148,13 +148,15 @@ func (s *Session) identity() identity {
 // launcher credential, which is why that wait is worth taking at all; it covers one attempt
 // and not the enroll loop's retries (Session.confirmSettled).
 //
-// A session holding a LAPSED id gets nil too, confirmation in flight or not: enrollLoop
-// revokes that id BEFORE it reaches confirmInherited, and Broker.Revoke needs a launcher
-// credential, so while the helper holds none no renew is ever sent and no answer can come. The
-// only caller is registerReply, and it asks only while the helper holds no credential, which
-// is what makes that reading right: with a credential held the revoke goes through and the
-// renew follows, and registerReply takes its wait on the credential as it always has, never
-// calling this.
+// A session holding a LAPSED id gets nil, and not because of who is asking: while that id is
+// held no confirmation of the inherited one can be in flight at all. enrollLoop revokes the
+// lapsed id BEFORE it ever reaches confirmInherited, so no renew of the inherited enrollment
+// has been sent yet, whatever credential the helper holds. What a credential changes is how
+// long that lasts: Broker.Revoke signs with a person's sign-in (SignIns.Current) before falling
+// back to the machine credential, so with either the revoke goes through, the lapsed id clears
+// and the confirmation follows — a register arriving after that finds it in flight and waits
+// for it. With neither, no revoke can land, no renew is ever sent, and nothing can answer a
+// wait taken for one.
 //
 // Reading the channel never blocks, and neither does waiting on the nil this answers with:
 // a nil channel blocks for ever, which in registerReply's select is exactly "nothing here".

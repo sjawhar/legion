@@ -38,8 +38,9 @@ type Server struct {
 	MinRenew time.Duration
 	// FirstConfirmBound bounds the FIRST renew that confirms an inherited enrollment — the one
 	// attempt a `register --wait` can be waiting on (confirmInherited). Zero, which is what
-	// cmd/agent-secrets-helper leaves it, means DefaultFirstConfirmBound; a test sets a shorter
-	// one so it can reach the bound without waiting out the production value.
+	// cmd/agent-secrets-helper leaves it, means DefaultFirstConfirmBound; the shared fixture of
+	// the rows that read a reclaimed identity sets a minute, so their own ordering cannot race
+	// the bound, and the row that reads the bound itself sets one short enough to be quick.
 	FirstConfirmBound time.Duration
 	// dormantGraceNS is DefaultDormantGrace unless SetDormantGrace names another: how long a
 	// named session's identity is kept for it to come back to before SweepDormant revokes it.
@@ -457,8 +458,7 @@ func (s *Server) registerReply(sess *Session, wait time.Duration) Response {
 	credential := s.Broker.HasCredential()
 	// settled is the confirmation to wake on, and only for the wait the inherited enrollment
 	// earns: with a credential held the enroll below can still succeed, so that wait runs to
-	// ready or the deadline as it always has, and the method is not asked — its lapsed-id case
-	// is right for a credential-less helper alone.
+	// ready or the deadline as it always has, and the method is not asked.
 	var settled <-chan struct{}
 	if !credential {
 		settled = sess.confirmationInFlight()
@@ -858,23 +858,29 @@ var errRenamed = fmt.Errorf("the session was renamed while it was enrolling: %w"
 var errRefused = fmt.Errorf("the broker will not honour this enrollment: %w", errFinal)
 
 // retryUntilStop retries try with backoff until it succeeds, stop closes, ctx ends, or try
-// answers an error wrapping errFinal. Delay
-// starts at start and doubles toward maxDelay after each failure (start == maxDelay gives a
-// caller a fixed delay instead of a growing one); attempts caps the number of tries (0 means
-// unlimited), and try's last permitted attempt failing ends the loop at once, without waiting.
-// wake, when non-nil, gives a channel taken before each attempt: its closing cuts the wait short
-// and starts the backoff over, so a retry that failed for want of something retries the moment
-// it arrives (the broker's CredentialInstalled). onFail runs after every failed attempt with its
+// answers an error wrapping errFinal. Delay starts at start and doubles toward maxDelay after
+// each failure (start == maxDelay gives a caller a fixed delay instead of a growing one);
+// attempts caps the number of tries (0 means unlimited), and try's last permitted attempt
+// failing ends the loop at once, without waiting. wake and alsoWake, each when non-nil, give a
+// channel taken before each attempt: either one answering cuts the wait short and starts the
+// backoff over, so a retry that failed for want of something retries the moment it arrives.
+// There are two because one attempt can want two things, and both are read the same way whether
+// the channel closes (the broker's CredentialInstalled) or is sent to (Session.wakeCh):
+// enrollLoop's enroll takes both, since it wants a login AND the rename that hands the session
+// an enrollment needing no login at all. onFail runs after every failed attempt with its
 // 1-based number, the error, the delay before the next attempt (meaningless once retrying is
 // false), and whether the loop is about to retry, so a caller expresses only what it retries —
 // its logging and any per-failure side effect — not how retrying works. Returns whether try
 // eventually succeeded.
-func retryUntilStop(ctx context.Context, stop <-chan struct{}, wake func() <-chan struct{}, attempts int, start, maxDelay time.Duration, onFail func(attempt int, err error, delay time.Duration, retrying bool), try func() error) bool {
+func retryUntilStop(ctx context.Context, stop <-chan struct{}, wake, alsoWake func() <-chan struct{}, attempts int, start, maxDelay time.Duration, onFail func(attempt int, err error, delay time.Duration, retrying bool), try func() error) bool {
 	delay := start
 	for attempt := 1; attempts <= 0 || attempt <= attempts; attempt++ {
-		var woken <-chan struct{}
+		var woken, alsoWoken <-chan struct{}
 		if wake != nil {
 			woken = wake()
+		}
+		if alsoWake != nil {
+			alsoWoken = alsoWake()
 		}
 		err := try()
 		if err == nil {
@@ -893,6 +899,8 @@ func retryUntilStop(ctx context.Context, stop <-chan struct{}, wake func() <-cha
 		case <-time.After(delay):
 			delay = min(delay*2, maxDelay)
 		case <-woken:
+			delay = start
+		case <-alsoWoken:
 			delay = start
 		case <-stop:
 			return false
@@ -977,8 +985,8 @@ func (s *Server) enrollLoop(ctx context.Context, sess *Session) {
 		// renamed ends the retry at once when the identity moves under it: the pass above
 		// revoked the lapsed id this identity had, and a rename brings a NEW one that must be
 		// revoked before the new runtime id can enrol at all (the broker refuses a second row
-		// for one runtime id outright). Retrying on here would spin against that refusal,
-		// since this retry waits only on a login, never on the rename's wake.
+		// for one runtime id outright). Retrying on here would spin against that refusal, so
+		// the rename's own wake starts the attempt that finds it and ends this retry.
 		renamed := false
 		// heldAs is the principal the last SESSION_HELD line was written for, and heldDelay
 		// how long until the next attempt at a session name another principal holds — the one
@@ -991,8 +999,15 @@ func (s *Server) enrollLoop(ctx context.Context, sess *Session) {
 		heldDelay := time.Second
 		pass := sess.identity().Generation
 		// A login wakes the retry, so a session registered before it enrolls within about a second
-		// rather than when a backoff of up to a minute comes round.
-		enrolled := retryUntilStop(ctx, sess.stop, s.Broker.CredentialInstalled, 0, time.Second, time.Minute, func(attempt int, err error, delay time.Duration, retrying bool) {
+		// rather than when a backoff of up to a minute comes round; the rename's wake
+		// (Session.wakeCh) does the same, and for a reason no login can serve. A rename hands
+		// the session an enrollment inherited from the record it claimed, whose confirming
+		// renew is signed by the session's own key and needs no launcher credential at all —
+		// and a credential-less `register --wait` is already waiting on that renew
+		// (Session.confirmSettled). So the woken attempt reads the new generation, ends this
+		// retry (errRenamed), and the pass that follows reaches confirmInherited at once,
+		// rather than when a backoff this enrollment has no part in comes round.
+		enrolled := retryUntilStop(ctx, sess.stop, s.Broker.CredentialInstalled, sess.wakeCh, 0, time.Second, time.Minute, func(attempt int, err error, delay time.Duration, retrying bool) {
 			if renamed {
 				return
 			}
@@ -1100,6 +1115,13 @@ const (
 // FIRST attempt is bounded, because only it can have a register waiting on it (the rule
 // Session.confirmSettled states): a later retry answers to nobody, so it may take the client
 // timeout as it always has.
+//
+// The bound is the waiting register's and nobody else's, so it is applied only while the helper
+// holds no machine credential (Broker.HasCredential), the same reading registerReply gates its
+// own wait on. With a credential held nothing ever reads Session.confirmSettled, and the
+// confirmations Recover's re-pins start at startup have no register behind them at all: cutting
+// a slow but healthy first renew short there would buy no reader anything and cost the session
+// a retry.
 const DefaultFirstConfirmBound = 3 * time.Second
 
 // firstConfirmBound is this Server's bound for that first renew: FirstConfirmBound when it is
@@ -1130,8 +1152,10 @@ func (s *Server) firstConfirmBound() time.Duration {
 // renamed under the renew, which is what errRenamed asks for: that register is waiting on the
 // identity it has now, not on this one.
 //
-// The first attempt's renew runs under a bound of its own, DefaultFirstConfirmBound, since that
-// is the attempt a register can be waiting on; every attempt after it runs under ctx alone. The
+// The first attempt's renew runs under a bound of its own, s.firstConfirmBound()
+// (DefaultFirstConfirmBound, or Server.FirstConfirmBound where that is set), and only while the
+// helper holds no machine credential, since in no other state is a register waiting on it; every
+// attempt after it, and every attempt at all once a credential is held, runs under ctx alone. The
 // bound expiring IS the "did not reach the broker" answer above: renewIdentity fails with its
 // context's deadline, which is no ENROLLMENT_NOT_LIVE, so the failure settles the waiting
 // register (Session.settleConfirm) and this loop retries on its own schedule, exactly as it
@@ -1142,7 +1166,7 @@ func (s *Server) confirmInherited(ctx context.Context, sess *Session, pass ident
 	// first is read and written by the try below alone, which retryUntilStop runs one attempt
 	// at a time: the bound is the first attempt's, and no retry's.
 	first := true
-	kept := retryUntilStop(ctx, sess.stop, s.Broker.CredentialInstalled, 0, time.Second, time.Minute, func(attempt int, err error, delay time.Duration, retrying bool) {
+	kept := retryUntilStop(ctx, sess.stop, s.Broker.CredentialInstalled, nil, 0, time.Second, time.Minute, func(attempt int, err error, delay time.Duration, retrying bool) {
 		sess.settleConfirm(pass.EnrollmentID, pass.Generation)
 		switch {
 		case errors.Is(err, errRenamed):
@@ -1164,9 +1188,14 @@ func (s *Server) confirmInherited(ctx context.Context, sess *Session, pass ident
 		renewCtx := ctx
 		if first {
 			first = false
-			bounded, cancel := context.WithTimeout(ctx, s.firstConfirmBound())
-			defer cancel()
-			renewCtx = bounded
+			// The bound belongs to the credential-less register that may be waiting on this
+			// attempt and to nobody else (DefaultFirstConfirmBound), so with a credential
+			// held this renew takes the client timeout as every other renew does.
+			if !s.Broker.HasCredential() {
+				bounded, cancel := context.WithTimeout(ctx, s.firstConfirmBound())
+				defer cancel()
+				renewCtx = bounded
+			}
 		}
 		next, err := s.Broker.renewIdentity(renewCtx, pass)
 		if err != nil {
@@ -1274,7 +1303,7 @@ func (s *Server) renewLoop(ctx context.Context, sess *Session, lease time.Time, 
 // again, since the session's key went with it. ctx done means the whole daemon is exiting, and
 // nothing further is attempted.
 func (s *Server) revokeLapsed(ctx context.Context, sess *Session, id string) bool {
-	revoked := retryUntilStop(ctx, sess.stop, s.Broker.CredentialInstalled, 0, time.Second, time.Minute, func(attempt int, err error, delay time.Duration, retrying bool) {
+	revoked := retryUntilStop(ctx, sess.stop, s.Broker.CredentialInstalled, nil, 0, time.Second, time.Minute, func(attempt int, err error, delay time.Duration, retrying bool) {
 		if s.lacksCredential(err) {
 			s.Log.Error("session cannot enroll: revoking its lapsed enrollment first needs a launcher credential, and the helper holds none; run: agent-secrets machine login, and have a human approve it",
 				"runtime_id", sess.RuntimeID(), "enrollment_id", id, "why", s.Broker.noCredentialReason(), "in", delay)
@@ -1442,7 +1471,7 @@ func (s *Server) SweepLoop(ctx context.Context, every time.Duration) {
 // revoke is the bounded revoke: three tries, 2 s apart, then the lease is the fallback. It uses
 // revokeOnce, so an enrollment of another operator counts as done here too.
 func (s *Server) revoke(ctx context.Context, id string) {
-	retryUntilStop(ctx, nil, nil, 3, 2*time.Second, 2*time.Second, func(attempt int, err error, delay time.Duration, retrying bool) {
+	retryUntilStop(ctx, nil, nil, nil, 3, 2*time.Second, 2*time.Second, func(attempt int, err error, delay time.Duration, retrying bool) {
 		if !retrying {
 			s.Log.Warn("revoke failed; the lease lapses on its own", "enrollment_id", id, "error", err)
 		}
