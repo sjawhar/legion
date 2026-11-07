@@ -1,6 +1,7 @@
 import { type Browser, expect, test } from "@playwright/test";
 
 import { createComment, createIssue, createProject } from "./api";
+import { directiveOpenersThenClosers, directiveOpenersThenLongLine } from "./heavy-bodies";
 import { expectSettled } from "./heavy-bodies-page";
 import { expectUnderTheBound, type Measured, measureDraw, record } from "./main-thread-hold";
 import { resetDatabase } from "./seed";
@@ -11,15 +12,17 @@ const agent = {
   as: "agent" as const,
 };
 
-/** The two bodies that froze a reader's tab for about a minute and 15 s (INFRA-581). */
+/** The two bodies that froze a reader's tab for about a minute and 15 s (INFRA-581). They are
+ *  spelled in `heavy-bodies.ts` with the rest of this suite's heavy bodies, where the digest
+ *  table holds them to the bytes Go writes through the API (`heavy-bodies.ts:1-12`). */
 const inputs = [
   {
     name: "2,000 nested unclosed openers then a 21,000-character line",
-    body: ":::a\n".repeat(2000) + "x".repeat(21000),
+    body: directiveOpenersThenLongLine,
   },
   {
     name: "1,000 nested openers then 1,000 closing lines",
-    body: ":::a\n".repeat(1000) + ":::\n".repeat(1000),
+    body: directiveOpenersThenClosers,
   },
 ];
 

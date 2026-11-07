@@ -1,10 +1,15 @@
 // The heavy bodies this suite measures, and the generators that spell them. `heavy-bodies.e2e.ts`
-// draws them in a browser; the same shapes written as documents through the API are Go's, in
+// draws most of them in a browser and `nested-directive.e2e.ts` draws the two bare-directive ones;
+// the same shapes written as documents through the API are Go's, in
 // `packages/envoy/internal/dispatch/pmdoc/heavybodies`, which `pmdoc`'s own tests and
 // `internal/dispatch/api`'s heavy-document-write test read. The two sides must spell the very
 // same bytes - a shape changed on one alone would leave the other comparing a different body
-// against the same numbers (sjawhar/legion#2519). This module imports neither Playwright nor a
-// browser module, so a spec loads it for its shapes alone.
+// against the same numbers (sjawhar/legion#2519) - and what holds them to that is the digest
+// table `heavybodies/testdata/shared-bodies.json`: every body both sides spell, by its id, with
+// its length and the SHA-256 of its bytes, and every body one side has alone. This side is held
+// to it by `e2e/__tests__/heavy-bodies-digests.test.ts` and Go's by `heavybodies/digests_test.go`,
+// so neither side can gain, lose, rename or respell a body on its own. This module imports
+// neither Playwright nor a browser module, so a spec loads it for its shapes alone.
 import { DISPATCH_BLOCK_UNITS } from "@legion/contracts/dispatch-tools";
 
 /** `head` followed by `filler` repeated, cut to exactly `length` characters. */
@@ -35,3 +40,27 @@ export const markerChain = `${"- ".repeat(15_999)}x`;
 /** 49 items nested on one line, which Go accepts (49 lists and 49 items is 98 of its 100
  *  blocks), then blank lines to the cap. */
 export const nested49ThenBlankLines = padTo(`${"- ".repeat(49)}x\n`, "\n", DISPATCH_BLOCK_UNITS);
+/** 2,000 unclosed `:::a` openers and then a 21,000-character line: with the body below, what
+ *  froze a reader's tab for about a minute and 15 s (INFRA-581). Both are drawn by
+ *  `nested-directive.e2e.ts`, which spells the row titles they are measured under. */
+export const directiveOpenersThenLongLine = `${":::a\n".repeat(2_000)}${"x".repeat(21_000)}`;
+/** 1,000 nested `:::a` openers and then as many closing lines. */
+export const directiveOpenersThenClosers = `${":::a\n".repeat(1_000)}${":::\n".repeat(1_000)}`;
+
+/** Every body above under the id the digest table pins it to - the `ID` of the Go `Shape` or
+ *  `NestedDirective` spelling the same bytes, or, for a body only this side has, the id the
+ *  table lists it under. The specs import the named exports; `heavy-bodies-digests.test.ts`
+ *  walks this record, so a body this side gains or loses without the table fails there. */
+export const heavyBodies: Readonly<Record<string, string>> = {
+  "plain-list": plainList,
+  "lazy-quote": lazyQuote,
+  "lazy-list-item": lazyListItem,
+  "bracket-run": bracketRun,
+  "callout-bracket-run": calloutBracketRun,
+  "marker-chain": markerChain,
+  "markers-49-then-blank-lines": nested49ThenBlankLines,
+  "nested-100-items-then-blank-lines": nestedThenBlankLines,
+  "nested-100-items-then-text-lines": nestedThenTextLines,
+  "directive-openers-then-long-line": directiveOpenersThenLongLine,
+  "directive-openers-then-closers": directiveOpenersThenClosers,
+};

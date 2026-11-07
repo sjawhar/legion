@@ -3,6 +3,17 @@
 // write the very same bytes. They lived in pmdoc's own _test.go files, which no other package can
 // import, until the browser rows that wrote them through the API were moved into Go (INFRA-1404).
 //
+// Ten of these bodies are spelled a second time in TypeScript, in packages/dispatch/e2e/heavy-bodies.ts,
+// which the browser suite draws them from. A checked-in digest table holds the two spellings to each
+// other: testdata/shared-bodies.json names every body both sides spell - by the ID each Shape and
+// NestedDirective below carries - with that body's length and the SHA-256 of its bytes, and every
+// body only one side has, with why it is alone. Both sides read the table and neither may drift from
+// it: digests_test.go here, and packages/dispatch/e2e/__tests__/heavy-bodies-digests.test.ts there,
+// each fail where a body of their own no longer digests to its row, and where their side has gained,
+// lost or renamed one. So a shape changed on one side alone fails that side's test, instead of
+// leaving the other comparing different bytes against the same numbers (sjawhar/legion#2519). The
+// table carries its own contract in its schema field, JSON having nowhere to put a comment.
+//
 // This package imports pmdoc nowhere, on purpose: pmdoc's tests are in-package, so an import of
 // pmdoc here would close a cycle. What it needs of pmdoc's bounds it carries itself, as MaxNesting,
 // and pmdoc's own test holds the two to each other.
@@ -29,6 +40,10 @@ const MaxNesting = 100
 
 // Shape is one heavy body, at whatever length a caller asks of it.
 type Shape struct {
+	// ID is the key testdata/shared-bodies.json pins this shape's bytes to, and the key
+	// e2e/heavy-bodies.ts spells the same body under in its own record. The two sides are matched
+	// by it rather than by Name, which only this one has.
+	ID string
 	// Name says what the shape is and names its subtest.
 	Name string
 	// Body is the shape carrying size characters of whatever it repeats, after its own fixed
@@ -74,6 +89,11 @@ func nestedRefusal(line int) string {
 // nested by indentation stand inside 98 blocks and are stored, while the 51st line of 100 such
 // items opens a block inside 100 and is refused - as the chain of markers on one line is, at its
 // 51st marker. The browser draws exactly those lines as the text they are instead.
+//
+// Eight of the nine are bytes for bytes what e2e/heavy-bodies.ts spells for the browser suite,
+// and the ninth is Go's alone: which is which, and what each of the eight digests to, is
+// testdata/shared-bodies.json, held over the shapes here by digests_test.go and over the
+// TypeScript by e2e/__tests__/heavy-bodies-digests.test.ts.
 func Shapes() []Shape {
 	nest49, nest100 := nestedItems(49), nestedItems(100)
 	// markers49 is the same 98 blocks written on one line, as e2e/heavy-bodies.ts writes them.
@@ -84,21 +104,25 @@ func Shapes() []Shape {
 	const bracketOpeners = 15_000
 	return []Shape{
 		{
+			ID:    "plain-list",
 			Name:  "a plain list of 8,000 items",
 			Body:  func(size int) string { return strings.Repeat("- x\n", size/4) },
 			Grown: BlockCap,
 		},
 		{
+			ID:    "lazy-quote",
 			Name:  "a quote then lines carrying no marker",
 			Body:  func(size int) string { return "> x\n" + strings.Repeat("x\n", size/2) },
 			Grown: BlockCap - len("> x\n"),
 		},
 		{
+			ID:    "lazy-list-item",
 			Name:  "a list item then lines carrying no marker",
 			Body:  func(size int) string { return "- x\n" + strings.Repeat("x\n", size/2) },
 			Grown: BlockCap - len("- x\n"),
 		},
 		{
+			ID:   "bracket-run",
 			Name: "a run of 15,000 brackets and as many closers",
 			Body: func(size int) string {
 				return strings.Repeat("[", size/2) + strings.Repeat("]", size-size/2)
@@ -106,6 +130,7 @@ func Shapes() []Shape {
 			Grown: 30_000,
 		},
 		{
+			ID:    "nested-49-items-then-blank-lines",
 			Name:  "49 items nested by indentation then blank lines",
 			Body:  func(size int) string { return nest49 + strings.Repeat("\n", size) },
 			Grown: BlockCap - len(nest49),
@@ -116,24 +141,30 @@ func Shapes() []Shape {
 			// above writes them. The two nest the same 98 blocks and are stored alike, but they
 			// are not the same bytes and they cost the parser different things - one line holding
 			// 50 open blocks over ~31,900 blank lines, against 49 lines of two characters each -
-			// so both are here rather than one standing in for the other (INFRA-1404).
+			// so both are here rather than one standing in for the other (INFRA-1404). This is
+			// the one of the two the browser writes: testdata/shared-bodies.json pins it to
+			// nested49ThenBlankLines and lists the shape above as a body only Go has.
+			ID:    "markers-49-then-blank-lines",
 			Name:  "49 list markers on one line then blank lines",
 			Body:  func(size int) string { return markers49 + strings.Repeat("\n", size) },
 			Grown: BlockCap - len(markers49),
 		},
 		{
+			ID:      "nested-100-items-then-blank-lines",
 			Name:    "100 items nested by indentation then blank lines",
 			Body:    func(size int) string { return nest100 + strings.Repeat("\n", size) },
 			Grown:   BlockCap - len(nest100),
 			Refusal: nestedRefusal(51),
 		},
 		{
+			ID:      "marker-chain",
 			Name:    "a chain of 15,999 list markers on one line",
 			Body:    func(size int) string { return strings.Repeat("- ", size/2) + "x" },
 			Grown:   BlockCap - len("x"),
 			Refusal: nestedRefusal(1),
 		},
 		{
+			ID:   "callout-bracket-run",
 			Name: "a typed fence whose label opens a run of brackets",
 			Body: func(size int) string {
 				return typedFence + strings.Repeat("[", bracketOpeners) + strings.Repeat("]", size-bracketOpeners)
@@ -149,20 +180,28 @@ func Shapes() []Shape {
 // (INFRA-581): a bare `:::a`, which Go reads as a malformed directive whatever it is nested in, so
 // a document write of either is refused.
 type NestedDirective struct {
+	// ID is the key testdata/shared-bodies.json pins this body's bytes to, and the key
+	// e2e/heavy-bodies.ts spells the same body under in its own record. The two sides are matched
+	// by it rather than by Name, which only this one has.
+	ID string
 	// Name says what the body is and names its subtest.
 	Name string
 	// Markdown is the body itself, whole: unlike a Shape it does not grow.
 	Markdown string
 }
 
-// NestedDirectives are the two deeply nested bare-directive bodies a document write refuses.
+// NestedDirectives are the two deeply nested bare-directive bodies a document write refuses. The
+// browser suite spells both (e2e/heavy-bodies.ts, drawn by e2e/nested-directive.e2e.ts), so both
+// stand in testdata/shared-bodies.json.
 func NestedDirectives() []NestedDirective {
 	return []NestedDirective{
 		{
+			ID:       "directive-openers-then-long-line",
 			Name:     "2,000 unclosed openers then a long line",
 			Markdown: strings.Repeat(":::a\n", 2000) + strings.Repeat("x", 21000),
 		},
 		{
+			ID:       "directive-openers-then-closers",
 			Name:     "1,000 openers then 1,000 closing lines",
 			Markdown: strings.Repeat(":::a\n", 1000) + strings.Repeat(":::\n", 1000),
 		},
