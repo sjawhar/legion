@@ -288,6 +288,14 @@ func TestAHubSignalsEveryWakeAgainAfterAReconnect(t *testing.T) {
 // A wake folds the signals its caller has not read yet into one, and never blocks the hub: a
 // caller that reads late still learns to look again, and the notifications behind it still reach
 // their handlers.
+//
+// onNotify runs a channel's handlers and only then signals its wakes, and Run reads one
+// notification at a time, so hearing a payload says nothing about that payload's wake: it is
+// signalled after the handler returns. A second channel is the test's marker for it. Hearing the
+// marker means Run has finished everything hub_test_a owed, the three signals among them, so the
+// read below takes the one they folded into and nothing can follow it. Reading straight after the
+// third payload instead would race the third signal, which is what reddened this test in CI
+// (run 42256279550, job 128026760370: "the wake once read: got {}, want nothing").
 func TestAWakeNobodyReadsFoldsItsSignalsAndBlocksNothing(t *testing.T) {
 	database := storetest.Open(t)
 	probe := newHubProbe()
@@ -295,6 +303,8 @@ func TestAWakeNobodyReadsFoldsItsSignalsAndBlocksNothing(t *testing.T) {
 	wake := hub.Wake("hub_test_a")
 	heard := make(chan string, 8)
 	hub.Handle("hub_test_a", func(payload string) { heard <- payload })
+	marker := make(chan string, 1)
+	hub.Handle("hub_test_b", func(payload string) { marker <- payload })
 	runHub(t, hub)
 	recv(t, probe.connected, "the first LISTEN")
 
@@ -306,6 +316,8 @@ func TestAWakeNobodyReadsFoldsItsSignalsAndBlocksNothing(t *testing.T) {
 			t.Fatalf("the handler heard %q, want %q", got, want)
 		}
 	}
+	notifyChannel(t, database, "hub_test_b", "every wake of hub_test_a is signalled")
+	recv(t, marker, "the marker on the second channel")
 	recv(t, wake, "the wake")
 	quiet(t, wake, "the wake once read")
 }

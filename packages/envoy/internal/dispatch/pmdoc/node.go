@@ -304,7 +304,26 @@ func validateTypedBlock(n *Node, typ BlockTypeSchema) error {
 // lets an ask hold other blocks, since concurrent browser edits can leave one there, the browser
 // keeps it, and settlement marks the ask `invalid`; markdown written in whole is held to the rule,
 // as the browser editor's parser holds it.
+//
+// An ask whose question a person's edit emptied keeps the rule, options and all: the document
+// service keeps such a block and repairs it through its question (refuseEmptyQuestionEdit,
+// docs/ask_block_text.go), and a refusal of this check must not name it. Markdown that writes a
+// question nowhere is AskWrittenContentError's to refuse.
 func AskContentError(node *Node) error {
+	return askContentError(node, false)
+}
+
+// AskWrittenContentError is AskContentError over markdown written in whole - an upload, a
+// replacement, a repair - where an ask written with its options and no question is refused too.
+// Both parsers read such markdown holding the empty paragraph the Proof schema fills in ahead of
+// the options (emptyParagraphFirst), so the content rule itself no longer catches what, before
+// that paragraph was read, it refused as a bullet list before the question; the write is refused
+// here instead, by what is wrong with it.
+func AskWrittenContentError(node *Node) error {
+	return askContentError(node, true)
+}
+
+func askContentError(node *Node, written bool) error {
 	var found error
 	walk(node, func(ask *Node, _ []int, _, _ int) bool {
 		if found != nil {
@@ -315,6 +334,11 @@ func AskContentError(node *Node) error {
 		}
 		broken := askContentBreak(ask.Children)
 		if broken == "" {
+			if written && askWritesNoQuestion(ask.Children) {
+				id, _ := ask.Attrs[BlockIDAttr].(string)
+				found = fmt.Errorf("ask block %q holds its options and no question, which no one can answer, where its content rule, %s, reads the question as the paragraph before them; write it on the line under the block's opening fence, above its options", id, BlockContentParagraphsOptionalBulletList)
+				return false
+			}
 			return true
 		}
 		id, _ := ask.Attrs[BlockIDAttr].(string)
@@ -347,6 +371,26 @@ func openingWords(text string) string {
 		return text
 	}
 	return strings.TrimRight(string(runes[:opening]), " ") + "…"
+}
+
+// askWritesNoQuestion reports whether these children are an ask's whose markdown wrote its
+// options and no question: one or more paragraphs that hold nothing - the one the Proof schema
+// fills in ahead of a list (emptyParagraphFirst), and any the author wrote out of inlines that
+// write no bytes, a link with no text among them - and then that list. A question emptied by a
+// person's edit leaves the same shape, which the document service keeps and repairs through its
+// question (refuseEmptyQuestionEdit, docs/ask_block_text.go), so only markdown written in whole
+// is held to this (AskWrittenContentError).
+func askWritesNoQuestion(children []*Node) bool {
+	last := len(children) - 1
+	if last < 1 || children[last] == nil || children[last].Type != "bullet_list" {
+		return false
+	}
+	for _, child := range children[:last] {
+		if child == nil || child.Type != "paragraph" || len(child.Children) != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // askContentBreak names the first child that breaks the content rule paragraph+ bullet_list? -
