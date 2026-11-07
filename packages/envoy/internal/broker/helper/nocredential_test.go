@@ -419,8 +419,10 @@ func TestARegisterWaitAnswersAtOnceWhenNoConfirmationIsInFlight(t *testing.T) {
 // TestARegisterWaitAnswersAtOnceWhenALapsedIDBlocksTheConfirmation: a session can come back
 // holding BOTH an enrollment to reclaim and a lapsed one to revoke (reclaimIdentity's Revoke,
 // and Recover's re-pin). enrollLoop revokes that lapsed id BEFORE it reaches confirmInherited,
-// the revoke needs a launcher credential, and this helper was never logged in — so no
-// confirming renew is ever sent, and nothing can ever answer a wait taken for one. The register
+// so the lapsed id is revoked before the confirmation is ever sent — and Broker.Revoke signs
+// through signingAuthority, which tries a person's sign-in before the machine credential,
+// while this rig holds neither. So nothing lets that revoke through, no confirming renew is
+// ever sent, and nothing can ever answer a wait taken for one. The register
 // must say so at once: waiting would spend the caller's whole N and then answer NO_CREDENTIAL
 // all the same, which the launcher gate's unconditional `--wait 10`
 // (scripts/agent-secrets-session) would pay on every launch for the rest of the session's life.
@@ -440,7 +442,7 @@ func TestARegisterWaitAnswersAtOnceWhenALapsedIDBlocksTheConfirmation(t *testing
 	started := time.Now()
 	resp := r.call(t, Request{Op: "register", WaitSeconds: 3, SessionID: &id})
 	if elapsed := time.Since(started); elapsed > time.Second || resp.Code != CodeNoCredential {
-		t.Fatalf("register --wait 3 answered %+v after %s; want NO_CREDENTIAL well inside the wait, since the revoke of the lapsed id ahead of the confirmation needs a launcher credential nobody has installed and no renew can be sent", resp, elapsed)
+		t.Fatalf("register --wait 3 answered %+v after %s; want NO_CREDENTIAL well inside the wait, since the lapsed id is revoked before the confirmation is ever sent and the revoke goes through on a sign-in or a machine credential, neither of which this rig holds, so no renew can be sent", resp, elapsed)
 	}
 }
 
@@ -490,6 +492,64 @@ func TestARegisterWaitAnswersWithinTheBoundWhenTheBrokerNeverAnswers(t *testing.
 	// that waited for the bound from one that waited for nothing (those answer in ~0 s).
 	if got.err != nil || got.resp.Code != CodeNoCredential || elapsed > 5*time.Second || elapsed < bound/2 {
 		t.Fatalf("register --wait 10 answered %+v (%v) after %s; want NO_CREDENTIAL at the bound (%s): well inside the 10 s wait, since a broker that never answers must not hold a launcher's gate for the helper's whole client timeout, and no sooner than the bound, since this register waits for the confirmation in flight", got.resp, got.err, elapsed, bound)
+	}
+}
+
+// TestARegisterWaitAnswersWithinTheBoundWhenTheCredentialWentAwayUnderTheRenew: the bound above
+// is the register's promise, but the register and the renew read the helper's machine
+// credential at different moments, so no gate on that credential can keep it — whichever of
+// them reads first can be right about a state the other no longer sees. Here the first
+// confirming renew BEGINS while a credential is held (a re-pin or a reclaim on a logged-in
+// helper), the credential is then refused and cleared, and a register on that same session
+// arrives reading none: it waits on the renew in flight, and only a renew bounded whatever the
+// credential was when it started can answer it. Unbounded, that wait is the launcher gate's
+// whole `--wait 10` (scripts/agent-secrets-session) on every launch for as long as the outage
+// lasts, which is what the bound exists to prevent.
+func TestARegisterWaitAnswersWithinTheBoundWhenTheCredentialWentAwayUnderTheRenew(t *testing.T) {
+	// Short, for the same reason as the row above: what this pins is the mechanism, not the
+	// number. The bound may well expire before the register below arrives — the credential
+	// drop takes a round trip of its own — and that is the same answer by the same means: the
+	// first attempt ended at the bound instead of running to the client timeout.
+	const bound = 300 * time.Millisecond
+	r := reclaimedIdentityRigLoggedInNeverAnswering(t, bound)
+
+	// The register that admits the session and starts its enroll loop, whose confirming renew
+	// the gate then swallows. The helper is logged in, so this answers OK with no code.
+	id := testSessionID
+	if first := r.call(t, Request{Op: "register", SessionID: &id}); !first.OK || first.Code != "" {
+		t.Fatalf("register with no wait: %+v; want OK and no code while the helper holds a credential", first)
+	}
+	// Read from the BROKER's side that the renew is out and waiting at the gate, so the
+	// credential is dropped AFTER that first attempt began and the interleaving this row is
+	// about is read rather than assumed.
+	waitFor(t, func() bool {
+		r.fake.mu.Lock()
+		defer r.fake.mu.Unlock()
+		return r.fake.renewAttempts >= 1
+	})
+
+	// The broker refuses the credential (401 LAUNCHER_INVALID) on the next enroll, as
+	// TestSignAnswersNoCredentialWhileTheHelperHoldsNone does: afterwards the helper holds
+	// none, and the renew already at the gate was started by a helper that did.
+	r.fake.mu.Lock()
+	r.fake.enrollUnauthorizedNext = 1
+	r.fake.mu.Unlock()
+	if key := r.call(t, Request{Op: "enroll-session-key", RuntimeID: "box-1", Thumbprint: "tp-1"}); key.OK {
+		t.Fatalf("enroll-session-key with a refused credential: %+v", key)
+	}
+	if r.srv.Broker.HasCredential() {
+		t.Fatal("a refused credential must be cleared")
+	}
+
+	// The same session again, asking for the launcher gate's own wait. It reads no credential,
+	// so it waits for the confirmation in flight — the one started under a credential. The call
+	// is made with a 20 s deadline, past the 10 s asked for, so a wait that runs its whole
+	// course is read here as this row's own failure and not as a client that gave up.
+	started := time.Now()
+	resp, err := Call(r.sock, Request{Op: "register", WaitSeconds: 10, SessionID: &id}, 20*time.Second)
+	elapsed := time.Since(started)
+	if err != nil || resp.Code != CodeNoCredential || elapsed > 5*time.Second {
+		t.Fatalf("register --wait 10 answered %+v (%v) after %s; want NO_CREDENTIAL at the bound (%s), well inside the 10 s wait: the renew it waits on began while the helper held a credential, and a bound that is skipped for that renew leaves this register waiting the whole of a launcher gate's wait", resp, err, elapsed, bound)
 	}
 }
 

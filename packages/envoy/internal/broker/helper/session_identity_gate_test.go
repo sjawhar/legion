@@ -548,6 +548,19 @@ func reclaimedIdentityRigNeverAnswering(t *testing.T, bound time.Duration) *rig 
 	return r
 }
 
+// reclaimedIdentityRigLoggedInNeverAnswering is that same never-answering fixture with the
+// helper LOGGED IN, which is the state a first confirming renew can BEGIN in and be waited on
+// out of: the row that uses it drops the machine credential once the renew is at the gate, so
+// what that renew read when it started and what the waiting register reads are two different
+// readings of the same credential (DefaultFirstConfirmBound). The login is taken after the rig
+// is built, so the register that admits the session is still the first call the row makes.
+func reclaimedIdentityRigLoggedInNeverAnswering(t *testing.T, bound time.Duration) *rig {
+	t.Helper()
+	r := reclaimedIdentityRigNeverAnswering(t, bound)
+	r.login(t)
+	return r
+}
+
 // requireReclaimable fails unless the identity parked for testSessionID is still whole: the
 // record, its key and its enrollment, all where the session itself can take them back.
 func requireReclaimable(t *testing.T, r *rig, key *ecdsa.PrivateKey) {

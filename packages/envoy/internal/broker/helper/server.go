@@ -1116,12 +1116,16 @@ const (
 // Session.confirmSettled states): a later retry answers to nobody, so it may take the client
 // timeout as it always has.
 //
-// The bound is the waiting register's and nobody else's, so it is applied only while the helper
-// holds no machine credential (Broker.HasCredential), the same reading registerReply gates its
-// own wait on. With a credential held nothing ever reads Session.confirmSettled, and the
-// confirmations Recover's re-pins start at startup have no register behind them at all: cutting
-// a slow but healthy first renew short there would buy no reader anything and cost the session
-// a retry.
+// The bound is unconditional, whatever credential the helper holds. registerReply reads
+// Broker.HasCredential once before its wait and this renew reads it again when the attempt
+// runs: two readings at different moments, which can disagree — a machine login can land
+// between them, and a re-pin's first renew can start while a credential is held and be waited
+// on by a register that arrives after it was dropped — so a bound gated on a credential is
+// exactly the bound a waiting register may not get. What bounding every first attempt costs is
+// one cut renew for a session nobody waits on, which the enroll loop retries on its own
+// schedule; what it buys is a promise that holds however the two readings fall. While a machine
+// credential is held nothing reads Session.confirmSettled, so there the cut attempt is the whole
+// of the cost.
 const DefaultFirstConfirmBound = 3 * time.Second
 
 // firstConfirmBound is this Server's bound for that first renew: FirstConfirmBound when it is
@@ -1153,9 +1157,8 @@ func (s *Server) firstConfirmBound() time.Duration {
 // identity it has now, not on this one.
 //
 // The first attempt's renew runs under a bound of its own, s.firstConfirmBound()
-// (DefaultFirstConfirmBound, or Server.FirstConfirmBound where that is set), and only while the
-// helper holds no machine credential, since in no other state is a register waiting on it; every
-// attempt after it, and every attempt at all once a credential is held, runs under ctx alone. The
+// (DefaultFirstConfirmBound, or Server.FirstConfirmBound where that is set); every attempt after
+// it runs under ctx alone, since only the first can have a register waiting on it. The
 // bound expiring IS the "did not reach the broker" answer above: renewIdentity fails with its
 // context's deadline, which is no ENROLLMENT_NOT_LIVE, so the failure settles the waiting
 // register (Session.settleConfirm) and this loop retries on its own schedule, exactly as it
@@ -1188,14 +1191,9 @@ func (s *Server) confirmInherited(ctx context.Context, sess *Session, pass ident
 		renewCtx := ctx
 		if first {
 			first = false
-			// The bound belongs to the credential-less register that may be waiting on this
-			// attempt and to nobody else (DefaultFirstConfirmBound), so with a credential
-			// held this renew takes the client timeout as every other renew does.
-			if !s.Broker.HasCredential() {
-				bounded, cancel := context.WithTimeout(ctx, s.firstConfirmBound())
-				defer cancel()
-				renewCtx = bounded
-			}
+			bounded, cancel := context.WithTimeout(ctx, s.firstConfirmBound())
+			defer cancel()
+			renewCtx = bounded
 		}
 		next, err := s.Broker.renewIdentity(renewCtx, pass)
 		if err != nil {
