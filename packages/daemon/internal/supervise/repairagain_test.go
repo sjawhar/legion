@@ -68,8 +68,13 @@ func TestAConfirmOwedWriteIsMadeWholeWithItsReport(t *testing.T) {
 	}
 
 	h.wantState(StateWorking)
-	if h.m.owedWrite == nil || h.m.owedWrite.method != "PutClaimAndDelivery" {
-		t.Fatalf("the mark is %+v, want one naming the transaction that writes both rows", h.m.owedWrite)
+	if h.m.owedWrite == nil {
+		t.Fatal("the confirmation's failed write left no mark")
+	}
+	if owed := h.records.of(owedWriteLine); len(owed) != 1 {
+		t.Fatalf("the owed write is logged %d times, want once", len(owed))
+	} else if store, ok := owed[0].attr("store"); !ok || store.String() != "PutClaimAndDelivery" {
+		t.Fatalf("the owed line names the store method %v, want the transaction that writes both rows", store)
 	}
 	if seen := states(reports()); !slices.Equal(seen, []ClaimState{StateReady}) {
 		t.Fatalf("the daemon was told %v; the confirmation's working is owed until its write lands", seen)

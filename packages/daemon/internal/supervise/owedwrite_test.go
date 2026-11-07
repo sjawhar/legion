@@ -273,8 +273,15 @@ func TestTheWriteATurnStartOwedIsMadeAtTheClaimsNextDecision(t *testing.T) {
 		if stored := h.store.load(testToken); stored.State != StateReady {
 			t.Fatalf("the stored claim reads %s, want ready: the write the store refused changed nothing there", stored.State)
 		}
-		if h.m.owedWrite.method != "PutClaim" {
-			t.Fatalf("the mark names the store method %q, want PutClaim", h.m.owedWrite.method)
+		if h.m.owedWrite == nil {
+			t.Fatal("the failed claim write left no mark")
+		}
+		owed := h.records.of(owedWriteLine)
+		if len(owed) != 1 {
+			t.Fatalf("the owed write is logged %d times, want once", len(owed))
+		}
+		if store, ok := owed[0].attr("store"); !ok || store.String() != "PutClaim" {
+			t.Fatalf("the owed line names the store method %v, want PutClaim", store)
 		}
 	})
 

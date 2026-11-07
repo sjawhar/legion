@@ -36,8 +36,13 @@ func TestARetirementAlreadyMadeIsReadAsTheStoresOwnRatherThanAFailure(t *testing
 	if p := h.claim().Pending; p != nil {
 		t.Fatalf("pending = %+v, want %s gone: the store holds no such delivery, so memory holds none either", p, delivery)
 	}
-	if h.m.owedWrite == nil || h.m.owedWrite.method != "RetireDelivery" {
-		t.Fatalf("the mark is %+v, want the retirement's own claim write owed", h.m.owedWrite)
+	if h.m.owedWrite == nil {
+		t.Fatal("the retirement the store had already made left no claim write owed")
+	}
+	if owed := h.records.of(owedWriteLine); len(owed) != 1 {
+		t.Fatalf("the owed write is logged %d times, want once", len(owed))
+	} else if store, ok := owed[0].attr("store"); !ok || store.String() != "RetireDelivery" {
+		t.Fatalf("the owed line names the store method %v, want the retirement whose transaction rolled the claim write back", store)
 	}
 	if lines := h.logs.lines("the store holds no such delivery", delivery); len(lines) != 1 {
 		t.Fatalf("the refusal is logged %d times, want once: %v", len(lines), lines)

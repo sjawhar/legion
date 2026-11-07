@@ -1769,6 +1769,20 @@ func (m *Machine) putClaim(ctx context.Context) error {
 	return m.write(ctx, func(ctx context.Context) error { return m.deps.Store.PutClaim(ctx, c) })
 }
 
+// putDelivery writes one delivery of this claim under the claim-write deadline, as putClaim
+// writes the claim row under it. Every delivery write a decision makes goes through it, and it
+// marks nothing: a delivery write that fails has a mark of its own (saved, settle).
+func (m *Machine) putDelivery(ctx context.Context, d Delivery) error {
+	return m.write(ctx, func(ctx context.Context) error { return m.deps.Store.PutDelivery(ctx, m.claim.Token, d) })
+}
+
+// putClaimAndDelivery writes the claim and one delivery in the store's one transaction, under the
+// same deadline, and marks nothing either: the caller that owes its claim write says so itself
+// (confirm, repair), and the rest write memory only once the store has taken both rows.
+func (m *Machine) putClaimAndDelivery(ctx context.Context, c Claim, d Delivery) error {
+	return m.write(ctx, func(ctx context.Context) error { return m.deps.Store.PutClaimAndDelivery(ctx, c, d) })
+}
+
 // persist is putClaim with the mark, and is what every caller that leaves its decision standing
 // in memory uses: the claim the machine holds came from the worker's own frame and nothing puts
 // it back, so a write the store did not take is the only thing still missing, and it is owed and

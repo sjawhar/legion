@@ -9,15 +9,13 @@ import (
 )
 
 // owedClaimWrite is one claim write the store did not take and the machine still owes: the whole
-// of what a failed write leaves behind, held on the Machine until the write is made. The write
-// itself carries nothing of the claim, because the claim the repair writes is the one the machine
-// holds when the repair runs rather than a copy taken when the write failed (repair). What is
-// held beside it is what a reader of the log needs to follow the write from the failure to the
-// repair, and the durable reports those failed decisions never made.
+// of what a failed write leaves behind, held on the Machine until the write is made. It carries
+// nothing of the claim, because the claim the repair writes is the one the machine holds when
+// the repair runs rather than a copy taken when the write failed (repair), and it names no store
+// method either: which call the repair makes is decided afresh from what the claim holds then,
+// and the method of each failure is in that failure's own log line. What is left is the durable
+// reports those failed decisions never made.
 type owedClaimWrite struct {
-	// method is the store method whose call failed ("PutClaim" or "PutClaimAndDelivery"), for the
-	// log line a reader follows.
-	method string
 	// reports are the durable reports the failed decisions owed, oldest first, made by the repair
 	// once the write they waited on has landed (makeOwedReports). There is one per decision that
 	// owed a report rather than one per mark: a second failing decision while the first is still
@@ -60,22 +58,21 @@ const repairedWriteLine = "supervise: a claim write the database did not take wa
 
 // oweWrite marks the claim write owed and says so in the log: the row the store holds is behind
 // what memory holds, and the claim's next decision is to make that write again (repair). A
-// machine that already owes one keeps the single mark and takes the newer method's name, since
-// the repair writes the claim as it stands rather than one write per failure, and the newest
-// failure is the one a reader of the log is following.
+// machine that already owes one keeps the single mark, since the repair writes the claim as it
+// stands rather than one write per failure; method names the call that failed for the log line
+// alone, and each failure's line carries its own.
 //
-// It is split out of owes for the one caller that does not put its failure to the rule at all: a
-// retirement the store refused because it had already made it (retirePending) knows from the
-// refusal itself that the claim write of that same transaction was rolled back with the delete,
-// which is a fact about the store's transaction rather than about the shape of the error. Asking
-// writeOwed there would be asking the wrong question, and would answer by accident: the sentinel
-// carries no SQLSTATE, so the rule owes it, but it would stop owing it the day the refusal is
-// spelled as a server error.
+// It is split out of owes for the two callers that do not put a failure to the rule. One is the
+// repair's own failure, which has already asked. The other is a retirement the store refused
+// because it had already made it (retirePending), which knows from the refusal itself that the
+// claim write of that same transaction was rolled back with the delete — a fact about the
+// store's transaction rather than about the shape of the error. Asking writeOwed there would be
+// asking the wrong question, and would answer by accident: the sentinel carries no SQLSTATE, so
+// the rule owes it, but it would stop owing it the day the refusal is spelled as a server error.
 func (m *Machine) oweWrite(method string, err error) {
 	if m.owedWrite == nil {
 		m.owedWrite = &owedClaimWrite{}
 	}
-	m.owedWrite.method = method
 	m.log.Warn(owedWriteLine, "store", method, "error", err, "owed", true)
 }
 
@@ -152,12 +149,11 @@ func (m *Machine) repair(ctx context.Context) {
 		return m.deps.Store.PutClaim(ctx, c)
 	})
 	if err != nil {
-		owed := writeOwed(err)
-		m.log.Warn(owedWriteLine, "store", method, "error", err, "owed", owed)
-		if owed {
-			m.owedWrite.method = method
+		if writeOwed(err) {
+			m.oweWrite(method, err)
 			return
 		}
+		m.log.Warn(owedWriteLine, "store", method, "error", err, "owed", false)
 		m.owedWrite = nil
 		return
 	}

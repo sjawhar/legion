@@ -107,51 +107,51 @@ func (s *switchStore) RetireDelivery(ctx context.Context, c supervise.Claim, del
 	return s.now().RetireDelivery(ctx, c, deliveryID)
 }
 
-// refusingStore answers every claim write of one claim with err, and hands everything else to the
-// store behind it. One claim's writes alone fail, so what another claim's machine does meanwhile
-// is the real store's own answer rather than a second failure.
-type refusingStore struct {
+// claimWriteFault is a fault on every claim write of one claim: the writes of that token answer
+// fault, and everything else goes to the store behind it. One claim's writes alone are touched,
+// so what another claim's machine does meanwhile is the real store's own answer rather than a
+// second fault.
+type claimWriteFault struct {
 	supervise.Store
 	token claim.Token
-	err   error
+	fault func(context.Context) error
 }
 
-func (s *refusingStore) PutClaim(ctx context.Context, c supervise.Claim) error {
+func (s *claimWriteFault) PutClaim(ctx context.Context, c supervise.Claim) error {
 	if c.Token == s.token {
-		return s.err
+		return s.fault(ctx)
 	}
 	return s.Store.PutClaim(ctx, c)
 }
 
-func (s *refusingStore) PutClaimAndDelivery(ctx context.Context, c supervise.Claim, d supervise.Delivery) error {
+func (s *claimWriteFault) PutClaimAndDelivery(ctx context.Context, c supervise.Claim, d supervise.Delivery) error {
 	if c.Token == s.token {
-		return s.err
+		return s.fault(ctx)
 	}
 	return s.Store.PutClaimAndDelivery(ctx, c, d)
 }
 
-func (s *refusingStore) RetireDelivery(ctx context.Context, c supervise.Claim, deliveryID string) error {
+func (s *claimWriteFault) RetireDelivery(ctx context.Context, c supervise.Claim, deliveryID string) error {
 	if c.Token == s.token {
-		return s.err
+		return s.fault(ctx)
 	}
 	return s.Store.RetireDelivery(ctx, c, deliveryID)
 }
 
-// blockedStore is a database that has stopped answering, for one claim: its claim writes go to a
-// pool pointed at a listener this test opens and never accepts from, so the kernel takes the
-// connection and no server ever answers the startup message. The write returns only when
-// something ends its wait, which is the whole point — what ends it is Timeouts.ClaimWrite.
-//
-// pgxpool.New dials nothing, so the pool is built at once and the first statement is where the
-// wait begins. Every other claim's writes go to the store behind it, so this is one claim's
-// outage rather than the whole database's.
-type blockedStore struct {
-	supervise.Store
-	token claim.Token
-	pool  *pgxpool.Pool
+// refusing is the fault of a server that answers the write with err.
+func refusing(behind supervise.Store, token claim.Token, err error) *claimWriteFault {
+	return &claimWriteFault{Store: behind, token: token, fault: func(context.Context) error { return err }}
 }
 
-func newBlockedStore(t *testing.T, behind supervise.Store, token claim.Token) *blockedStore {
+// blocked is the fault of a database that has stopped answering: the write goes to a pool pointed
+// at a listener this test opens and never accepts from, so the kernel takes the connection and no
+// server ever answers the startup message. The write returns only when something ends its wait,
+// which is the whole point — what ends it is Timeouts.ClaimWrite, through the context the machine
+// derives for the write.
+//
+// pgxpool.New dials nothing, so the pool is built at once and the first statement is where the
+// wait begins.
+func blocked(t *testing.T, behind supervise.Store, token claim.Token) *claimWriteFault {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -163,33 +163,10 @@ func newBlockedStore(t *testing.T, behind supervise.Store, token claim.Token) *b
 		t.Fatalf("open a pool on the database that never answers: %v", err)
 	}
 	t.Cleanup(pool.Close)
-	return &blockedStore{Store: behind, token: token, pool: pool}
-}
-
-func (s *blockedStore) wait(ctx context.Context) error {
-	_, err := s.pool.Exec(ctx, "select 1")
-	return err
-}
-
-func (s *blockedStore) PutClaim(ctx context.Context, c supervise.Claim) error {
-	if c.Token == s.token {
-		return s.wait(ctx)
-	}
-	return s.Store.PutClaim(ctx, c)
-}
-
-func (s *blockedStore) PutClaimAndDelivery(ctx context.Context, c supervise.Claim, d supervise.Delivery) error {
-	if c.Token == s.token {
-		return s.wait(ctx)
-	}
-	return s.Store.PutClaimAndDelivery(ctx, c, d)
-}
-
-func (s *blockedStore) RetireDelivery(ctx context.Context, c supervise.Claim, deliveryID string) error {
-	if c.Token == s.token {
-		return s.wait(ctx)
-	}
-	return s.Store.RetireDelivery(ctx, c, deliveryID)
+	return &claimWriteFault{Store: behind, token: token, fault: func(ctx context.Context) error {
+		_, err := pool.Exec(ctx, "select 1")
+		return err
+	}}
 }
 
 // brokenConnection is the server saying the connection under the statement failed: class 08,
@@ -336,13 +313,13 @@ func (r *owedWriteRig) stored(role claim.Role) supervise.ClaimState {
 // refuse puts a store in place that answers role's claim writes with err.
 func (r *owedWriteRig) refuse(role claim.Role, err error) {
 	r.t.Helper()
-	r.store.use(&refusingStore{Store: r.st, token: r.token(role), err: err})
+	r.store.use(refusing(r.st, r.token(role), err))
 }
 
 // block puts a store in place whose claim writes for role never answer.
 func (r *owedWriteRig) block(role claim.Role) {
 	r.t.Helper()
-	r.store.use(newBlockedStore(r.t, r.st, r.token(role)))
+	r.store.use(blocked(r.t, r.st, r.token(role)))
 }
 
 // answers puts the real store back: the database is reachable again.
