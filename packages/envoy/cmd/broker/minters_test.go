@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 
+	"golang.org/x/oauth2"
+
 	"github.com/sjawhar/envoy/internal/broker/config"
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
@@ -17,9 +19,9 @@ import (
 )
 
 // TestEachKindReachesItsOwnMinter: the broker's minters send a github-app secret's value to the
-// GitHub App minter and a google-login secret's to the Google login minter, each against an
-// endpoint of its own, so wiring a kind to the other kind's minter, which would refuse the value,
-// fails here.
+// GitHub App minter, a google-login secret's to the Google login minter and a
+// google-service-account secret's to the service account minter, each against an endpoint of its
+// own, so wiring a kind to another kind's minter, which would refuse the value, fails here.
 func TestEachKindReachesItsOwnMinter(t *testing.T) {
 	_, pemText := githubapptest.Key(t)
 	github := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -38,7 +40,19 @@ func TestEachKindReachesItsOwnMinter(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"access_token": "google-access-token"})
 	}))
 	defer google.Close()
-	minters := kindMinters(secrets.GitHubApp{Base: github.URL, HTTP: github.Client()}, secrets.GoogleLogin{TokenURL: google.URL, HTTP: google.Client()}, secrets.AzureLogin{})
+	iam := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/projects/-/serviceAccounts/dev-aditya@theorem-agent-identities.iam.gserviceaccount.com:generateAccessToken" {
+			t.Errorf("IAM endpoint asked %s %s", r.Method, r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{"accessToken": "service-account-access-token"})
+	}))
+	defer iam.Close()
+	minters := kindMinters(
+		secrets.GitHubApp{Base: github.URL, HTTP: github.Client()},
+		secrets.GoogleLogin{TokenURL: google.URL, HTTP: google.Client()},
+		secrets.AzureLogin{},
+		&secrets.GoogleServiceAccount{BaseURL: iam.URL, HTTP: iam.Client(), Source: oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "broker-own-token"})},
+	)
 
 	app, err := json.Marshal(map[string]string{"app_id": "123456", "private_key": pemText})
 	if err != nil {
@@ -52,6 +66,31 @@ func TestEachKindReachesItsOwnMinter(t *testing.T) {
 	minted, err = minters[policy.KindGoogleLogin](context.Background(), secrets.MintRequest{Value: login})
 	if err != nil || minted != "google-access-token" {
 		t.Fatalf("google-login minter = %q, %v; want the Google endpoint's access token", minted, err)
+	}
+	account := `{"service_account":"dev-aditya@theorem-agent-identities.iam.gserviceaccount.com"}`
+	minted, err = minters[policy.KindGoogleServiceAccount](context.Background(), secrets.MintRequest{Value: account})
+	if err != nil || minted != "service-account-access-token" {
+		t.Fatalf("google-service-account minter = %q, %v; want the IAM endpoint's access token", minted, err)
+	}
+}
+
+// TestKindMinters: the map kindMinters answers holds one minter for every kind the policy serves
+// and nothing else, so a kind added to policy.Kinds with no minter behind it, or a minter left
+// under a key no kind names, fails here rather than when a session asks for that secret.
+func TestKindMinters(t *testing.T) {
+	minters := kindMinters(secrets.GitHubApp{}, secrets.GoogleLogin{}, secrets.AzureLogin{}, &secrets.GoogleServiceAccount{})
+	for _, kind := range policy.Kinds {
+		if minters[kind] == nil {
+			t.Errorf("kindMinters has no minter for kind %q, which the policy serves", kind)
+		}
+	}
+	for kind := range minters {
+		if !policy.ValidKind(kind) {
+			t.Errorf("kindMinters holds a minter under %q, which is no kind the policy serves", kind)
+		}
+	}
+	if len(minters) != len(policy.Kinds) {
+		t.Errorf("kindMinters has %d minters for %d kinds: %v", len(minters), len(policy.Kinds), minters)
 	}
 }
 

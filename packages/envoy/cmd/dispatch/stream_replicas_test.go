@@ -213,16 +213,18 @@ func startDispatchNATS(t *testing.T, urls []string, overrides map[string]string)
 	return err
 }
 
-// A Dispatch start whose first reconcile fails on a cluster with a member down waits that failure
-// out: the bus runs the reconnect hooks again, the start's own log line for the first failure is
-// the retried WARN, and an operator who starts the missing member again finds the start's stream
-// at the three copies the settings ask of it, once the cluster is ready again. Every step runs on
-// the test's own goroutine, because testnats.Server.Start, testnats.Server.Stop and
-// testnats.Cluster.AwaitReady call t.Fatal, which Go forbids off the test goroutine.
+// A Dispatch start whose first reconcile fails on a cluster with no quorum waits that failure out:
+// the bus runs the reconnect hooks again, the start's own log line for the first failure is the
+// retried WARN, and an operator who starts the missing members again finds the start's stream at
+// the three copies the settings ask of it, once the cluster is ready again. Two of three members
+// are stopped, since nats-server v2.15.1 places a three-copy stream with one member down (one
+// offline peer assigned) and the start would succeed. Every step runs on the test's own
+// goroutine, because testnats.Server.Start, testnats.Server.Stop and testnats.Cluster.AwaitReady
+// call t.Fatal, which Go forbids off the test goroutine.
 func TestADispatchStartWaitsOutAReconcileFailureTheBusRetries(t *testing.T) {
 	cluster := testnats.StartCluster(t, 3)
+	cluster.Servers[1].Stop(t)
 	cluster.Servers[2].Stop(t)
-	cluster.AwaitReady(t)
 	overrides := map[string]string{"ENVOY_NATS_REPLICAS": "3"}
 
 	start := connectDispatchStream(t, cluster.URLs(), overrides)
@@ -230,6 +232,7 @@ func TestADispatchStartWaitsOutAReconcileFailureTheBusRetries(t *testing.T) {
 	if failure.Message != retriedHookFailure {
 		t.Fatalf("the start's first logged failure of the reconnect hooks is %q (%s), want the retried %q", failure.Message, failure.Error, retriedHookFailure)
 	}
+	cluster.Servers[1].Start(t)
 	cluster.Servers[2].Start(t)
 	cluster.AwaitReady(t)
 	start.awaitReconciled(t, repairedReconcileWait)
