@@ -570,17 +570,22 @@ func (s *server) stateRoute(w http.ResponseWriter, r *http.Request) {
 // memoryContract, the contract that added the issues' memory group, is served it without those
 // three fields (withoutMemory); a caller below treeContract, the contract that named the live
 // trees beside the issues holding a slot, is served it without `admission.trees` and without the
-// issues' `tree` (withoutTrees); and a caller below wakesWaitingContract, the contract that added
-// the wakes the pacing holds, is served it without `wakesWaiting` (withoutWakesWaiting). The four
-// compose: each is applied when the state carries something of its own, so a caller below all of
-// them — a pod below supervise.PodUpdateContract — is served a body carrying none of the eight
-// keys, each of them absent rather than empty, since a strict reader before the contract that
-// added a key refuses it whether or not it names anything. Every later reader takes all eight as
-// optional — `packages/contracts/src/legion-api.ts` marks `admission.trees` and `wakesWaiting`
+// issues' `tree` (withoutTrees); a caller below wakesWaitingContract, the contract that added
+// the wakes the pacing holds, is served it without `wakesWaiting` (withoutWakesWaiting); and a
+// caller below stallRecordContract, the contract that added the claim views' step record, is
+// served it without `step` (withoutStallRecord). The five compose: each is applied when the
+// state carries something of its own, so a caller below all of them — a pod below
+// supervise.PodUpdateContract — is served a body carrying none of the nine keys, each of them
+// absent rather than empty, since a strict reader before the contract that added a key refuses
+// it whether or not it names anything. Every later reader takes all nine as optional —
+// `packages/contracts/src/legion-api.ts` marks `admission.trees` and `wakesWaiting`
 // optional for exactly these bodies — so the body this serves a pod whose claims cannot be read,
-// which may be a pod at this contract, is the one every reader from 45 on takes. Any other caller
-// — a pod at this contract whose claims were read, the operator's `legion state`, a tmux pane —
-// is served the state as this contract writes it.
+// which may be a pod at this contract, is the one every reader from 45 on takes. Any other
+// caller — a pod whose claims record this daemon's own contract or none, the operator's `legion
+// state`, a tmux pane — is served the state as this contract writes it, except that until the
+// bump stallRecordContract names lands (plan task T5 of dispatch://INFRA-1274) that contract is
+// one above this daemon's own, so every pod is below it and the record reaches an operator
+// alone.
 func (s *server) stateFor(r *http.Request, state State) State {
 	// A daemon that does not know its callers' pods serves every caller the state as it is, and
 	// scans nothing for it: under runtime tmux that is every request of every pane and of
@@ -605,9 +610,9 @@ func (s *server) stateFor(r *http.Request, state State) State {
 	// before it is still being replaced — costs no scan of the issues.
 	claims, err := s.supervisor.Claims(r.Context())
 	if err != nil {
-		s.log.Warn("api: the claims of the pod that asked for the state could not be read; it is served the state without the update round, memory, tree and waiting-wake fields, which every plugin contract since 45 reads",
+		s.log.Warn("api: the claims of the pod that asked for the state could not be read; it is served the state without the update round, memory, tree, waiting-wake and step fields, which every plugin contract since 45 reads",
 			"pod", pod, "error", err)
-		return withoutWakesWaiting(withoutTrees(withoutMemory(withoutUpdateRounds(state))))
+		return withoutStallRecord(withoutWakesWaiting(withoutTrees(withoutMemory(withoutUpdateRounds(state)))))
 	}
 	contract := podContract(claims, pod)
 	if contract == 0 {
@@ -624,6 +629,9 @@ func (s *server) stateFor(r *http.Request, state State) State {
 	}
 	if contract < wakesWaitingContract && carriesWakesWaiting(state) {
 		state = withoutWakesWaiting(state)
+	}
+	if contract < stallRecordContract && carriesStallRecord(state) {
+		state = withoutStallRecord(state)
 	}
 	return state
 }
@@ -643,6 +651,17 @@ const treeContract = 51
 // 53): a plugin before it reads the state with a strict schema that knows no such key and refuses
 // the whole body for it.
 const wakesWaitingContract = 53
+
+// stallRecordContract is the daemon contract that added each claim view's `step`, what the daemon
+// last saw that claim's agent do (dispatch://INFRA-1274): a plugin before it reads the state with
+// a strict schema that knows no such key and refuses the whole body for it.
+//
+// It is 54 because that is the number DaemonAPIVersion takes at the bump this record forces,
+// which is a task of its own (the plan's T5) — 53 is the contract this daemon declares, and 54
+// the first free number above it and above main. Until that bump lands this constant is one
+// above DaemonAPIVersion, so every pod is below it and the record is served to a caller the
+// daemon cannot place in a pod alone, which is the operator's `legion state`.
+const stallRecordContract = 54
 
 // carriesUpdateRounds is whether any claim view of state carries `updateRound` or `updateHead`.
 func carriesUpdateRounds(state State) bool {
@@ -687,6 +706,24 @@ func carriesTrees(State) bool { return true }
 // carriesTrees all the same, because stateFor puts the same question to the four and because a
 // later contract that stops writing `wakesWaiting` on every body answers it here.
 func carriesWakesWaiting(State) bool { return true }
+
+// carriesStallRecord is whether any claim view of state carries the key stallRecordContract
+// added: `step`, the claim's record of its agent's last step. Unlike `trees` and `wakesWaiting`
+// it is written only where there is one, so this is asked of the state rather than answered
+// true, as carriesUpdateRounds and carriesMemory are.
+func carriesStallRecord(state State) bool {
+	for _, issue := range state.Issues {
+		if issue.Architect != nil && issue.Architect.Step != nil {
+			return true
+		}
+		for _, worker := range issue.Workers {
+			if worker.Claim.Step != nil {
+				return true
+			}
+		}
+	}
+	return false
+}
 
 // podContract is the lowest plugin contract a claim whose process runs in pod records, and 0 when
 // none records one: every role of a pod is served by the plugin that pod runs, and the body the
@@ -770,6 +807,31 @@ func withoutTrees(state State) State {
 // state's own, so the state the source answered is left as it was.
 func withoutWakesWaiting(state State) State {
 	state.WakesWaiting, state.wakesWaitingHidden = nil, true
+	return state
+}
+
+// withoutStallRecord is state with no claim view carrying `step`, the one key stallRecordContract
+// added to this route; nothing else of that contract is on it. The issue maps are copied, so the
+// state the source answered is left as it was, as withoutUpdateRounds leaves it.
+func withoutStallRecord(state State) State {
+	issues := make(map[string]Issue, len(state.Issues))
+	for key, issue := range state.Issues {
+		if issue.Architect != nil {
+			architect := *issue.Architect
+			architect.Step = nil
+			issue.Architect = &architect
+		}
+		if issue.Workers != nil {
+			workers := make(map[claim.Role]PhaseView, len(issue.Workers))
+			for role, worker := range issue.Workers {
+				worker.Claim.Step = nil
+				workers[role] = worker
+			}
+			issue.Workers = workers
+		}
+		issues[key] = issue
+	}
+	state.Issues = issues
 	return state
 }
 

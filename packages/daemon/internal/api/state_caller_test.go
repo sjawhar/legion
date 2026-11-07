@@ -146,15 +146,18 @@ func claimViews(t *testing.T, body []byte) []map[string]any {
 // whose claims record a contract below supervise.PodUpdateContract is served claim views with
 // only the keys contract 45 knows, and the rest of the body as it is — the trees and the wakes
 // the pacing holds among the keys it is served without, since such a pod is below treeContract
-// and wakesWaitingContract too. A pod at this contract, and a caller in no pod — the operator's
-// `legion state`, whose open-rounds line reads both fields and whose queue line reads those
-// wakes — are served everything; a pod whose claims cannot be read is served the body every
-// reader since 45 takes.
+// and wakesWaitingContract too, and the step record with them, since it is below
+// stallRecordContract as well. A caller in no pod — the operator's `legion state`, whose
+// open-rounds line reads both fields, whose queue line reads those wakes and whose
+// tool-call line reads the step records — is served everything; a pod whose claims cannot be
+// read is served the body every reader since 45 takes.
 func TestTheStateRouteServesAPodItsPluginContractsClaimViews(t *testing.T) {
 	full := stateFrom(t, populatedState(t), "192.0.2.1:41000", podClaims(supervise.PodUpdateContract-1))
 	fullWakes, fullCarried := wakesServed(t, full)
-	if !strings.Contains(string(full), `"updateRound"`) || !strings.Contains(string(full), `"updateHead"`) || !fullCarried || len(fullWakes) == 0 {
-		t.Fatalf("the fixture's state %s carries no update round or no waiting wake; this test proves nothing", full)
+	fullCalls, _ := stepsServed(t, full)
+	if !strings.Contains(string(full), `"updateRound"`) || !strings.Contains(string(full), `"updateHead"`) ||
+		len(fullCalls) == 0 || !fullCarried || len(fullWakes) == 0 {
+		t.Fatalf("the fixture's state %s carries no update round, no step record or no waiting wake; this test proves nothing", full)
 	}
 
 	for _, tc := range []struct {
@@ -163,13 +166,20 @@ func TestTheStateRouteServesAPodItsPluginContractsClaimViews(t *testing.T) {
 		sup    Supervisor
 		rounds bool
 		wakes  bool
+		// stall is whether the caller is served the claim views' `step`, the record
+		// stallRecordContract added. That contract is the number this daemon's own takes at the
+		// bump task T3's record forces, so while it is one above DaemonAPIVersion every pod is
+		// below it and only a caller the daemon places in no pod is served the record; the row
+		// at this daemon's contract therefore asks the two constants rather than pinning an
+		// answer that the bump would turn over.
+		stall bool
 	}{
 		{name: "a pod whose plugin is a contract behind", remote: statePodAddr + ":41000", sup: podClaims(supervise.PodUpdateContract - 1)},
 		{name: "the same pod asking over IPv6", remote: "[::ffff:" + statePodAddr + "]:41000", sup: podClaims(supervise.PodUpdateContract - 1)},
 		{name: "a pod whose claims cannot be read", remote: statePodAddr + ":41000", sup: claimsOnly{err: errors.New("the store is gone")}},
-		{name: "a pod at this contract", remote: statePodAddr + ":41000", sup: podClaims(DaemonAPIVersion), rounds: true, wakes: true},
-		{name: "a pod whose claims record no contract", remote: statePodAddr + ":41000", sup: podClaims(0), rounds: true, wakes: true},
-		{name: "a caller in no pod", remote: "192.0.2.1:41000", sup: podClaims(supervise.PodUpdateContract - 1), rounds: true, wakes: true},
+		{name: "a pod at this contract", remote: statePodAddr + ":41000", sup: podClaims(DaemonAPIVersion), rounds: true, wakes: true, stall: DaemonAPIVersion >= stallRecordContract},
+		{name: "a pod whose claims record no contract", remote: statePodAddr + ":41000", sup: podClaims(0), rounds: true, wakes: true, stall: true},
+		{name: "a caller in no pod", remote: "192.0.2.1:41000", sup: podClaims(supervise.PodUpdateContract - 1), rounds: true, wakes: true, stall: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			body := stateFrom(t, populatedState(t), tc.remote, tc.sup)
@@ -181,16 +191,18 @@ func TestTheStateRouteServesAPodItsPluginContractsClaimViews(t *testing.T) {
 			if tc.wakes && len(wakes) != len(fullWakes) {
 				t.Errorf("the state %s names %d of the wakes the pacing holds, want the fixture's %d", body, len(wakes), len(fullWakes))
 			}
-			if tc.rounds {
+			if tc.rounds && tc.stall {
 				if string(body) != string(full) {
 					t.Fatalf("state = %s, want the state as this contract writes it, %s", body, full)
 				}
 				return
 			}
-			for _, view := range claimViews(t, body) {
-				for key := range view {
-					if !slices.Contains(contract45ClaimView, key) {
-						t.Errorf("claim view %v carries %q, which contract 45's strict reader refuses", view, key)
+			if !tc.rounds {
+				for _, view := range claimViews(t, body) {
+					for key := range view {
+						if !slices.Contains(contract45ClaimView, key) {
+							t.Errorf("claim view %v carries %q, which contract 45's strict reader refuses", view, key)
+						}
 					}
 				}
 			}
@@ -198,8 +210,9 @@ func TestTheStateRouteServesAPodItsPluginContractsClaimViews(t *testing.T) {
 			// with the three memory keys gone too, since a pod below this contract's own reader
 			// refuses those as well (memory_test.go holds that half), with contract 51's two tree
 			// keys — `admission.trees` and each issue's `tree` — gone (tree_test.go holds that
-			// half), and with `wakesWaiting` gone, the key a reader before contract 53 refuses
-			// empty as surely as filled (withoutWakesWaiting).
+			// half), with `wakesWaiting` gone, the key a reader before contract 53 refuses
+			// empty as surely as filled (withoutWakesWaiting), and with each claim view's `step`
+			// gone, the record contract 54 added (withoutStallRecord).
 			var want, got map[string]any
 			if err := json.Unmarshal(full, &want); err != nil {
 				t.Fatal(err)
@@ -207,7 +220,9 @@ func TestTheStateRouteServesAPodItsPluginContractsClaimViews(t *testing.T) {
 			if !tc.wakes {
 				delete(want, "wakesWaiting")
 			}
-			delete(want["admission"].(map[string]any), "trees")
+			if !tc.rounds {
+				delete(want["admission"].(map[string]any), "trees")
+			}
 			for _, issue := range want["issues"].(map[string]any) {
 				issue := issue.(map[string]any)
 				views := []any{issue["architect"]}
@@ -215,10 +230,20 @@ func TestTheStateRouteServesAPodItsPluginContractsClaimViews(t *testing.T) {
 					views = append(views, worker.(map[string]any)["claim"])
 				}
 				for _, view := range views {
-					if view, ok := view.(map[string]any); ok {
+					view, ok := view.(map[string]any)
+					if !ok {
+						continue
+					}
+					if !tc.rounds {
 						delete(view, "updateRound")
 						delete(view, "updateHead")
 					}
+					if !tc.stall {
+						delete(view, "step")
+					}
+				}
+				if tc.rounds {
+					continue
 				}
 				delete(issue, "memoryGroup")
 				delete(issue, "memoryDrawMode")

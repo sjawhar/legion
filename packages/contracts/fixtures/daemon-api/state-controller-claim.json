@@ -76,7 +76,16 @@
             }
           ]
         },
-        "pluginContract": 0
+        "pluginContract": 0,
+        "step": {
+          "at": "2026-10-06T18:03:01Z",
+          "turnStartedAt": "2026-10-06T18:02:51Z",
+          "tool": "dispatch",
+          "callId": "toolu_arch_7",
+          "argsBytes": 96,
+          "argsHash": "5a1c7e03b94d26f8",
+          "startedAt": "2026-10-06T18:03:01Z"
+        }
       },
       "workers": {},
       "slot": {

@@ -97,6 +97,11 @@ func TestTheStateRouteServesAPodItsPluginContractsIssues(t *testing.T) {
 		trees  bool
 		rounds bool
 		wakes  bool
+		// stall is whether the caller is served the claim views' `step` (stallRecordContract),
+		// which is one contract above this daemon's own until the bump the record forces lands,
+		// so the row at this daemon's contract asks the two constants rather than pinning an
+		// answer the bump would turn over.
+		stall bool
 	}{
 		{name: "a pod whose plugin is a contract behind", remote: statePodAddr + ":41000", sup: podClaims(memoryContract - 1), rounds: true},
 		{name: "a pod below PodUpdateContract, below all four", remote: statePodAddr + ":41000", sup: podClaims(supervise.PodUpdateContract - 1)},
@@ -107,9 +112,9 @@ func TestTheStateRouteServesAPodItsPluginContractsIssues(t *testing.T) {
 		// The band at 51 and 52, from treeContract to below wakesWaitingContract: everything but
 		// `wakesWaiting` is served. This row is at treeContract, its lower edge.
 		{name: "a pod at treeContract", remote: statePodAddr + ":41000", sup: podClaims(treeContract), memory: true, trees: true, rounds: true},
-		{name: "a pod at this contract", remote: statePodAddr + ":41000", sup: podClaims(DaemonAPIVersion), memory: true, trees: true, rounds: true, wakes: true},
-		{name: "a pod whose claims record no contract", remote: statePodAddr + ":41000", sup: podClaims(0), memory: true, trees: true, rounds: true, wakes: true},
-		{name: "a caller in no pod", remote: "192.0.2.1:41000", sup: podClaims(memoryContract - 1), memory: true, trees: true, rounds: true, wakes: true},
+		{name: "a pod at this contract", remote: statePodAddr + ":41000", sup: podClaims(DaemonAPIVersion), memory: true, trees: true, rounds: true, wakes: true, stall: DaemonAPIVersion >= stallRecordContract},
+		{name: "a pod whose claims record no contract", remote: statePodAddr + ":41000", sup: podClaims(0), memory: true, trees: true, rounds: true, wakes: true, stall: true},
+		{name: "a caller in no pod", remote: "192.0.2.1:41000", sup: podClaims(memoryContract - 1), memory: true, trees: true, rounds: true, wakes: true, stall: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			body := stateFrom(t, populatedState(t), tc.remote, tc.sup)
@@ -168,17 +173,21 @@ func TestTheStateRouteServesAPodItsPluginContractsIssues(t *testing.T) {
 				if !tc.trees {
 					delete(issue, "tree")
 				}
-				if tc.rounds {
-					continue
-				}
 				views := []any{issue["architect"]}
 				for _, worker := range issue["workers"].(map[string]any) {
 					views = append(views, worker.(map[string]any)["claim"])
 				}
 				for _, view := range views {
-					if view, ok := view.(map[string]any); ok {
+					view, ok := view.(map[string]any)
+					if !ok {
+						continue
+					}
+					if !tc.rounds {
 						delete(view, "updateRound")
 						delete(view, "updateHead")
+					}
+					if !tc.stall {
+						delete(view, "step")
 					}
 				}
 			}

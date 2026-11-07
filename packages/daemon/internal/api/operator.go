@@ -87,6 +87,12 @@ type OperatorClaim struct {
 	// for a worker that reported none; it is the worker's word, which nothing verifies.
 	UpdateRound string `json:"updateRound,omitempty"`
 	UpdateHead  string `json:"updateHead,omitempty"`
+	// Step is what the daemon last saw this claim's agent do (supervise.StepRecord, api.StepView),
+	// absent for a claim whose agent has neither begun a turn nor made a call the daemon saw.
+	// These routes are the only surface a controller's record reaches: internal/projection puts
+	// the controller's claim on no issue, so no claim view of the state carries it, and `legion
+	// claims list` is where an operator reads what a stuck controller is doing.
+	Step *StepView `json:"step,omitempty"`
 }
 
 // BudgetsView is the claim's retry counters (`supervise.Budgets`).
@@ -209,6 +215,7 @@ func operatorView(c supervise.Claim) OperatorClaim {
 		PluginContract:  c.PluginContract,
 		UpdateRound:     c.UpdateRound,
 		UpdateHead:      c.UpdateHead,
+		Step:            StepViewOf(c.Step),
 	}
 	if p := c.Pending; p != nil {
 		view.Pending = &DeliveryView{
