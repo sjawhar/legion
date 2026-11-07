@@ -2412,18 +2412,22 @@ jobs:
     # this name that concluded success. Three runs could not be read, 41995538189, 42034266338 and
     # 42087689355, whose jobs endpoint answered HTTP 502 on four attempts. The whole window is
     # after the commit that moved this job to four lanes, 9689e2c54 of 2026-11-05T04:09:18Z, so no
-    # run is left out for being older than it. Those 217 jobs ran a smaller package list than this
-    # head's, so the install step is out of the table below, and its budget is its own retry
-    # arithmetic rather than a reading of that window.
+    # run is left out for being older than it. Those 217 jobs ran a smaller package list than the
+    # install step's below, so the install step is out of the table below, and its budget is its
+    # own retry arithmetic rather than a reading of that window.
     #
     #   step                               median    95th     max
     #   Browser-test dispatch dashboard    1475 s  1582 s  1671 s
     #   every other step summed             199 s   221 s   232 s
     #   the whole job                      1715 s  1875 s  2348 s
     #
-    # The install step has one reading at this head's package set, not a distribution: 30 s, in
-    # job 128209099649 of this pull request. A distribution at the restored set can only be read
-    # on main after the merge, when jobs of this name run that list.
+    # The install step has one reading at its present package set, not a distribution: 30 s, in
+    # job 128209099649 of cybermonklabs/legion#2888 at 459d4412. A distribution at that set is
+    # read from main's jobs of this name. The apt archive cache's three steps came after that
+    # window too, so the "every other step summed" row holds none of them: on a miss, the only
+    # run on which the install step can come near its budget, its key and restore steps took
+    # under a second each in that job, and its save, which runs only on a push to main whose
+    # restore missed, has no reading yet.
     #
     # The rule: a step budget is that step's measured maximum plus 15 per cent, rounded up to the
     # next whole minute, with a floor of two minutes; an install step's budget comes from its own
@@ -2574,7 +2578,7 @@ jobs:
       # --with-deps`, which runs its apt calls with no bound, no retry and no second origin. The
       # pinned list below is Playwright's ubuntu24.04-x64 list exactly: the union of the `tools`,
       # `chromium`, `firefox` and `webkit` entries of that table in playwright-core's
-      # lib/coreBundle.js. Measured in job 128209099649, this pull request's own at this head:
+      # lib/coreBundle.js. Measured in job 128209099649, of cybermonklabs/legion#2888 at 459d4412:
       # Playwright's 79 names and gstreamer1.0-tools resolve, with their dependencies, to 182
       # packages and 114 MB of archives (`0 upgraded, 182 newly installed, 0 to remove and 27
       # not upgraded.` and `Need to get 114 MB of archives.`), and the `apt-get update` before
@@ -2586,8 +2590,9 @@ jobs:
       # variable of its own because `packages` is what the check at the end of the step holds
       # against Playwright's own list, name for name.
       #
-      # WebKit plays video and audio through GStreamer, so without those four it loads a page and
-      # plays nothing: the plugins that demux Matroska and decode VP8 and h.264 are in them.
+      # WebKit plays video and audio through GStreamer, so without gstreamer1.0-plugins-good,
+      # gstreamer1.0-plugins-bad, gstreamer1.0-libav and libavcodec60 it loads a page and plays
+      # nothing: the plugins that demux Matroska and decode VP8 and h.264 are in those four.
       # Playwright's own source says of gstreamer1.0-libav that its one library libgstlibav.so is
       # the library required for playing h.264. The decoder guard after the install asks the
       # GStreamer registry for one element out of each. It runs before the browsers are
@@ -2616,23 +2621,21 @@ jobs:
       # carry the fallback's own update, because the path that needs every one of those bounds is
       # the path on which the step still succeeds.
       #
-      # The five readings after the bounded apt are job 128209099649's, this pull request's own
-      # at this head, at its 182 packages. The unpack is the 13.6 s from `Download complete and
-      # in download only mode` at 23:14:13.884 to the last line of the unbounded install at
-      # 23:14:27.475. The keeping is the 1.1 s to `apt archives: seeded 0 .deb files, keeping
-      # 182` at 23:14:28.541, which is 114 MB copied out of apt's directory for the cache above.
-      # The decoder guard is the 0.4 s to `the decoders WebKit plays through are in the
-      # registry: ...` at 23:14:28.984. The browsers and the list check together are the 1.6 s
-      # to `The pinned list is current: ...` at 23:14:30.540 - but that job restored its
-      # browsers from the Actions cache (`Cache hit for: playwright-Linux-7f68fc...`, 482 MB, at
-      # 23:13:54), so that 1.6 s is no reading of the cold browser download and the budget has
-      # to carry the cold case. That is what the 90 s term is: the step's existing derivation
-      # for the cold browsers, which this change does not invalidate, because the package set
-      # does not reach the browser download. The list check, which this block used to put at
-      # about 30 s, is measured inside that 1.6 s, so 1.6 s is the term the reading supports for
-      # it. The whole step took 30 s in that job, 23:14:00 to 23:14:30: one reading at this
-      # head's package set, not a distribution. Each is one reading, so each moves a little from
-      # run to run; the margin the sum leaves under 22 min is what carries that.
+      # The five readings after the bounded apt are job 128209099649's, of cybermonklabs/legion#2888
+      # at 459d4412, at its 182 packages. The unpack is the 13.6 s from `Download complete and in
+      # download only mode` at 23:14:13.884 to the last line of the unbounded install at
+      # 23:14:27.475. The keeping is the 1.1 s to `apt archives: seeded 0 .deb files, keeping 182`
+      # at 23:14:28.541, which is 114 MB copied out of apt's directory for the cache above. The
+      # decoder guard is the 0.4 s to `the decoders WebKit plays through are in the registry: ...`
+      # at 23:14:28.984. The browsers and the list check together are the 1.6 s to `The pinned list
+      # is current: ...` at 23:14:30.540 - but that job restored its browsers from the Actions cache
+      # (`Cache hit for: playwright-Linux-7f68fc...`, 482 MB, at 23:13:54), so that 1.6 s is no
+      # reading of the cold browser download and the budget has to carry the cold case. That is what
+      # the 90 s term is: the step's derivation for the cold browsers, which the package set does
+      # not reach. The list check is measured inside that 1.6 s, so 1.6 s is the term the reading
+      # supports for it. The whole step took 30 s in that job, 23:14:00 to 23:14:30: one reading at
+      # this package set, not a distribution. Each is one reading, so each moves a little from run
+      # to run; the margin the sum leaves under 22 min is what carries that.
       #
       # Each bound is derived from its own phase: each job's two apt rates, as apt logged them,
       # scaled onto the head's fetch of 13.0 MB of indexes and 114 MB of packages. The population
@@ -2641,16 +2644,16 @@ jobs:
       # read in full for the 26 whose install step ran over 73 s.
       #
       # Two jobs bind the two bounds. Job 127238648049 binds the download: apt logged
-      # `Fetched 114 MB in 10min 13s (186 kB/s)` for its packages, so the head's 114 MB need
+      # `Fetched 114 MB in 10min 13s (186 kB/s)` for its packages, so the list's 114 MB need
       # 613 s there, which the two 300 s attempts on the primary do not reach. Job 127357441704
       # binds the update: apt logged `Fetched 10.5 MB in 45s (233 kB/s)` for its `apt-get
-      # update`, so the head's 13.0 MB need 55.8 s there, and 90 s leaves 61 per cent over that
-      # need. Neither the index figure nor its 90 s bound moves with the package set.
+      # update`, so the step's 13.0 MB of indexes need 55.8 s there, and 90 s leaves 61 per cent
+      # over that need. Neither the index figure nor its 90 s bound moves with the package set.
       #
       # So at 186 kB/s, the slowest mirror a green job of that window met, the restored bytes
       # need more than the 600 s of the two attempts on the primary, and the origin switch
-      # fires. That is the trade this change accepts: Playwright's whole list, against a
-      # download phase that reaches the fallback origin on that mirror.
+      # fires. That is the trade Playwright's whole list costs: a download phase that reaches the
+      # fallback origin on that mirror.
       #
       # One blended rate per job is the wrong model, as job 127238648049's own log shows:
       # `Fetched 10.5 MB in 1s (9797 kB/s)` for its update and the 186 kB/s above for its
@@ -2661,12 +2664,12 @@ jobs:
       # again when a green job meets a slower one. Under 13.0 MB / 90 s = 144 kB/s the indexes
       # do not arrive inside one bound, and under 114 MB / 300 s = 380 kB/s the packages do not:
       # job 127274913129 met 62.5 kB/s for its packages, and its job budget cancelled it. The
-      # head's 114 MB need 1824 s at that rate, which neither 600 s nor 900 s of download
+      # list's 114 MB need 1824 s at that rate, which neither 600 s nor 900 s of download
       # reaches, so the step fails by its own name there.
       #
       # What the attempts complete is the threshold the step carries, and it is three bands
       # rather than one number, because the third attempt is on another origin and the partial
-      # may not be reused across that switch. With B the 114 MB this head fetches:
+      # may not be reused across that switch. With B the 114 MB the list fetches:
       #   above B / 600 s = 190 kB/s the two attempts on the primary complete the download;
       #   between B / 900 s = 127 kB/s and 190 kB/s the origin switch fires on every run and
       #     completion rests on the fallback resuming the partial; where it does not, that one
@@ -2678,7 +2681,7 @@ jobs:
       #
       # The attempts accumulate, which is measured and not assumed: `apt-get ... -d` resumes. An
       # attempt the bound kills leaves its bytes in apt's partial directory, and the attempt
-      # after it asks only for the rest. Job 128209099649 measured that at this head: after the
+      # after it asks only for the rest. Job 128209099649 measured that at 459d4412: after the
       # download phase had fetched all 114 MB, the install call after it asked for
       # `Need to get 0 B/114 MB of archives.`, so what the download put on disk the install does
       # not fetch again. Measured separately, the partial is resumed across the origin switch
@@ -2706,13 +2709,19 @@ jobs:
       # 40-minute job cancel it replaces.
       #
       # The .deb files of that list are cached between runs. The restore step above reads them
-      # into ~/apt-archives, and the step below hands them to apt before its first call: what
-      # apt already has on disk it does not fetch. The key names the Playwright version bun.lock
-      # pins, because that version decides the list, and the runner image, because the image
-      # decides which versions apt resolves, so an image roll misses the entry rather than
-      # restoring files the new image's indexes no longer name. No pull-request or merge-queue
-      # run writes an Actions cache entry, so a branch run fetches the whole set, and every
-      # bound and budget above is that cold case either way.
+      # into ~/apt-archives, and the step below copies them into apt's archive directory before
+      # its first call. apt takes a file there whose name and size match the index without
+      # fetching it and without hashing it (pkgAcqArchive::QueueNext in apt-pkg/acquire-item.cc
+      # compares the size alone), so a restored file is trusted as the push to main that wrote
+      # the entry left it. The key names the Playwright version bun.lock pins, because that
+      # version decides Playwright's list, and the runner image, because the image decides which
+      # versions apt resolves, so an image roll misses the entry rather than restoring files the
+      # new image's indexes no longer name. It names neither `step_tools` nor the versions apt
+      # resolves from updates published after the image was built, and an entry is written once
+      # and never replaced, so a package that changes under one key is fetched on every run until
+      # the key moves. Only a push to main writes an entry. A pull-request or merge-queue run
+      # restores main's entry where one exists under its key and otherwise fetches the whole set,
+      # and every bound and budget above is that cold case.
       - name: Install Playwright Chromium, WebKit and Firefox
         # The runner image preconfigures Google's chrome-stable apt source, whose index
         # intermittently fails `apt-get update` with a hash-sum mismatch and takes the install
@@ -2758,10 +2767,10 @@ jobs:
               [ "$left" -gt 0 ] || return 1
             done
           }
-          # What the restore above found, handed to apt before it reads any index. apt checks
-          # each file against the index it just read, so one that no longer matches is fetched
-          # again: a stale or partial file costs a download, never a wrong install. nullglob
-          # makes an empty or absent directory an empty list instead of a failed copy.
+          # What the restore above found, handed to apt before it reads any index. A file whose
+          # version the index no longer names has another file name, and one whose size differs
+          # (a partial) is deleted, so apt fetches both again. nullglob makes an empty or absent
+          # directory an empty list instead of a failed copy.
           shopt -s nullglob
           seeded=("$HOME"/apt-archives/*.deb)
           shopt -u nullglob
@@ -2811,9 +2820,10 @@ jobs:
           fi
           # Unbounded and unretried: the archive is on disk now, so this takes no network.
           sudo apt-get install -y --no-install-recommends $apt_list
-          # What apt has now, kept for the save below, whether the restore hit or missed, so a
-          # set that grew keeps its new members. apt's archive directory is root's and the cache
-          # action runs as the runner user, so the copies change hands.
+          # What apt has now, kept for the save below. The save runs only on a push to main whose
+          # restore missed, since an entry is never replaced, so on a hit or a branch run this
+          # copy goes unused. apt's archive directory is root's and the cache action runs as the
+          # runner user, so the copies change hands.
           shopt -s nullglob
           kept=(/var/cache/apt/archives/*.deb)
           shopt -u nullglob
@@ -2835,7 +2845,8 @@ jobs:
             element=${probe%%:*}
             gst-inspect-1.0 --exists "$element" || {
               echo "::error::GStreamer has no $element, which WebKit plays media through;" \
-                "${probe#*:} carries it and packages= above must hold it"
+                "${probe#*:} carries it: packages= above must hold it, and if it does," \
+                "apt's output above shows whether it installed"
               exit 1
             }
             probed+=("$element")

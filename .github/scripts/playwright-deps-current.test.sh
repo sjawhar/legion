@@ -113,7 +113,7 @@ echo "case: a package Playwright now asks for that the pinned list does not hold
 # Playwright 1.64.1 does not ask for libsoup-3.0-0 on ubuntu24.04: the name is in that
 # platform's lib2package map, for libsoup-3.0.so.0, and not in its tools, chromium, firefox or
 # webkit list, which are what install-deps asks apt for. This case is an upgrade that adds it
-# to one of those lists. The install step never installs it, so nothing but the first direction
+# to one of those lists. The pinned list does not name it, so nothing but the first direction
 # of the comparison decides it: the dry run here reports nothing missing.
 run_check PLAYWRIGHT_LIST="$PLAYWRIGHT_ASKS libsoup-3.0-0" PLAYWRIGHT_STATUS=0 \
   PLAYWRIGHT_STDOUT='All system dependencies are installed.'
