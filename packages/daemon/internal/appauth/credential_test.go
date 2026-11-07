@@ -880,9 +880,57 @@ func TestARepeatedRefusalOfTheRepositoriesThatAnsweredLeavesTheDirectoryOut(t *t
 	if got := askedOfGitHub(github); !slices.Equal(got, asked) {
 		t.Errorf("GitHub was asked for %v, want %v: one extra round and no more", got, asked)
 	}
-	for _, named := range []string{"repository=gadgets", "repository=widgets"} {
-		if count := strings.Count(said.String(), named); count != 1 {
-			t.Errorf("the log holds %d lines naming %q, want one:\n%s", count, named, said.String())
+	// No repository of the set is refused on its own, so none is said left out on its own; the
+	// directory is, and that line is said at every bundle rather than once for the process,
+	// since nothing about it is keyed by a repository (sayDirectoryLeftOut).
+	if count := strings.Count(said.String(), "repository="); count != 0 {
+		t.Errorf("the log holds %d lines naming a repository left out on its own, want none:\n%s", count, said.String())
+	}
+	directory := `an owner's directory is left out of the role's gh bundle`
+	if count := strings.Count(said.String(), directory); count != 1 {
+		t.Errorf("the log holds %d lines naming the directory left out, want one:\n%s", count, said.String())
+	}
+	if !strings.Contains(said.String(), `repositories="gadgets, widgets"`) {
+		t.Errorf("the line names no repositories of the directory:\n%s", said.String())
+	}
+	if _, err := credential(context.Background(), claim.RoleImplementer, ghrepo.MustParse("sjawhar/legion")); err != nil {
+		t.Fatalf("the second bundle: %v", err)
+	}
+	if count := strings.Count(said.String(), directory); count != 2 {
+		t.Errorf("the log holds %d lines naming the directory left out over two bundles, want one each:\n%s", count, said.String())
+	}
+}
+
+// troubledTokens answers every read with GitHub's trouble that also reads as a narrowing
+// refusal, which a rate-limited 422 is: the lease a caller is refused that way says nothing
+// about which repositories the installation reaches.
+type troubledTokens struct{ ownerTokens }
+
+func (troubledTokens) ReadToken(context.Context, AppRole, string, []string) (Lease, error) {
+	return Lease{}, &TransientError{Err: fmt.Errorf("%w: GitHub App token exchange failed (422)", ErrNarrowingRefused)}
+}
+
+// A read refused with GitHub's own trouble leaves no directory out, whatever else the refusal
+// reads as: the bundle fails, so the caller tries again, where leaving a directory out would
+// record an owner as unreachable on the strength of a rate limit (dirEntry, narrowingRefused).
+func TestGitHubsTroubleThatReadsAsARefusalFailsTheBundleAndLeavesNothingOut(t *testing.T) {
+	log, said := bundleLog()
+	left := NewLeftOut()
+	repos := projectRepos("acme/gadgets", "acme/widgets", "sjawhar/legion")
+	credential := GitHubCredential(troubledTokens{}, repos, ghrepo.Renames{}, left, log)
+
+	bundle, err := credential(context.Background(), claim.RoleImplementer, ghrepo.MustParse("sjawhar/legion"))
+	var trouble *TransientError
+	if !errors.As(err, &trouble) {
+		t.Fatalf("the implementer's bundle under GitHub's trouble = %v, %v; want the trouble, so the caller asks again", bundle, err)
+	}
+	if said.Len() != 0 {
+		t.Errorf("the log holds a left-out line for a refusal that is GitHub's trouble:\n%s", said.String())
+	}
+	dirs := GitHubDirs(repos, ghrepo.Renames{}, left, Roles, ghrepo.MustParse("sjawhar/legion"))
+	for _, want := range []string{"acme", "sjawhar"} {
+		if !slices.Contains(dirs, want) {
+			t.Errorf("the directories a bundle would hold are %v, want %s among them: nothing is recorded left out", dirs, want)
 		}
 	}
 }

@@ -40,14 +40,17 @@ func (s *selectors) add(owner, what string) {
 }
 
 // repository records the owner and the repository value names: a selector naming one repository
-// of one owner. The owner is lowercased, as a bundle's directory names an owner; the repository
-// is the name as the argument gives it, which the one directory lookup normalizes
-// (gitcredential.go's repositoryGHConfigDir).
+// of one owner. The owner is lowercased, as a bundle's directory names an owner, and the
+// repository is keyed as the directory holding its token is named for it (ghRepositoryName), so
+// two spellings of one repository — `Legion-Smoke` in a pull request's URL beside
+// `-R sjawhar/legion-smoke`, or a remote's `widgets.git` beside `widgets` — are the one
+// repository the command names rather than two, which would send it to the owner's own
+// directory.
 func (s *selectors) repository(value, what string) error {
 	owner, repo, err := repositoryTarget(value, what, s.api)
 	if err == nil {
 		s.add(owner, what)
-		s.repos[repo] = true
+		s.repos[ghRepositoryName(repo)] = true
 	}
 	return err
 }
@@ -431,11 +434,11 @@ func isGitHubHost(host string) bool {
 // OWNER/REPO, HOST/OWNER/REPO, or a github.com URL, its host github.com or a subdomain as gh
 // normalizes it (isGitHubHost) — refused when it names no owner, another host, or an owner that
 // is no GitHub login. The name is the second segment as gh reads it, whatever follows it (a pull
-// request's number, a tree's path), carried on as the argument spells it: lowercasing it and
-// dropping the `.git` a clone URL carries is the one gh directory lookup's
-// (gitcredential.go's repositoryGHConfigDir, ghRepositoryName), which also decides whether a
-// bundle can hold a directory of that name, since a name no directory can hold is one the bundle
-// holds no directory for.
+// request's number, a tree's path), as the argument spells it. The caller that records it keys
+// it as the directory holding its token is named for it (selectors.repository,
+// gitcredential.go's ghRepositoryName), so two spellings of one repository are one selector;
+// the lookup normalizes it again, idempotently, and decides whether a bundle can hold a
+// directory of that name, since a name no directory can hold is one the bundle holds none for.
 func repositoryTarget(value, what string, api bool) (owner, repo string, err error) {
 	host, rest := "", value
 	if parsed, err := url.Parse(value); err == nil && parsed.Scheme != "" && parsed.Host != "" {
@@ -575,7 +578,7 @@ func (s *selectors) fromWorkingDirectory(remotes func() ([]ghRemote, error)) err
 		}
 		if owner != "" {
 			s.add(owner, "the working directory's "+remote.what())
-			s.repos[repo] = true
+			s.repos[ghRepositoryName(repo)] = true
 		}
 	}
 	return nil

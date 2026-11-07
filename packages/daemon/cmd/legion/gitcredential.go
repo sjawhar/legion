@@ -127,10 +127,12 @@ func readCredentialRequest(r io.Reader) map[string]string {
 
 // repositoryGHConfigDir is the gh directory the bundle under ownersDir answers for owner's
 // repository repo: the repository's own, `<owner>/<repo>`, whose token reaches that one
-// repository, where the bundle holds it, and the owner's own otherwise. It is the one place a
-// repository name is normalized for a directory (ghRepositoryName), so a caller — the gh
-// wrapper's target (gh_selectors.go) as much as a git credential request's path — hands the name
-// as it was given it. A repo no bundle directory could be named for (ghconfig.IsDirName) is one
+// repository, where the bundle holds it, and the owner's own otherwise. It normalizes the name
+// for a directory (ghRepositoryName), so a caller — the gh wrapper's target
+// (gh_selectors.go) as much as a git credential request's path — may hand it as it was given
+// it; the gh wrapper keys a repository by that same name as it reads a command, so that two
+// spellings of one repository are one repository, and normalizing again here changes nothing.
+// A repo no bundle directory could be named for (ghconfig.IsDirName) is one
 // the bundle holds none for, so it answers the owner's rather than refusing. An owner the bundle
 // holds no directory for at all is refused (ownerGHConfigDir): it is no owner of this project.
 func repositoryGHConfigDir(ownersDir, owner, repo string) (string, error) {

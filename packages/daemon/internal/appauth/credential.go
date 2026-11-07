@@ -421,6 +421,22 @@ func sayLeftOut(log *slog.Logger, role AppRole, owner, repo, because string) {
 		"app", string(role), "owner", owner, "repository", repo, "because", because)
 }
 
+// sayDirectoryLeftOut says on log, at warn, that owner's directory is left out of role's gh
+// bundle though every repository it names answered a probe of its own: GitHub refuses the lease
+// over them together (dirEntry's second round), so there is no one token the directory could
+// hold. It is said each time it happens rather than once for the life of the process, as
+// sayLeftOut's lines are: no repository of the set is refused on its own, so none of them is
+// what the record is keyed by, and an answer that disagrees with itself this way is worth a line
+// at every bundle until it stops. It carries no token.
+func sayDirectoryLeftOut(log *slog.Logger, role AppRole, owner string, repos []string) {
+	if log == nil {
+		log = slog.Default()
+	}
+	log.Warn("appauth: an owner's directory is left out of the role's gh bundle",
+		"app", string(role), "owner", owner, "repositories", strings.Join(repos, ", "),
+		"because", "each of them answered a token of its own, and GitHub refused the one naming them together")
+}
+
 // mintBundle is the bundle layout describes: one mint per scope, shared by every directory that
 // holds it, each rendered as gh's two files, with dflt its default directory — the owner the
 // caller named, or, for a caller that named none, the first owner the mint answered for, sorted
@@ -553,7 +569,7 @@ func dirEntry(ctx context.Context, tokens Tokens, appRole AppRole, hold dirLease
 	if err == nil {
 		return ghconfig.Render(lease.Token, string(appRole), lease.ExpiresAt), true, nil
 	}
-	if hold.write || !errors.Is(err, ErrNarrowingRefused) {
+	if hold.write || !narrowingRefused(err) {
 		return ghconfig.Rendered{}, false, err
 	}
 	if len(hold.repos) == 1 {
@@ -565,7 +581,7 @@ func dirEntry(ctx context.Context, tokens Tokens, appRole AppRole, hold dirLease
 		return ghconfig.Rendered{}, false, err
 	}
 	lease, held, err := overReached(ctx, tokens, appRole, hold, answered, only)
-	if errors.Is(err, ErrNarrowingRefused) {
+	if narrowingRefused(err) {
 		if forgetter, ok := tokens.(ReadScopeForgetter); ok {
 			for _, repo := range answered {
 				forgetter.ForgetReadScope(appRole, hold.owner, []string{repo})
@@ -574,10 +590,8 @@ func dirEntry(ctx context.Context, tokens Tokens, appRole AppRole, hold dirLease
 		if answered, only, err = probeReached(ctx, tokens, appRole, hold, answered, log); err != nil {
 			return ghconfig.Rendered{}, false, err
 		}
-		if lease, held, err = overReached(ctx, tokens, appRole, hold, answered, only); errors.Is(err, ErrNarrowingRefused) {
-			for _, repo := range answered {
-				sayLeftOut(log, appRole, hold.owner, repo, refusedNarrowing)
-			}
+		if lease, held, err = overReached(ctx, tokens, appRole, hold, answered, only); narrowingRefused(err) {
+			sayDirectoryLeftOut(log, appRole, hold.owner, answered)
 			return ghconfig.Rendered{}, false, nil
 		}
 	}
@@ -604,7 +618,7 @@ func probeReached(ctx context.Context, tokens Tokens, appRole AppRole, hold dirL
 	for _, repo := range repos {
 		one, err := hold.over([]string{repo}).mint(ctx, tokens, appRole)
 		switch {
-		case errors.Is(err, ErrNarrowingRefused):
+		case narrowingRefused(err):
 			sayLeftOut(log, appRole, hold.owner, repo, refusedNarrowing)
 			continue
 		case err != nil:
