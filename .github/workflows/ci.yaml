@@ -4833,6 +4833,15 @@ jobs:
   # inside .github/actions/ci-ok-report among them; the step before the report checks that this
   # job's environment holds none of them.
   #
+  # Each step sets the lower-case pair alone. GitHub reads an `env:` key case-insensitively and
+  # refuses a map that holds two spellings of one name, so http_proxy and HTTP_PROXY together do
+  # not start the workflow at all: run 42367176473 of this repository failed before any job, with
+  # no job record of its own. The upper-case pair is not needed, measured on 2026-11-07 against
+  # ci-fault-proxy.py with the lower-case pair alone set: `bun install` answered
+  # `ProxyConnectFailed (504)`, `gh api` answered `Gateway Timeout`, and `go mod download`
+  # answered `Gateway Timeout` for proxy.golang.org. curl reads the lower-case spelling for a
+  # plain-HTTP fetch and either for an HTTPS one, so one pair serves every client here.
+  #
   # A proxy per site, not one per job: a recovery window is counted from the proxy's first
   # moment, so a second site under the first site's proxy would run after that window closed and
   # would meet no fault.
@@ -4901,8 +4910,6 @@ jobs:
         env:
           http_proxy: ${{ steps.recover-changie-proxy.outputs.proxy }}
           https_proxy: ${{ steps.recover-changie-proxy.outputs.proxy }}
-          HTTP_PROXY: ${{ steps.recover-changie-proxy.outputs.proxy }}
-          HTTPS_PROXY: ${{ steps.recover-changie-proxy.outputs.proxy }}
       - name: What install-changie's curl did under the recovering fault
         run: >-
           .github/scripts/download-retry-proof.sh report recover-changie
@@ -4922,8 +4929,6 @@ jobs:
         env:
           http_proxy: ${{ steps.recover-omp-proxy.outputs.proxy }}
           https_proxy: ${{ steps.recover-omp-proxy.outputs.proxy }}
-          HTTP_PROXY: ${{ steps.recover-omp-proxy.outputs.proxy }}
-          HTTPS_PROXY: ${{ steps.recover-omp-proxy.outputs.proxy }}
       - name: What install-omp's mise install did under the recovering fault
         run: >-
           .github/scripts/download-retry-proof.sh report recover-omp
@@ -4942,8 +4947,6 @@ jobs:
         env:
           http_proxy: ${{ steps.recover-claude-proxy.outputs.proxy }}
           https_proxy: ${{ steps.recover-claude-proxy.outputs.proxy }}
-          HTTP_PROXY: ${{ steps.recover-claude-proxy.outputs.proxy }}
-          HTTPS_PROXY: ${{ steps.recover-claude-proxy.outputs.proxy }}
       - name: What install-claude-code's bun add did under the recovering fault
         run: >-
           .github/scripts/download-retry-proof.sh report recover-claude
@@ -4963,8 +4966,6 @@ jobs:
         env:
           http_proxy: ${{ steps.recover-install-proxy.outputs.proxy }}
           https_proxy: ${{ steps.recover-install-proxy.outputs.proxy }}
-          HTTP_PROXY: ${{ steps.recover-install-proxy.outputs.proxy }}
-          HTTPS_PROXY: ${{ steps.recover-install-proxy.outputs.proxy }}
         run: |
           . .github/scripts/ci-retry.sh
           retry_fetch "the workspace's dependencies" 60 -- bun install --frozen-lockfile
@@ -4988,8 +4989,6 @@ jobs:
         env:
           http_proxy: ${{ steps.recover-go-proxy.outputs.proxy }}
           https_proxy: ${{ steps.recover-go-proxy.outputs.proxy }}
-          HTTP_PROXY: ${{ steps.recover-go-proxy.outputs.proxy }}
-          HTTPS_PROXY: ${{ steps.recover-go-proxy.outputs.proxy }}
         run: |
           . .github/scripts/ci-retry.sh
           retry_fetch "packages/envoy's Go modules" 300 -- go -C packages/envoy mod download
@@ -5013,8 +5012,6 @@ jobs:
         env:
           http_proxy: ${{ steps.recover-playwright-proxy.outputs.proxy }}
           https_proxy: ${{ steps.recover-playwright-proxy.outputs.proxy }}
-          HTTP_PROXY: ${{ steps.recover-playwright-proxy.outputs.proxy }}
-          HTTPS_PROXY: ${{ steps.recover-playwright-proxy.outputs.proxy }}
         run: |
           . "$GITHUB_WORKSPACE/.github/scripts/ci-retry.sh"
           retry_fetch "Playwright's Chromium" 300 -- bunx playwright install chromium
@@ -5039,8 +5036,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           http_proxy: ${{ steps.recover-gh-proxy.outputs.proxy }}
           https_proxy: ${{ steps.recover-gh-proxy.outputs.proxy }}
-          HTTP_PROXY: ${{ steps.recover-gh-proxy.outputs.proxy }}
-          HTTPS_PROXY: ${{ steps.recover-gh-proxy.outputs.proxy }}
         run: |
           . .github/scripts/ci-retry.sh
           # gh writes into a file inside the command the helper runs, so every attempt starts
@@ -5086,8 +5081,6 @@ jobs:
         env:
           http_proxy: ${{ steps.stall-changie-proxy.outputs.proxy }}
           https_proxy: ${{ steps.stall-changie-proxy.outputs.proxy }}
-          HTTP_PROXY: ${{ steps.stall-changie-proxy.outputs.proxy }}
-          HTTPS_PROXY: ${{ steps.stall-changie-proxy.outputs.proxy }}
       - name: What install-changie's curl did under the stalling fault
         run: >-
           .github/scripts/download-retry-proof.sh report stall-changie
@@ -5105,8 +5098,6 @@ jobs:
         env:
           http_proxy: ${{ steps.stall-omp-proxy.outputs.proxy }}
           https_proxy: ${{ steps.stall-omp-proxy.outputs.proxy }}
-          HTTP_PROXY: ${{ steps.stall-omp-proxy.outputs.proxy }}
-          HTTPS_PROXY: ${{ steps.stall-omp-proxy.outputs.proxy }}
       - name: What install-omp's mise install did under the stalling fault
         run: >-
           .github/scripts/download-retry-proof.sh report stall-omp
@@ -5124,8 +5115,6 @@ jobs:
         env:
           http_proxy: ${{ steps.stall-claude-proxy.outputs.proxy }}
           https_proxy: ${{ steps.stall-claude-proxy.outputs.proxy }}
-          HTTP_PROXY: ${{ steps.stall-claude-proxy.outputs.proxy }}
-          HTTPS_PROXY: ${{ steps.stall-claude-proxy.outputs.proxy }}
       - name: What install-claude-code's bun add did under the stalling fault
         run: >-
           .github/scripts/download-retry-proof.sh report stall-claude
@@ -5143,8 +5132,6 @@ jobs:
         env:
           http_proxy: ${{ steps.stall-install-proxy.outputs.proxy }}
           https_proxy: ${{ steps.stall-install-proxy.outputs.proxy }}
-          HTTP_PROXY: ${{ steps.stall-install-proxy.outputs.proxy }}
-          HTTPS_PROXY: ${{ steps.stall-install-proxy.outputs.proxy }}
         run: |
           . .github/scripts/ci-retry.sh
           retry_fetch "the workspace's dependencies" 60 -- bun install --frozen-lockfile
@@ -5163,8 +5150,6 @@ jobs:
         env:
           http_proxy: ${{ steps.stall-go-proxy.outputs.proxy }}
           https_proxy: ${{ steps.stall-go-proxy.outputs.proxy }}
-          HTTP_PROXY: ${{ steps.stall-go-proxy.outputs.proxy }}
-          HTTPS_PROXY: ${{ steps.stall-go-proxy.outputs.proxy }}
         run: |
           . .github/scripts/ci-retry.sh
           retry_fetch "packages/envoy's Go modules" 300 -- go -C packages/envoy mod download
@@ -5193,8 +5178,6 @@ jobs:
         env:
           http_proxy: ${{ steps.stall-playwright-proxy.outputs.proxy }}
           https_proxy: ${{ steps.stall-playwright-proxy.outputs.proxy }}
-          HTTP_PROXY: ${{ steps.stall-playwright-proxy.outputs.proxy }}
-          HTTPS_PROXY: ${{ steps.stall-playwright-proxy.outputs.proxy }}
         run: |
           . "$GITHUB_WORKSPACE/.github/scripts/ci-retry.sh"
           retry_fetch "Playwright's Chromium" 300 -- bunx playwright install chromium
@@ -5216,8 +5199,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           http_proxy: ${{ steps.stall-gh-proxy.outputs.proxy }}
           https_proxy: ${{ steps.stall-gh-proxy.outputs.proxy }}
-          HTTP_PROXY: ${{ steps.stall-gh-proxy.outputs.proxy }}
-          HTTPS_PROXY: ${{ steps.stall-gh-proxy.outputs.proxy }}
         run: |
           . .github/scripts/ci-retry.sh
           # shellcheck disable=SC2016 # $1 and $2 are sh -c's own arguments, expanded by that shell

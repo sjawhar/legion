@@ -42,17 +42,35 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# The origin: one file, served on a loopback port the kernel picks. Its port is read from the
-# line it logs rather than chosen here, so no second process can take it between the choice and
-# the bind.
+# The origin: one file, served on a loopback port the kernel picks. The port is written to a
+# file rather than read out of what the server logs, as the proxy's own --port-file is: the
+# banner `python3 -m http.server` prints reached its log only when the server exited on the
+# runner, so this harness waited ten seconds and then said the origin reported no port (run
+# 42353947192 of this repository, the `test` job, whose origin log was empty). A port written
+# by the process that bound it cannot be buffered away and cannot be taken by a second process
+# between the choice and the bind.
 mkdir "$work/origin"
 printf 'the origin answered\n' > "$work/origin/hello.txt"
-python3 -m http.server 0 --bind 127.0.0.1 --directory "$work/origin" > "$work/origin.log" 2>&1 &
+cat > "$work/origin.py" <<'ORIGIN'
+import functools, http.server, os, sys
+
+directory, port_file = sys.argv[1], sys.argv[2]
+handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=directory)
+server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+temporary = port_file + ".part"
+with open(temporary, "w", encoding="utf-8") as handle:
+    handle.write(f"{server.server_address[1]}\n")
+os.replace(temporary, port_file)
+server.serve_forever()
+ORIGIN
+python3 "$work/origin.py" "$work/origin" "$work/origin.port" > "$work/origin.log" 2>&1 &
 pids+=("$!")
 origin_port=""
 for _ in $(seq 200); do
-  origin_port=$(awk '{for (i = 1; i < NF; i++) if ($i == "port") {print $(i + 1); exit}}' "$work/origin.log" 2> /dev/null || true)
-  if [ -n "$origin_port" ]; then break; fi
+  if [ -s "$work/origin.port" ]; then
+    origin_port=$(cat "$work/origin.port")
+    break
+  fi
   sleep 0.05
 done
 if [ -z "$origin_port" ]; then
