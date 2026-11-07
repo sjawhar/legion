@@ -11,11 +11,20 @@ export interface AgentFilters {
   readonly search: string;
 }
 
-/** The free-text query is the page's one URL-backed filter field (`?q=`, through the same
- *  capped, history-`replace`d hook `useIssueFilters` uses); `machine` and `role` stay plain
- *  component state, as they were before this box. */
+/** The page's two URL-backed filter fields, each through the same capped, history-`replace`d
+ *  hook `useIssueFilters` uses: the free-text query (`?q=`) and the machine (`?machine=`).
+ *  `role` stays plain component state, as it was before this box. Both parameters live here
+ *  rather than in the page, so the control around them can be rebuilt without moving them. */
 export function useAgentSearch(): readonly [string, (next: string) => void] {
   return useCappedSearchParam("q");
+}
+
+/** The machine filter, which is the address's own `?machine=` rather than part of `?q=`: the
+ *  free-text query matches the directory as well as the machine, so `?q=<host>` would also find
+ *  a session whose directory holds the machine's name, while `/machines/<machine>`'s link to
+ *  `/agents?machine=<host>` must name exactly the sessions on that machine. */
+export function useAgentMachine(): readonly [string, (next: string) => void] {
+  return useCappedSearchParam("machine");
 }
 
 /** Every word `search` names, lowercased; an empty query has none. The page splits this once per

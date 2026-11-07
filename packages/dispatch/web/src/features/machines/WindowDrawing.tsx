@@ -9,8 +9,8 @@ import {
   textMutedOnSurfaceMuted,
   textPrimaryOnSurfaceMuted,
 } from "../../theme/classes";
-import type { NeedsYouBySession } from "../agents/AgentsPage";
 import { type AgentGroup, agentGroup } from "../agents/agent-groups";
+import type { NeedsYouBySession } from "../agents/ask-tally";
 import { AgentName } from "../refs/AgentName";
 import type { MachinePane, MachineWindow } from "./machine-model";
 import { parseTmuxLayout, type TmuxLayout, type TmuxLayoutPane } from "./tmux-layout";

@@ -1,3 +1,4 @@
+import type { TmuxPlace } from "../web/src/api/types";
 import { harnessPorts } from "./harness-ports";
 
 interface FakeSession {
@@ -8,6 +9,10 @@ interface FakeSession {
   // The session's real machine, as its own Envoy plugin reports it; the real listener falls
   // back to machine_id when this is absent (an older plugin), which this fixture mirrors below.
   readonly host?: string;
+  /** The pane this session sits in, as its own plugin reported it with its registration; the
+   *  listener answers it unchanged, which `asSeen` mirrors by spreading the seeded session
+   *  whole. Absent for a session in no pane. */
+  readonly tmux_place?: TmuxPlace;
   readonly roles?: readonly string[];
   readonly capabilities?: readonly string[];
   readonly last_seen?: number;

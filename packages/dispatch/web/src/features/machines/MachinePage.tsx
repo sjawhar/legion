@@ -17,7 +17,7 @@ import {
   textPrimaryOnCanvas,
   textSecondaryOnCanvas,
 } from "../../theme/classes";
-import { tallyBySession } from "../agents/AgentsPage";
+import { tallyBySession } from "../agents/ask-tally";
 import { useAgents } from "../conversation/useAgents";
 import { waitingOnYou } from "../inbox/BlockedOnYou";
 import { parseMachinePath } from "../refs/routes";

@@ -1,7 +1,7 @@
 import { DELIVERY_CAPABILITIES } from "@legion/contracts";
 import { expect, type Locator, type Page } from "@playwright/test";
 
-import type { BroadcastCreated, CreateBroadcastInput } from "../web/src/api/types";
+import type { BroadcastCreated, CreateBroadcastInput, TmuxPlace } from "../web/src/api/types";
 import { createAsk, createComment, createIssue, createProject } from "./api";
 import { harnessPorts } from "./harness-ports";
 import { type KeyedWrite, keyedWrite, watchWrites } from "./keyed-writes";
@@ -15,6 +15,9 @@ export interface FakeSession {
   // The session's real machine; the real listener falls back to machine_id when the session's
   // plugin predates this field, which the fake Envoy's asSeen mirrors (fake-envoy.ts).
   host?: string;
+  /** Where this session sits in tmux, which `GET /api/v1/agents` answers unchanged and the
+   *  machine pages draw. Absent is a session in no pane, as it is on the wire. */
+  tmux_place?: TmuxPlace;
   roles?: string[];
   capabilities?: string[];
   last_seen?: number;
