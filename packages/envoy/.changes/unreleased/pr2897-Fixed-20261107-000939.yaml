@@ -1,0 +1,5 @@
+kind: Fixed
+body: 'The agentloop test that stops a run from a callback now bounds the steps the result carries by the model calls the stand-in served, rather than by the call the callback was given something from: OnText and OnPartial run in the consumer while the SDK streams ahead of it, so the run can finish a later call before the error lands. OnStep, whose error is raised in the producer loop, keeps the exact one-call expectation.'
+time: 2026-11-07T00:09:39.352776332Z
+custom:
+    Issue: pr2897

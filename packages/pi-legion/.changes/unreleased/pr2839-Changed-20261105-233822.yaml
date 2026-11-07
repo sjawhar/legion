@@ -1,0 +1,5 @@
+kind: Changed
+body: 'The jj attribution overlay a pane commits through now carries the issue key as a `Dispatch: <KEY>` trailer beside `Omp-Session:`, for a repository the project names in `commit_issue_trailer_repos`. The claim boot reads that key from `LEGION_ISSUE_TRAILER` alone, and the writer itself moved to the shared package both plugins bundle.'
+time: 2026-11-05T23:38:22.546269246Z
+custom:
+    Issue: pr2839

@@ -2927,6 +2927,12 @@ func TestASessionMintedOnOneProcessAuthenticatesOnTheOtherUnderOneSigningKey(t *
 	}
 }
 
+// quickProcessHeartbeat is the registry pace every process of the row below runs at
+// (DISPATCH_TEST_PROCESS_HEARTBEAT) in place of production's five seconds: the live window stays
+// three beats of it (cmd/dispatch/main.go), so a refused process waits four seconds for its
+// refuser to lapse where a deployment's waits twenty, and the row waits no production period out.
+const quickProcessHeartbeat = time.Second
+
 // The registry of live server processes refuses a process whose signing key set a live peer does
 // not share both ways (processes.Register): with a pair live under one key, a process carrying a
 // key of its own - a task rolled with a changed secret - and one with no DISPATCH_SIGNING_KEY,
@@ -2936,17 +2942,22 @@ func TestASessionMintedOnOneProcessAuthenticatesOnTheOtherUnderOneSigningKey(t *
 // the pair never does. A process given the pair's key first and another second, the first step of
 // a rotation, starts beside them.
 func TestAProcessWhoseKeySetALivePeerDoesNotShareRefusesToStart(t *testing.T) {
-	pair := startPair(t, nil)
+	// Every process here takes that pace, the pair included: the refusal stands only while the
+	// refusing process keeps heartbeating inside the window the refused one judges it by, and a
+	// pair beating slower than that window would lapse between beats and refuse nobody.
+	quick := map[string]string{"DISPATCH_TEST_PROCESS_HEARTBEAT": quickProcessHeartbeat.String()}
+	pair := startPair(t, quick)
 	for _, refused := range []struct{ name, key string }{
 		{"a process carrying a key of its own", "a-key-of-its-own"},
 		{"a process with no key, which minted one in its data dir", ""},
 	} {
-		process := startDispatchProcessWith(t, pair.databaseURL(t), dispatchOptions{NATSURL: pair.nats, SigningKey: refused.key})
+		process := startDispatchProcessWith(t, pair.databaseURL(t),
+			dispatchOptions{NATSURL: pair.nats, SigningKey: refused.key, Env: quick})
 		requireRefusedToStart(t, process, refused.name)
 	}
 
 	rotating := startDispatchProcessWith(t, pair.databaseURL(t), dispatchOptions{
-		NATSURL: pair.nats, SigningKey: multiprocessSigningKey + " a-key-of-its-own",
+		NATSURL: pair.nats, SigningKey: multiprocessSigningKey + " a-key-of-its-own", Env: quick,
 	})
 	rotating.waitHealthy(t)
 	var registered int
@@ -3013,9 +3024,9 @@ func TestAProcessThatResumesBesideAPeerWhoseKeySetItDoesNotShareDoesNotServeBesi
 
 // requireRefusedToStart waits up to a minute for the process to exit, asking its /healthz all the
 // while, and requires that it exited 1 with the registry's refusal, never having answered /healthz
-// nor logged that it serves. A refused process waits processes.LiveWindow and one
-// processes.HeartbeatInterval (20 s) for its refusers to lapse before it exits, well inside the
-// minute.
+// nor logged that it serves. A refused process waits its own run's live window and one heartbeat
+// for its refusers to lapse before it exits - 20 s at production's pace, four seconds at
+// quickProcessHeartbeat - so the minute here is a hang guard and not the period being waited out.
 func requireRefusedToStart(t *testing.T, p *dispatchProcess, name string) {
 	t.Helper()
 	client := &http.Client{Timeout: time.Second}
@@ -5164,10 +5175,26 @@ func startFakeListener(t *testing.T, sessions ...listenerSession) *fakeListener 
 }
 
 // processEnv is what a Dispatch process delivering through this listener is started with: the
-// listener's URL. Nothing here shortens the delivery sweep's period: it runs at production's
-// SuggestionSweepInterval (a minute), as every pass of the maintenance loop does.
+// listener's URL. Nothing here shortens the delivery sweep's period: it is a pass of the
+// maintenance loop and runs at production's api.MaintenanceSweepInterval (a minute). A row that
+// waits for that pass takes quickSweepEnv instead.
 func (f *fakeListener) processEnv() map[string]string {
 	return map[string]string{"ENVOY_URL": f.server.URL}
+}
+
+// quickMaintenanceSweep is the maintenance loop's period for a row that waits for the delivery
+// sweep (DISPATCH_TEST_MAINTENANCE_SWEEP_INTERVAL), in place of the minute a deployment runs it
+// at. What such a row is about is that the surviving process sends what the killed one left owed,
+// once, under the attempt and key the killed process used; how long its loop sleeps between
+// passes is not, and at production's period one row waits out two ticks - two minutes - for a
+// hand-over the pass itself makes in milliseconds.
+const quickMaintenanceSweep = 2 * time.Second
+
+// quickSweepEnv is processEnv with that period, for a row whose claim the delivery sweep settles.
+func (f *fakeListener) quickSweepEnv() map[string]string {
+	env := f.processEnv()
+	env["DISPATCH_TEST_MAINTENANCE_SWEEP_INTERVAL"] = quickMaintenanceSweep.String()
+	return env
 }
 
 // setSessions replaces the sessions the listener knows: from now on its registry read, its live
@@ -5534,16 +5561,15 @@ func backDatePendingAttempts(t *testing.T, database *store.Store) {
 	}
 }
 
-// sweepWait is how long a row waits for the surviving process's delivery sweep to send what a
-// killed process left owed. The sweep is a pass of the maintenance loop
-// (api.RunSuggestionOutcomeSweep), which these processes run at production's
-// api.SuggestionSweepInterval (a minute) with no test override: attempts back-dated just after a
-// tick wait that tick out, a minute, and when the killed process had already served that tick's
-// period - one pass per period across the processes, duty.Exclusive - the survivor's next tick
-// serves instead, a second minute. Half a minute on top covers the pass itself: its suggestion
-// and request-key sweeps, and the sends, each bounded by the listener client's five-second
-// window.
-const sweepWait = 150 * time.Second
+// sweepWait is the hang guard on the surviving process's delivery sweep sending what a killed
+// process left owed. The sweep is a pass of the maintenance loop (api.RunMaintenanceSweep), which
+// the processes of these rows run at quickMaintenanceSweep: attempts back-dated just after a tick
+// wait that tick out, and when the killed process had already served that tick's period - one
+// pass per period across the processes, duty.Exclusive - the survivor's next tick serves instead,
+// so two ticks is the longest wait the row has. The rest is the pass itself: its request-key and
+// DPoP sweeps, and the sends, each bounded by the listener client's five-second window. A row
+// that reaches this bound waited for a sweep that never ran.
+const sweepWait = 30 * time.Second
 
 // A process killed while it delivers leaves its attempts pending: a direct message and a comment
 // mention whose own request was sending them, and a broadcast recipient a background worker was
@@ -5555,7 +5581,7 @@ func TestADeliveryAKilledProcessLeftPendingIsSentByTheOther(t *testing.T) {
 	t.Run("killed while sending", func(t *testing.T) {
 		listener := startFakeListener(t, resumeSession)
 		sends := listener.hold(listenerSend)
-		pair := startPair(t, listener.processEnv())
+		pair := startPair(t, listener.quickSweepEnv())
 		project := uniqueProjectKey(t, "RSM")
 		pair.a.createProject(t, project, "Resumed deliveries")
 		issue, _ := pair.a.createIssueIn(t, project, "Mentioned while sending", "spec")
@@ -5585,7 +5611,7 @@ func TestADeliveryAKilledProcessLeftPendingIsSentByTheOther(t *testing.T) {
 	t.Run("killed before the claim", func(t *testing.T) {
 		listener := startFakeListener(t, resumeSession)
 		lookups := listener.hold(listenerRegistry)
-		pair := startPair(t, listener.processEnv())
+		pair := startPair(t, listener.quickSweepEnv())
 		pair.a.sendInBackground(http.MethodPost, "/api/v1/agents/"+resumeSession.SessionID+"/messages",
 			`{"body":"Stored, then killed","delivery":"steer"}`)
 		lookup := lookups.next(t, 30*time.Second, "the direct message's registry read")
@@ -5744,6 +5770,12 @@ func requireWaitingOutTheTakeOver(t *testing.T, database *store.Store, listener 
 	}
 }
 
+// quickTakeoverWindow is how long a sender keeps trying a listener being replaced in the subtest
+// that only waits that window out (DISPATCH_TEST_LISTENER_TAKEOVER_WINDOW), in place of the
+// twelve seconds a deployment runs (api's listenerTakeoverWindow). The subtests that drive a
+// take-over keep the twelve seconds: their senders' tries are paced against it.
+const quickTakeoverWindow = time.Second
+
 // While the active listener is replaced, its successor refuses connections, then answers 503
 // "service starting" - on every route, then on the send alone while the outgoing listener still
 // answers the registry read - then does not yet hold the session, for a few seconds. A direct
@@ -5780,7 +5812,13 @@ func TestASendDuringAListenerTakeOverReachesItsSession(t *testing.T) {
 
 	t.Run("sent to a session the listener never knows", func(t *testing.T) {
 		listener := startFakeListener(t, resumeSession)
-		pair := startPair(t, listener.processEnv())
+		// This subtest waits out the take-over window and nothing else, so its processes run it
+		// at quickTakeoverWindow (DISPATCH_TEST_LISTENER_TAKEOVER_WINDOW) in place of the twelve
+		// seconds a deployment runs: what it is about is that the send settles failed once the
+		// window has passed, not how long the window is.
+		env := listener.processEnv()
+		env["DISPATCH_TEST_LISTENER_TAKEOVER_WINDOW"] = quickTakeoverWindow.String()
+		pair := startPair(t, env)
 		started := time.Now()
 		var message model.Message
 		if err := json.Unmarshal(pair.a.call(t, http.MethodPost, "/api/v1/agents/never-known/messages",
@@ -5793,7 +5831,8 @@ func TestASendDuringAListenerTakeOverReachesItsSession(t *testing.T) {
 			t.Fatalf("deliveries = %#v, want attempt 1 failed with %q", message.Deliveries, "no live session never-known")
 		}
 		if took > 15*time.Second {
-			t.Fatalf("the send to a session the listener never knows answered after %v, want within 15s", took)
+			t.Fatalf("the send to a session the listener never knows answered %v after it was made, want within 15s: "+
+				"it waits out the %v take-over window and settles failed", took, quickTakeoverWindow)
 		}
 		gone := messageDelivery("the message to nobody", message.ID+":steer")
 		if states := gone.attempts(t, pair.database); !slices.Equal(states, []string{"1:failed"}) {
@@ -5806,7 +5845,7 @@ func TestASendDuringAListenerTakeOverReachesItsSession(t *testing.T) {
 
 	t.Run("killed during the wait", func(t *testing.T) {
 		listener := startFakeListener(t, resumeSession)
-		pair := startPair(t, listener.processEnv())
+		pair := startPair(t, listener.quickSweepEnv())
 		project := uniqueProjectKey(t, "TKK")
 		pair.a.createProject(t, project, "Killed during a take-over")
 		issue, _ := pair.a.createIssueIn(t, project, "Mentioned, then killed", "spec")
