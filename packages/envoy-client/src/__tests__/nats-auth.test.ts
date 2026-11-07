@@ -5,7 +5,7 @@ import { temporaryDirectories } from "@legion/test-fixtures/temporary-directorie
 import { connect, nkeys } from "nats";
 import { natsSeedFromEnvironment } from "../envoy-settings";
 import { natsAuthOptions } from "../nats-auth";
-import { type NatsServer, startNatsServer } from "./nats-server";
+import { type NatsServer, startNatsServer, useNatsServerDirectory } from "./nats-server";
 
 interface TestKeyPair {
   getSeed(): Uint8Array;
@@ -16,6 +16,7 @@ interface TestKeyPair {
 const testKeys: { createUser(): TestKeyPair; createAccount(): TestKeyPair } = nkeys;
 
 const makeDirectory = temporaryDirectories("nats-seed");
+const serverDirectory = useNatsServerDirectory();
 
 function createUser(): { readonly seed: string; readonly publicKey: string } {
   const user = testKeys.createUser();
@@ -48,7 +49,10 @@ describe.skipIf(process.env.LEGION_E2E !== "1")("natsAuthOptions against a real 
   let authorized: NatsServer;
 
   beforeAll(async () => {
-    [open, authorized] = await Promise.all([startNatsServer(), startNatsServer(user.publicKey)]);
+    [open, authorized] = await Promise.all([
+      startNatsServer(serverDirectory),
+      startNatsServer(serverDirectory, user.publicKey),
+    ]);
   }, 120_000);
   afterAll(() => {
     open?.stop();

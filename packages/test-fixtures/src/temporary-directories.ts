@@ -1,6 +1,15 @@
 import { afterAll, afterEach, beforeAll } from "bun:test";
 import { randomBytes } from "node:crypto";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import {
+  chmodSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+  type Stats,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -11,6 +20,11 @@ export type TemporaryDirectoryOptions = {
    * fixture returned needs the resolved one.
    */
   real?: boolean;
+  /**
+   * The directory the temporary one is made in, `tmpdir()` by default. It is for a test that
+   * needs another filesystem, such as `/dev/shm` for a rename that must cross one.
+   */
+  root?: string;
 };
 
 /**
@@ -42,14 +56,21 @@ export type TemporaryDirectoryMaker = (suffix?: string) => string;
  * later file would leave its directories behind.
  *
  * The maker is synchronous, so a test body uses it without `await`.
+ *
+ * `options.root` is the directory the temporary ones are made in, for a test that needs another
+ * filesystem; `options.real` is not read here, since each directory's path is `mkdtemp`'s own.
  */
-export function temporaryDirectories(prefix: string): TemporaryDirectoryMaker {
+export function temporaryDirectories(
+  prefix: string,
+  options: TemporaryDirectoryOptions = {}
+): TemporaryDirectoryMaker {
+  const root = options.root ?? tmpdir();
   const made: string[] = [];
   afterEach(() => {
-    for (const directory of made.splice(0)) rmSync(directory, { recursive: true, force: true });
+    for (const directory of made.splice(0)) removeTree(directory);
   });
   return (suffix) => {
-    const directory = mkdtempSync(join(tmpdir(), nameTemplate(prefix, suffix)));
+    const directory = mkdtempSync(join(root, nameTemplate(prefix, suffix)));
     made.push(directory);
     return directory;
   };
@@ -71,8 +92,9 @@ export function temporaryDirectories(prefix: string): TemporaryDirectoryMaker {
  * from a test body, or from a hook of its own registered below this call: Bun runs the hooks of a
  * scope in the order they were registered.
  *
- * `real` resolves `tmpdir()` once, at the call, and joins the reserved name onto the resolved
+ * `real` resolves the root once, at the call, and joins the reserved name onto the resolved
  * parent: `realpathSync` needs a path that exists, and the directory itself does not yet.
+ * `root` is the directory it is made in, `tmpdir()` by default.
  *
  * The name is the prefix, a dash and eight random hexadecimal characters, two more than
  * `mkdtemp` adds. The directory is made exclusively, so `mode` applies to it and a path that
@@ -82,7 +104,8 @@ export function temporaryDirectory(
   prefix: string,
   options: TemporaryDirectoryOptions = {}
 ): string {
-  const parent = options.real === true ? realpathSync(tmpdir()) : tmpdir();
+  const root = options.root ?? tmpdir();
+  const parent = options.real === true ? realpathSync(root) : root;
   const directory = join(
     parent,
     `${nameTemplate(prefix, undefined)}${randomBytes(4).toString("hex")}`
@@ -91,7 +114,7 @@ export function temporaryDirectory(
     mkdirSync(directory, { mode: 0o700 });
   });
   afterAll(() => {
-    rmSync(directory, { recursive: true, force: true });
+    removeTree(directory);
   });
   return directory;
 }
@@ -104,4 +127,58 @@ export function temporaryDirectory(
 function nameTemplate(prefix: string, suffix: string | undefined): string {
   const stem = suffix === undefined || suffix === "" ? prefix : `${prefix}-${suffix}`;
   return `${stem.replace(/-+$/, "")}-`;
+}
+
+/**
+ * Removes one tree, making every directory in it writable, searchable and readable first.
+ * `rmSync` alone fails on a tree a test made read-only on purpose, and a test can make one
+ * without meaning to: Go's module cache writes 0555 directories and 0444 files, so a suite that
+ * runs `go` under its temporary directory leaves a tree nothing can unlink.
+ */
+function removeTree(directory: string): void {
+  makeWritable(directory);
+  rmSync(directory, { recursive: true, force: true });
+}
+
+/** `chmod -R u+rwx` on a tree's directories, following no symlink. A path already gone is
+ * nothing to do. */
+function makeWritable(path: string): void {
+  const entry = makeSelfWritable(path);
+  if (entry === undefined || !entry.isDirectory()) return;
+  let entries: string[];
+  try {
+    entries = readdirSync(path);
+  } catch {
+    return;
+  }
+  for (const name of entries) makeWritable(join(path, name));
+}
+
+/**
+ * `chmod u+rwx` on one path when it is a directory, following no symlink. Answers what it found
+ * there, or nothing for a path that is gone or a symlink.
+ *
+ * A file's own mode is left alone: unlinking a file needs write permission on the directory
+ * holding it, never on the file, and a file in a temporary tree can be a hard link to one
+ * outside it, whose mode is the same inode's.
+ */
+function makeSelfWritable(path: string): Stats | undefined {
+  let entry: Stats;
+  try {
+    entry = lstatSync(path);
+  } catch {
+    return undefined;
+  }
+  if (entry.isSymbolicLink()) return undefined;
+  if (!entry.isDirectory()) return entry;
+  const mode = entry.mode & 0o7777;
+  const wanted = mode | 0o700;
+  if (wanted !== mode) {
+    try {
+      chmodSync(path, wanted);
+    } catch {
+      // A mode this user cannot set is left to rmSync to report.
+    }
+  }
+  return entry;
 }

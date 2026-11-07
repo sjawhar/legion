@@ -1,17 +1,16 @@
-import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { createHash, randomBytes } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readdirSync,
   readFileSync,
   rmSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { temporaryDirectories } from "@legion/test-fixtures/temporary-directories";
 import { keepStore, MARKER_MAX_AGE_MS, mintMarker, setRecordMode } from "../askgate-marker";
 import { cliRefusals, runDispatchCli } from "../dispatch-cli";
 import { resetAdviceMemory } from "../dispatch-execute";
@@ -70,13 +69,13 @@ const ARTIFACTS = "/api/v1/issues/DSP-1/artifacts";
 const postsTo = (route: string) => posts.filter((p) => p.method === "POST" && p.path === route);
 const messagePosts = () => postsTo(MESSAGES);
 
+const makeDirectory = temporaryDirectories("dispatch-askgate");
 let stateDir = "";
 beforeEach(() => {
   posts.length = 0;
-  stateDir = mkdtempSync(join(tmpdir(), "dispatch-askgate-"));
+  stateDir = makeDirectory();
   resetAdviceMemory();
 });
-afterEach(() => rmSync(stateDir, { recursive: true, force: true }));
 
 const sha = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 

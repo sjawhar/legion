@@ -45,6 +45,7 @@ import {
   type EnvoyStack,
   envoyStackEnabled,
   startEnvoyStack,
+  useEnvoyStackDirectory,
 } from "@legion/envoy-client/test/envoy-stack";
 import { startStallProxy } from "@legion/envoy-client/test/stall-proxy";
 import { runFreezeScenario } from "@legion/envoy-client/test/stall-scenario";
@@ -19745,6 +19746,9 @@ describe("consumer delivery", () => {
 // replaced, where the registration is answered core and the session runs on the core path.
 for (const listenerGrant of ["current", "before-session-consumers"] as const) {
   const onCorePath = listenerGrant === "before-session-consumers";
+  // Reserved out here, at the file's module scope, one per grant: the file's own `afterAll`
+  // removes it once the `describe` has stopped the stack writing into it.
+  const stackDirectory = useEnvoyStackDirectory();
   describe.skipIf(!envoyStackEnabled)(
     onCorePath
       ? "against a real natsd and an Envoy listener whose grant predates session consumers"
@@ -19752,7 +19756,7 @@ for (const listenerGrant of ["current", "before-session-consumers"] as const) {
     () => {
       let stack: EnvoyStack | undefined;
       beforeAll(async () => {
-        stack = await startEnvoyStack({ listenerGrant });
+        stack = await startEnvoyStack({ work: stackDirectory, listenerGrant });
       }, 120_000);
       afterAll(async () => {
         await stack?.stop();

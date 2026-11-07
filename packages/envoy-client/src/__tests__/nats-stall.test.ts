@@ -1,17 +1,26 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { connect, Events, StringCodec } from "nats";
-import { type EnvoyStack, envoyStackEnabled, startEnvoyStack } from "../../test/envoy-stack";
+import {
+  type EnvoyStack,
+  envoyStackEnabled,
+  startEnvoyStack,
+  useEnvoyStackDirectory,
+} from "../../test/envoy-stack";
 import { startStallProxy } from "../../test/stall-proxy";
 import { RECOVERY_BOUND_MS } from "../../test/stall-scenario";
 import { natsConnectionOptions } from "../nats-connection";
 
 const codec = StringCodec();
 
+// Reserved here, at the file's module scope: the file's own `afterAll` removes it once the
+// `describe` below has stopped the stack writing into it.
+const stackDirectory = useEnvoyStackDirectory();
+
 describe.skipIf(!envoyStackEnabled)("a NATS connection whose path freezes", () => {
   let stack: EnvoyStack | undefined;
 
   beforeAll(async () => {
-    stack = await startEnvoyStack();
+    stack = await startEnvoyStack({ work: stackDirectory });
   }, 120_000);
   afterAll(async () => {
     await stack?.stop();

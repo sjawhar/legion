@@ -6,6 +6,7 @@ import {
   type EnvoyStack,
   envoyStackEnabled,
   startEnvoyStack,
+  useEnvoyStackDirectory,
 } from "@legion/envoy-client/test/envoy-stack"
 import { type StallProxy, startStallProxy } from "@legion/envoy-client/test/stall-proxy"
 import { RECOVERY_BOUND_MS, runFreezeScenario } from "@legion/envoy-client/test/stall-scenario"
@@ -138,6 +139,9 @@ async function startChannelServer(
 // SIGTERM test below belongs to neither, so it runs once, with the current grant.
 for (const listenerGrant of ["current", "before-session-consumers"] as const) {
   const onCorePath = listenerGrant === "before-session-consumers"
+  // Reserved out here, at the file's module scope, one per grant: the file's own `afterAll`
+  // removes it once the `describe` has stopped the stack writing into it.
+  const stackDirectory = useEnvoyStackDirectory()
   describe.skipIf(!envoyStackEnabled)(
     onCorePath
       ? "the channel server against a real natsd and an Envoy listener whose grant predates session consumers"
@@ -145,7 +149,7 @@ for (const listenerGrant of ["current", "before-session-consumers"] as const) {
     () => {
       let stack: EnvoyStack | undefined
       beforeAll(async () => {
-        stack = await startEnvoyStack({ listenerGrant })
+        stack = await startEnvoyStack({ work: stackDirectory, listenerGrant })
       }, 120_000)
       afterAll(async () => {
         await stack?.stop()

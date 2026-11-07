@@ -1,15 +1,7 @@
-import { afterEach, beforeEach, expect, test } from "bun:test";
-import {
-  mkdirSync,
-  mkdtempSync,
-  readdirSync,
-  readFileSync,
-  readlinkSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
+import { beforeEach, expect, test } from "bun:test";
+import { mkdirSync, readdirSync, readFileSync, readlinkSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
+import { temporaryDirectories } from "@legion/test-fixtures/temporary-directories";
 import {
   askgateState,
   pidNamespace,
@@ -26,11 +18,11 @@ const MARKER_MODULE = join(import.meta.dir, "..", "askgate-marker.ts");
 const WRITERS = 4;
 const WRITES = 2_000;
 
+const makeDirectory = temporaryDirectories("askgate-record");
 let root = "";
 beforeEach(() => {
-  root = mkdtempSync(join(tmpdir(), "askgate-record-"));
+  root = makeDirectory();
 });
-afterEach(() => rmSync(root, { recursive: true, force: true }));
 
 /** Reads a child's output one line at a time while the child keeps running. */
 function lineReader(stream: ReadableStream<Uint8Array>): () => Promise<string> {

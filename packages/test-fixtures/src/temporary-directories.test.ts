@@ -1,5 +1,14 @@
 import { beforeAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  linkSync,
+  mkdirSync,
+  realpathSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { temporaryDirectories, temporaryDirectory } from "./temporary-directories";
@@ -132,4 +141,69 @@ test("made and removed the directory of a describe whose rows were all skipped",
   expect(fromTheSkippedRows).not.toBe("");
   expect(madeForTheSkippedRows).toBe(true);
   expect(existsSync(fromTheSkippedRows)).toBe(false);
+});
+
+/**
+ * The two behaviours this fixture took from `packages/envoy-client/test/temp-dir.ts` when that
+ * package's tests moved onto it (cybermonklabs/legion#2911). Each is read by the row after the
+ * one that makes it, because what removes the directory is the maker's own `afterEach`: this is
+ * the fixture's real removal, not a copy of it called by hand.
+ */
+describe("the removal", () => {
+  const makeDirectory = temporaryDirectories("test-fixtures-removal");
+  const outside = temporaryDirectory("test-fixtures-outside");
+  /** The read-only tree the first row makes, which the second finds gone. */
+  let readOnlyTree = "";
+  /** The tree holding a symlink out of itself, and the file that symlink points into. */
+  let treeWithLink = "";
+  let fileOutside = "";
+  /**
+   * The tree holding a hard link to a file outside it, and that file: a mode the removal wrote
+   * on the link would be that file's own, since the two names are one inode.
+   */
+  let treeWithHardLink = "";
+  let linkedFile = "";
+
+  test("a tree whose directories and files are read-only is made", () => {
+    readOnlyTree = makeDirectory("read-only");
+    const inner = join(readOnlyTree, "cache", "download");
+    mkdirSync(inner, { recursive: true });
+    writeFileSync(join(inner, "module.zip"), "x", { mode: 0o444 });
+    chmodSync(inner, 0o555);
+    chmodSync(dirname(inner), 0o555);
+    expect(existsSync(inner)).toBe(true);
+  });
+
+  test("and is removed all the same, where rmSync alone fails on it", () => {
+    expect(readOnlyTree).not.toBe("");
+    expect(existsSync(readOnlyTree)).toBe(false);
+  });
+
+  test("a tree holding a symlink to a tree the test does not own is made", () => {
+    treeWithLink = makeDirectory("symlink");
+    fileOutside = join(outside, "kept.txt");
+    writeFileSync(fileOutside, "kept");
+    symlinkSync(outside, join(treeWithLink, "link"));
+    expect(existsSync(join(treeWithLink, "link", "kept.txt"))).toBe(true);
+  });
+
+  test("and the removal never reaches through that symlink", () => {
+    expect(treeWithLink).not.toBe("");
+    expect(existsSync(treeWithLink)).toBe(false);
+    expect(existsSync(fileOutside)).toBe(true);
+  });
+
+  test("a tree holding a hard link to a file outside it is made", () => {
+    treeWithHardLink = makeDirectory("hard-link");
+    linkedFile = join(outside, "fixture.txt");
+    writeFileSync(linkedFile, "fixture", { mode: 0o444 });
+    linkSync(linkedFile, join(treeWithHardLink, "same-inode.txt"));
+    expect(statSync(linkedFile).nlink).toBe(2);
+  });
+
+  test("and the removal leaves that file's own mode alone", () => {
+    expect(treeWithHardLink).not.toBe("");
+    expect(existsSync(treeWithHardLink)).toBe(false);
+    expect(statSync(linkedFile).mode & 0o777).toBe(0o444);
+  });
 });

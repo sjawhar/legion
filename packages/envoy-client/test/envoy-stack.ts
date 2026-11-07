@@ -1,15 +1,7 @@
-import {
-  closeSync,
-  mkdirSync,
-  mkdtempSync,
-  openSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { closeSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:net";
-import * as os from "node:os";
 import * as path from "node:path";
+import { temporaryDirectory } from "@legion/test-fixtures/temporary-directories";
 import type { Subprocess } from "bun";
 import { z } from "zod";
 import { preConsumerNatsServer } from "./listener-grant";
@@ -36,12 +28,41 @@ export interface EnvoyStack {
   readonly monitorUrl: string;
   /** The grant the listener's NATS user holds, as `startEnvoyStack` was asked for it. */
   readonly listenerGrant: ListenerGrant;
-  /** Stops the listener and natsd and removes their scratch directory, binaries included. */
+  /** Stops the listener and natsd. Their scratch directory is the caller's, and goes with it. */
   stop(): Promise<void>;
+}
+
+/**
+ * Reserves the directory one stack works in — its Go binaries, natsd's store, both homes and
+ * both logs — and returns its path.
+ *
+ * Every test file that starts a stack calls this once per stack, at its own module scope, as
+ * `const stackDirectory = useEnvoyStackDirectory()`, and hands the path to `startEnvoyStack`.
+ * Two calls reserve two directories, which is what a file holding a `describe` per listener
+ * grant needs.
+ *
+ * The call cannot live in this module's body: `temporaryDirectory` registers the `beforeAll`
+ * that makes the directory and the `afterAll` that removes it where it is called, and Bun
+ * evaluates an imported module once per process, so a hook here would take the scope of
+ * whichever test file imported this one first.
+ *
+ * Module scope rather than the `describe` body that starts the stack, because Bun runs a
+ * scope's `afterAll` hooks in the order they were registered: a directory reserved beside the
+ * stack would be removed before the `afterAll` that stops the processes writing into it, where
+ * a file's own `afterAll` runs after every `describe` of the file has finished.
+ */
+export function useEnvoyStackDirectory(): string {
+  return temporaryDirectory("envoy-stack");
 }
 
 /** What a caller may change about the stack it starts. */
 export interface EnvoyStackOptions {
+  /**
+   * The directory the stack works in, which the caller reserved with
+   * {@link useEnvoyStackDirectory} and the fixture removes again. It exists and is empty when
+   * `startEnvoyStack` is called, and one stack has it to itself.
+   */
+  readonly work: string;
   /**
    * Environment for the listener process, merged over the stack's own, so a caller can add a
    * setting or replace one of these. The session-stall rig (test/session-stall.ts) shortens the
@@ -197,15 +218,18 @@ export type ListenerGrant = "current" | "before-session-consumers";
  * (`preConsumerNatsServer`): the listener connects as an nkey user holding the grant from before
  * session consumers, and everything else, a session's plugin and a test's own connection, as the
  * `no_auth_user` that may do anything.
+ *
+ * The stack works in `options.work`, which the caller reserved with
+ * {@link useEnvoyStackDirectory}: `stop` leaves it, and the fixture removes it when the file
+ * that reserved it is done, whether or not the stack ever reached `stop`.
  */
-export async function startEnvoyStack(options: EnvoyStackOptions = {}): Promise<EnvoyStack> {
+export async function startEnvoyStack(options: EnvoyStackOptions): Promise<EnvoyStack> {
   const listenerGrant = options.listenerGrant ?? "current";
   const { PATH = "" } = process.env;
-  const work = mkdtempSync(path.join(os.tmpdir(), "envoy-stack-"));
+  const work = options.work;
   const processes: Subprocess[] = [];
   const stop = async () => {
     for (const child of processes.reverse()) await stopProcess(child);
-    rmSync(work, { recursive: true, force: true });
   };
   try {
     const bin = path.join(work, "bin");

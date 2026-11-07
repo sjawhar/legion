@@ -937,7 +937,10 @@ its query (narrowed to the rows with `select`), its columns, its revoke call, an
 `window.confirm` question and what to invalidate on success. It owns the loading, failed and empty
 states and the one revoke in flight: every Revoke button is disabled while a revoke is pending, a
 `useSubmitGuard` ref drops a second press that lands before that re-render, and a refused revoke's
-broker message (a `403 NOT_APPROVER` among them) shows under the table, never silently.
+broker message (a `403 NOT_APPROVER` among them) shows under the table, never silently. A section
+that lists rows the broker lets nobody revoke gives it `unrevocable`, which names why for such a
+row; that row then renders read-only, with that line where its Revoke button would be, so the page
+offers no button that can only fail.
 
 `GrantsSection.tsx` renders on `/settings` only where the pending list is not `null`: every live
 grant of a session the viewer operates, automatic or approved by anyone, and every grant the viewer
@@ -950,6 +953,12 @@ they share the pod's kind and runtime id - and has a Revoke button that POSTs `{
 `/api/v1/credential-grants/{id}/revoke`. Only its operator sees an automatic grant, and revoking
 one makes that session ask before it gets those secrets again: its other automatic grants of them
 end with it.
+The list also holds, for every signed-in person, every live grant that belongs to no person: one
+the policy gave without asking (`granted` "automatic", so no approver) on an enrollment with no
+operator, which the broker lists to everyone so that what a pod took is on somebody's page.
+`mayRevoke` refuses every person for such a row, so `unrevocable` makes it read-only and says
+`Ends with its machine login`: revoking the service's machine login ends every session under it,
+which is what ends the grant.
 
 `MachineLoginsSection.tsx` renders under the code entry on `/credentials/machine` as **Machine
 logins**: the machine logins the viewer may revoke that can still reach a secret

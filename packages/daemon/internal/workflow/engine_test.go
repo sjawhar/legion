@@ -568,7 +568,7 @@ func TestAPhaseFinishedNoticeCarriesTheWorkersSummaryAndItsVerdict(t *testing.T)
 // handoff included, neither of which has a phase row. A redelivered merge changes nothing. Every
 // expiry row names the root generation whose linger it expires, a child's too, which keeps the
 // earlier generation of the run that admitted it. The close opens the root's production check,
-// whose first look the implementer reports here before the linger ends, since the tree's close
+// whose first look the tester reports here before the linger ends, since the tree's close
 // waits for an open check (check_test.go). No child of such a tree is left mid-run, so the expiry
 // hands none over; the hand-over of a root a person closed is admit's cover (finished_root_test.go).
 func TestTheCloseLingersOnceAndExpiryStopsTreeAndRemovesEveryWorkspace(t *testing.T) {
@@ -582,7 +582,7 @@ func TestTheCloseLingersOnceAndExpiryStopsTreeAndRemovesEveryWorkspace(t *testin
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-209", Role: claim.RoleImplementer, Claim: "child-implementer"})
 	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", Failing: []string{}})
 	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-209", Repo: "sjawhar/legion", Number: 43, Branch: "legion/LEGION-209", HeadSHA: "head-43", Failing: []string{}})
-	engine := New(record.NewStore(), Config{Project: "LEGION", Linger: time.Hour, Repositories: testRepositories, Clock: func() time.Time { return now }}, nil)
+	engine := New(record.NewStore(), Config{Project: "LEGION", Linger: time.Hour, ProductionCheckRole: claim.RoleTester, Repositories: testRepositories, Clock: func() time.Time { return now }}, nil)
 
 	merged := intake.PullRequestMerged{Repo: "sjawhar/legion", Number: 42, MergeSHA: "merge"}
 	if _, err := intake.ApplyFact(ctx, pool, "github", "merged", merged, engine, admissionStub{}); err != nil {
@@ -982,7 +982,7 @@ const testReviewApp = "legion-reviewer[bot]"
 // logging to log (the default logger when nil).
 func testEngine(policy config.DesignGate, log *slog.Logger) *Engine {
 	return New(record.NewStore(), Config{
-		Project: "LEGION", DesignGate: policy, ReviewRoundCap: 3, MaxFixAttempts: 3, Linger: time.Hour, ReviewAppLogin: testReviewApp, Repositories: testRepositories,
+		Project: "LEGION", DesignGate: policy, ReviewRoundCap: 3, MaxFixAttempts: 3, Linger: time.Hour, ProductionCheckRole: claim.RoleTester, ReviewAppLogin: testReviewApp, Repositories: testRepositories,
 		Clock: func() time.Time { return time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC) },
 	}, log)
 }
