@@ -25,10 +25,26 @@ import (
 var ErrCompactInstructions = errors.New("a compaction carries custom instructions, so Oh My Pi writes its summary as text rather than snapcompact's images")
 
 // ErrCompactNotTaken is a compaction nothing was asked for: the claim could not be written as
-// working, or it lost its process between the take and the ask. The claim is where the request
-// found it and no task was sent, where every other outcome gives the claim back and sends the
-// task it owes (compactEnded).
+// working, it lost its process between the take and the ask, or its shim is not connected, so
+// the daemon had nothing to ask through (compactStart). The claim is where the request found it
+// and no task was sent, where every other outcome gives the claim back and sends the task it
+// owes (compactEnded).
 var ErrCompactNotTaken = errors.New("the claim was not taken for a compaction, so nothing was asked of its session")
+
+// ErrCompactNotEnded is a compaction whose end the store would not write: Oh My Pi answered and
+// the write that gives the claim back failed, so the claim is left working and the task it owes
+// is unsent. It is the store's failure and not a compaction that did not run, whose answer
+// promises the claim is back and its task has gone again (api's compact). What a daemon that
+// stops here leaves behind is the shape a restart already knows: a claim stored working, whose
+// agent's own answer to "are you streaming" ends it (askTurnOver).
+var ErrCompactNotEnded = errors.New("the compaction ended and the claim could not be given back, so the task it owes was not sent")
+
+// ErrCompactProcessGone is a claim that lost its process while its session was being compacted
+// (letGo): the end reaches a claim its relaunch has moved past, or one in a state the end means
+// nothing in, so compactEnded never runs and sends no task. The claim's own path decides what
+// happens to it next, and the task it owes goes at the relaunch, when its agent is ready again
+// (sendPending).
+var ErrCompactProcessGone = errors.New("the claim lost its process while its session was being compacted, so the task it owes goes at its relaunch")
 
 // compacting is the compaction a claim is in: the connection it runs over and the generation it
 // was taken at, which is what the end of it is fenced on. It is memory only, as a held
@@ -63,13 +79,19 @@ type compacting struct {
 // each because the site that decides it already asks whether the claim is working, and none of
 // them has learned a second word for busy (compactStart).
 //
-// Nil is a session compacted. A compaction Oh My Pi refused or skipped — a session too small,
-// one already compacted, a summarizer that failed — carries its words
+// Nil is a session compacted and the claim given back. A compaction Oh My Pi refused or skipped
+// — a session too small, one already compacted, a summarizer that failed — carries its words
 // (runtime.RefusalReason); a wait that ran out, or a transport that failed, is an error of its
 // own. The claim is given back and the owed task is sent again in every one of those cases, and
 // only a compaction that ran puts the claim's run of provider-error turns back to zero
 // (compactEnded). A take that did not happen at all is ErrCompactNotTaken or a *RefusedError,
 // and leaves the claim where it was with its task unsent.
+//
+// A compaction that ran and did not end is neither: ErrCompactNotEnded is the end the store
+// would not write, and ErrCompactProcessGone the claim that lost its process under the
+// compaction. Each leaves the owed task unsent here, and each says so in the daemon's own
+// words: what Oh My Pi answered such a compaction goes to the log rather than to the caller,
+// which no model's words reach through (api's reasonBound).
 func (m *Machine) Compact(ctx context.Context, customInstructions string) error {
 	if strings.TrimSpace(customInstructions) == "" {
 		return ErrCompactInstructions
@@ -79,7 +101,7 @@ func (m *Machine) Compact(ctx context.Context, customInstructions string) error 
 	switch err := m.Handle(ctx, RequestCompact{Claim: token}); {
 	case errors.As(err, &refused):
 		// The claim is in no state to be compacted, and the refusal names that state: its
-		// caller reads which refusal it is from there (api's compactRefusalCode).
+		// caller reads which refusal it is from there (api's refuseState).
 		return err
 	case err != nil:
 		return errors.Join(ErrCompactNotTaken, err)
@@ -92,10 +114,28 @@ func (m *Machine) Compact(ctx context.Context, customInstructions string) error 
 		return fmt.Errorf("%w: %s lost its process before its session could be compacted", ErrCompactNotTaken, token)
 	}
 	err := run.conn.Compact(ctx, customInstructions, runtime.CompactTimeout)
+	// A claim the relaunch has moved past is read before the end is posted rather than after it,
+	// because the end itself can relaunch the claim it gives back (afterTurn's refreshPlugin):
+	// read after, such a relaunch would be taken for the process this compaction lost.
+	movedPast := m.View().Claim.Generation != run.generation
 	// The end runs whatever the compaction did and whatever became of ctx — a caller that hung up
 	// still leaves a claim to give back — so it is posted on a context the caller cannot cancel.
 	ended := CompactEnded{Claim: token, Generation: run.generation, Compacted: err == nil}
-	return errors.Join(err, m.Handle(context.WithoutCancel(ctx), ended))
+	endErr := m.Handle(context.WithoutCancel(ctx), ended)
+	if !movedPast && endErr == nil {
+		return err
+	}
+	if err != nil {
+		m.log.Warn("supervise: the compaction whose end did not run was itself refused or unanswered",
+			"generation", run.generation, "error", err)
+	}
+	var endRefused *RefusedError
+	if movedPast || errors.As(endErr, &endRefused) {
+		// The end was dropped as the end of a generation the claim has been relaunched past, or
+		// refused in the state letGo left the claim in: either way compactEnded did not run.
+		return ErrCompactProcessGone
+	}
+	return fmt.Errorf("%w: %w", ErrCompactNotEnded, endErr)
 }
 
 // compaction is the compaction in flight, and false when none is.
@@ -134,8 +174,11 @@ func (m *Machine) compaction() (compacting, bool) {
 func compactStart(m *Machine, ctx context.Context, _ Event) error {
 	conn, ok := m.deps.Conns.Conn(m.claim.Token)
 	if !ok {
-		return &RefusedError{State: m.claim.State, Request: "compact",
-			Reason: "the claim's shim is not connected, so nothing can be asked of its session"}
+		// No refusal of the claim's state: the state takes a compaction, and what is missing is
+		// the connection to ask through. Machine.Compact answers it as a take that did not
+		// happen, so its caller reports the one failure it is rather than reading the claim's
+		// state for a cause that state does not hold (api's compact).
+		return errors.New("the claim's shim is not connected, so nothing can be asked of its session")
 	}
 	if m.claim.Pending != nil && (m.send != nil || m.resultPending()) {
 		m.log.Info("supervise: the compaction aborts the turn this task's prompt is running; the task goes back to waiting",

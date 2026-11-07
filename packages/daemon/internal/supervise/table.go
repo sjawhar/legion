@@ -698,14 +698,6 @@ func RunsNothingStates() []ClaimState {
 	return slices.Clone(runsNothing)
 }
 
-// PromptedStates are the states a claim's agent takes a prompt in: ready, and idle between
-// turns (prompted). It is a copy, so no caller changes the table's own set. The api's
-// compaction holds its own check to it, since these two are the states the table takes a
-// compaction in and no other (fillTable's onCompact rows, api's compactable).
-func PromptedStates() []ClaimState {
-	return slices.Clone(prompted)
-}
-
 const (
 	noProcess     = "no process of this claim is running"
 	noSend        = "no prompt is sent in this state"

@@ -51,18 +51,13 @@ type controllerOp struct {
 	cutsTheTurn      string
 }
 
-var (
-	compactOp = controllerOp{
-		name:             "a compaction",
-		notTheController: "the controller does not compact its own session",
-		cutsTheTurn:      "a compaction would abort that turn",
-	}
-	freshSessionOp = controllerOp{
-		name:             "a fresh session",
-		notTheController: "its own claim takes no fresh session",
-		cutsTheTurn:      "a fresh session would cut that turn off",
-	}
-)
+// freshSessionOp is the fresh session in the words its own refusals name it by, which both of
+// its doors give; the compaction's own is compact.go's (compactOp).
+var freshSessionOp = controllerOp{
+	name:             "a fresh session",
+	notTheController: "its own claim takes no fresh session",
+	cutsTheTurn:      "a fresh session would cut that turn off",
+}
 
 // controllerTarget is the claim a controller's recovery named, read and authenticated: the
 // machine to run the effect on, and the issue and role the caller spelled, which the route logs
@@ -278,7 +273,7 @@ func startsAgain(state supervise.ClaimState) bool {
 // whose launch has not registered yet is refused rather than waited for, because its suspension
 // is one the machine would hold for the agent it is still waiting for (supervise's
 // holdSuspendUntilReady) and this operation has none held. A compaction takes a narrower set,
-// the two states the machine takes one in (compactable).
+// the two the machine itself takes one in (supervise's onCompact rows).
 func agentRunning(state supervise.ClaimState) bool {
 	return state == supervise.StateRegistered || state == supervise.StateReady || state == supervise.StateIdle
 }

@@ -4,6 +4,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
 // compactInstructions stands for what the API sends with every compaction: Oh My Pi writes a
@@ -344,4 +346,92 @@ func TestACompactionTheStoreWouldNotTakeSaysNothingWasAsked(t *testing.T) {
 		t.Fatalf("Oh My Pi was asked for %d compactions, want none", got)
 	}
 	h.wantPrompts(ladderSends)
+}
+
+// A compaction of a claim whose shim is not connected asks nothing and takes nothing: the daemon
+// has no connection to ask through, which is no refusal of the claim's state — the state takes a
+// compaction — so it answers the take that did not happen, and its caller reports the one
+// failure it is rather than reading the claim's state for a cause that state does not hold
+// (api's compact).
+func TestACompactionWhoseShimIsNotConnectedSaysNothingWasAsked(t *testing.T) {
+	notices := 0
+	h := ladderStuck(t, &notices)
+	h.conns.Remove(h.token)
+
+	err := h.m.Compact(h.ctx, testCompactInstructions)
+
+	if !errors.Is(err, ErrCompactNotTaken) {
+		t.Fatalf("a compaction with no shim connected answered %v, want ErrCompactNotTaken", err)
+	}
+	var refused *RefusedError
+	if errors.As(err, &refused) {
+		t.Fatalf("the answer is the refusal %+v; the state takes a compaction, so no refusal of it says what went wrong", refused)
+	}
+	if got := len(h.conn.Compactions()); got != 0 {
+		t.Fatalf("Oh My Pi was asked for %d compactions, want none", got)
+	}
+	if got := h.state(); got != StateIdle {
+		t.Fatalf("the claim is %s, want the idle it was", got)
+	}
+	h.wantPrompts(ladderSends)
+}
+
+// A compaction whose end the store would not write is told apart from one that was refused: Oh
+// My Pi compacted the session, the write that gives the claim back failed, and the task the
+// claim owes is unsent. Answered as a compaction that did not run, it would tell its caller the
+// claim was back and its task had gone again (api's compact).
+func TestACompactionWhoseEndTheStoreWouldNotWriteSaysTheClaimWasNotGivenBack(t *testing.T) {
+	notices := 0
+	h := ladderStuck(t, &notices)
+	release := h.conn.HoldCompact()
+	compacted := make(chan error, 1)
+	go func() { compacted <- h.m.Compact(h.ctx, testCompactInstructions) }()
+	waitForCompacting(t, h)
+
+	h.store.fail("PutClaim", errors.New("the store is down"))
+	release()
+
+	err := <-compacted
+	if !errors.Is(err, ErrCompactNotEnded) {
+		t.Fatalf("a compaction whose end the store would not write answered %v, want ErrCompactNotEnded", err)
+	}
+	if got := len(h.conn.Compactions()); got != 1 {
+		t.Fatalf("Oh My Pi was asked for %d compactions, want the one that ran", got)
+	}
+	h.m.Wait()
+	h.wantPrompts(ladderSends)
+	if got := h.store.load(h.token).State; got != StateWorking {
+		t.Fatalf("the stored claim is %s, want the working the take wrote: the end was never written", got)
+	}
+}
+
+// A claim that loses its process while its session is being compacted gets nothing from the end
+// of that compaction: the end reaches a claim the relaunch has moved past, so it decides nothing
+// and sends nothing. The task the claim owes goes at the relaunch, once its agent is ready
+// again, and the answer says so rather than reporting a compaction that gave the claim back.
+func TestACompactionWhoseClaimLosesItsProcessLeavesTheOwedTaskToTheRelaunch(t *testing.T) {
+	notices := 0
+	h := ladderStuck(t, &notices)
+	owed := h.pending().ID
+	release := h.conn.HoldCompact()
+	compacted := make(chan error, 1)
+	go func() { compacted <- h.m.Compact(h.ctx, testCompactInstructions) }()
+	waitForCompacting(t, h)
+
+	h.observe(runtime.Gone)
+	release()
+
+	if err := <-compacted; !errors.Is(err, ErrCompactProcessGone) {
+		t.Fatalf("a compaction whose claim lost its process answered %v, want ErrCompactProcessGone", err)
+	}
+	h.m.Wait()
+	h.wantPrompts(ladderSends)
+
+	h.relaunched()
+
+	h.m.Wait()
+	prompts := h.wantPrompts(ladderSends + 1)
+	if prompts[ladderSends].DeliveryID != owed {
+		t.Fatalf("the relaunched claim was sent %q, want the task it owed, %q", prompts[ladderSends].DeliveryID, owed)
+	}
 }

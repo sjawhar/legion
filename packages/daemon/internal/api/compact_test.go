@@ -419,31 +419,116 @@ func TestACompactionWhoseAnswerNeverCameGivesTheClaimBack(t *testing.T) {
 }
 
 // A claim the machine takes no compaction in is refused in the words of its own state, not as a
-// claim in a turn. Two reach the machine rather than the route's own read: a claim whose agent
-// registered and is not ready yet, which the table ignores, and a ready claim whose shim is not
-// connected, which the daemon cannot ask through at all.
+// claim in a turn: a claim whose agent registered and is not ready yet has no session to ask,
+// and the machine is what says so.
 func TestACompactionRefusedForAClaimThatIsNotReadyNamesWhatIsWrong(t *testing.T) {
-	t.Run("a claim whose agent registered and is not ready", func(t *testing.T) {
-		h := compactHarness(t, nil)
-		token, _ := h.launchIn("LEGION-208", "LEGION-209", claim.RoleImplementer)
-		h.registered(h.bootToken(token), "ses_implementer")
-		connected(h, token)
-		if got := h.stored(token).State; got != supervise.StateRegistered {
-			t.Fatalf("the launched worker is %s, want registered", got)
-		}
+	h := compactHarness(t, nil)
+	token, _ := h.launchIn("LEGION-208", "LEGION-209", claim.RoleImplementer)
+	h.registered(h.bootToken(token), "ses_implementer")
+	connected(h, token)
+	if got := h.stored(token).State; got != supervise.StateRegistered {
+		t.Fatalf("the launched worker is %s, want registered", got)
+	}
 
-		recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(token)+"/compact", nil)
+	recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(token)+"/compact", nil)
 
-		assertFailure(t, recorder, http.StatusConflict, claimUnsettled)
-	})
-	t.Run("a ready claim whose shim is not connected", func(t *testing.T) {
-		h := compactHarness(t, nil)
-		token := readyImplementer(t, h)
+	wantFreshSessionRefusal(t, recorder, http.StatusConflict, claimUnsettled,
+		string(token)+" is registered: a compaction reaches a claim whose agent is ready or idle; ask again when "+
+			string(token)+" is one of those")
+}
 
-		recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(token)+"/compact", nil)
+// A ready claim whose shim is not connected is the one refusal the take writes itself: the
+// daemon has nothing to ask through, so Oh My Pi was asked nothing and the claim was sent
+// nothing. The caller is told the compaction failed rather than told a compaction that did not
+// run, whose answer carries the claim's task with it.
+func TestACompactionOfAClaimWhoseShimIsNotConnectedSaysNothingWasAsked(t *testing.T) {
+	h := compactHarness(t, nil)
+	token := readyImplementer(t, h)
 
-		assertFailure(t, recorder, http.StatusConflict, compactionFailed)
-	})
+	recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(token)+"/compact", nil)
+
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409; body %s", recorder.Code, recorder.Body)
+	}
+	var failure Failure
+	decodeInto(t, recorder, &failure)
+	if failure.Code != compactionFailed || !strings.Contains(failure.Error, "shim is not connected") {
+		t.Fatalf("the refusal is %+v, want %s naming the shim that is not connected", failure, compactionFailed)
+	}
+	if after := h.stored(token); after.State != supervise.StateReady {
+		t.Errorf("the refused claim is %s, want the ready it was", after.State)
+	}
+}
+
+// A compaction whose end the store would not write is answered as the store failure it is. Oh My
+// Pi compacted the session and the write that gives the claim back did not happen, so the claim
+// is left working and the task it owes is unsent: answered 200 it would tell the caller a
+// compaction that did not run, whose answer promises the claim is back and its task has gone
+// again.
+func TestACompactionWhoseEndTheStoreWouldNotWriteAnswersTheStoreFailure(t *testing.T) {
+	h := compactHarness(t, nil)
+	token := idleOnTheLadder(t, h)
+	conn := connected(h, token)
+	release := conn.HoldCompact()
+	answered := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		answered <- h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(token)+"/compact", nil)
+	}()
+	waitForCompacting(t, h, token)
+
+	// The store is gone from here on, so the write the compaction's end makes fails.
+	h.store.Pool().Close()
+	release()
+
+	recorder := <-answered
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500; body %s", recorder.Code, recorder.Body)
+	}
+	var failure Failure
+	decodeInto(t, recorder, &failure)
+	if failure.Code != compactionFailed {
+		t.Fatalf("the failure is %+v, want %s: the compaction ended and the claim could not be given back", failure, compactionFailed)
+	}
+	if got := len(conn.Compactions()); got != 1 {
+		t.Fatalf("Oh My Pi was asked for %d compactions, want the one that ran", got)
+	}
+	if prompts := conn.Prompts(); len(prompts) != 0 {
+		t.Fatalf("the connection was sent %#v, want nothing: the claim was never given back", prompts)
+	}
+}
+
+// A claim that loses its process while its session is being compacted is sent nothing by the
+// compaction's end: that end reaches a claim the relaunch has moved past, so it decides nothing.
+// The answer names the relaunch as what sends the task the claim owes, where a compaction
+// reported as run would have the CLI say the task had gone again when nothing had sent it.
+func TestACompactionOfAClaimThatLosesItsProcessSaysTheTaskGoesAtTheRelaunch(t *testing.T) {
+	h := compactHarness(t, nil)
+	token := idleOnTheLadder(t, h)
+	conn := connected(h, token)
+	owed := h.stored(token).Pending.ID
+	release := conn.HoldCompact()
+	answered := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		answered <- h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(token)+"/compact", nil)
+	}()
+	waitForCompacting(t, h, token)
+
+	h.relaunch(token)
+	release()
+
+	wantFreshSessionRefusal(t, <-answered, http.StatusConflict, compactionFailed,
+		string(token)+" lost its process while its session was being compacted; the task it owes goes at its relaunch")
+	settled(h, token)
+	if prompts := conn.Prompts(); len(prompts) != 0 {
+		t.Fatalf("the connection was sent %#v, want nothing: the compaction's end reached a claim its relaunch had moved past", prompts)
+	}
+
+	h.ready(token, "ses_implementer", 2)
+
+	settled(h, token)
+	if prompts := conn.Prompts(); len(prompts) != 1 || prompts[0].DeliveryID != owed {
+		t.Fatalf("the relaunched claim was sent %#v, want the one task it owed (%s)", prompts, owed)
+	}
 }
 
 // The reason a compaction did not run is words the daemon did not write — Oh My Pi's, and
