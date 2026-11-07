@@ -11,7 +11,14 @@ runs:
       run: |
         version=0.22.1
         tarball="$RUNNER_TEMP/go-containerregistry_Linux_x86_64.tar.gz"
-        curl -fsSL -o "$tarball" "https://github.com/google/go-containerregistry/releases/download/v$version/go-containerregistry_Linux_x86_64.tar.gz"
+        # Retried, in the spelling .github/actions/install-changie explains: 8 bounded attempts,
+        # the last starting 127 s after the first, with `--fail` kept so a 504's body never lands
+        # in the tarball. 60 s per attempt: a release asset is tens of megabytes — the Bun
+        # release zip this repository measures is 51,794,595 bytes — and 60 s is the bound every
+        # release-asset fetch of this repository's CI carries (dispatch://INFRA-1545). This step
+        # measured at most 1 s across the 20 most recent successful ci.yaml push runs on main.
+        curl -fsSL --retry 7 --retry-all-errors --max-time 60 \
+          -o "$tarball" "https://github.com/google/go-containerregistry/releases/download/v$version/go-containerregistry_Linux_x86_64.tar.gz"
         echo "0ab7a1d6932a213aed964ce97666c3077fe691c8606413674a8b3e0b9ec4cda0  $tarball" | sha256sum -c -
         mkdir -p "$RUNNER_TEMP/crane"
         tar -xzf "$tarball" -C "$RUNNER_TEMP/crane" crane

@@ -30,7 +30,9 @@ on:
       - '.github/workflows/ci.yaml'
       - '.github/workflows/docs-pages.yaml'
       - '.github/workflows/docs-site.yaml'
-      # ci.yaml's *bun_install, 16 patterns:
+      # ci.yaml's *ci_retry, 1 pattern:
+      - '.github/scripts/ci-retry.sh'
+      # ci.yaml's *bun_install, 17 patterns:
       - 'package.json'
       - 'bun.lock'
       - 'patches/**'
@@ -42,6 +44,7 @@ on:
       - 'packages/pi-shared/package.json'
       - 'packages/claude-envoy/package.json'
       - 'packages/proof-editor/package.json'
+      - 'packages/proof-editor/proof-sdk-dc6a852b2ab45463dc9d3d17762235450c8ff0d6.tgz'
       - 'packages/dispatch/package.json'
       - 'packages/envoy/internal/dispatch/pmdoc/gen/package.json'
       - 'docs/site/package.json'

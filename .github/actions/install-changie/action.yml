@@ -11,7 +11,22 @@ runs:
       run: |
         version=1.26.0
         tarball="$RUNNER_TEMP/changie_${version}_linux_amd64.tar.gz"
-        curl -fsSL -o "$tarball" "https://github.com/miniscruff/changie/releases/download/v$version/changie_${version}_linux_amd64.tar.gz"
+        # Retried, because a release host that answers 504 or resets the connection is what fails
+        # this step (dispatch://INFRA-1545, R1). Where the verb is curl no helper is needed:
+        # `--retry 7 --retry-all-errors` makes 8 attempts whose last starts 127 s after the first,
+        # and `--max-time` bounds each attempt on its own, since curl resets that clock for every
+        # retry. `--fail`, the `f` of `-fsSL`, stays: without it curl writes a 504's body into the
+        # tarball and exits 0, and the SHA-256 below is then the only thing between that body and
+        # the job. Every other curl of this repository's CI carries the same three options.
+        #
+        # 60 s per attempt: a release asset is tens of megabytes — the Bun release zip this
+        # repository measures is 51,794,595 bytes — and 60 s is what every release-asset fetch
+        # of this repository's CI is bounded at (dispatch://INFRA-1545). This tarball is smaller
+        # than that and this step measured at most 1 s across the 20 most recent successful
+        # ci.yaml push runs on main, so the bound leaves a release host room to serve at a
+        # sixtieth of its usual rate.
+        curl -fsSL --retry 7 --retry-all-errors --max-time 60 \
+          -o "$tarball" "https://github.com/miniscruff/changie/releases/download/v$version/changie_${version}_linux_amd64.tar.gz"
         echo "eab168c8287a6e91912e1c02e5260911232d945bfd3c89d8a0e1ace6bb7b6161  $tarball" | sha256sum -c -
         mkdir -p "$RUNNER_TEMP/changie"
         tar -xzf "$tarball" -C "$RUNNER_TEMP/changie"

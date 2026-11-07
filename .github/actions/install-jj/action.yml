@@ -29,7 +29,14 @@ runs:
         dir="$RUNNER_TEMP/mise-install"
         mkdir -p "$dir"
         archive="mise-${mise_version}-linux-x64.tar.gz"
-        curl -fsSLo "$dir/$archive" \
+        # Retried, in the spelling .github/actions/install-changie explains: 8 bounded attempts,
+        # the last starting 127 s after the first, with `--fail` kept so a 504's body never lands
+        # in the tarball. 60 s per attempt: a release asset is tens of megabytes — the Bun
+        # release zip this repository measures is 51,794,595 bytes — and 60 s is the bound every
+        # release-asset fetch of this repository's CI carries (dispatch://INFRA-1545). This
+        # action's two steps measured at most 3 s together across the 20 most recent successful
+        # ci.yaml push runs on main.
+        curl -fsSLo "$dir/$archive" --retry 7 --retry-all-errors --max-time 60 \
           "https://github.com/jdx/mise/releases/download/${mise_version}/${archive}"
         printf '%s  %s\n' "$mise_sha256" "$dir/$archive" > "$dir/SHA256SUMS"
         sha256sum --check --strict "$dir/SHA256SUMS"
@@ -52,6 +59,22 @@ runs:
           echo "$dockerfile names no ARG JJ_TOOL" >&2
           exit 1
         fi
-        install -m 0755 "$("$HOME/.local/bin/mise" x "$jj_tool" -- sh -c 'command -v jj')" "$HOME/.local/bin/jj"
+        # mise fetches the jj release through its github backend here, so this is a download and
+        # retries like one: .github/scripts/ci-retry.sh makes five attempts, the last starting
+        # 150 s after the first, each under `timeout`. 60 s per attempt: this action's two steps
+        # measured at most 3 s together across the 20 most recent successful ci.yaml push runs on
+        # main, so the bound is 20 times that.
+        # What the retry holds is `mise install`, not the `mise x` this step used to wrap: `mise
+        # x` only warns when it cannot resolve the tool and then runs whatever binary of that name
+        # is already on PATH, so a retry around it waits for a failure that never comes, and
+        # `mise install` is the half that fails (exit 1, dispatch://INFRA-1545). The `mise x`
+        # below reads the path of what the install put on disk — a local lookup, not a fetch,
+        # which is why it is bare — and it stays a lookup rather than a `mise where` because
+        # whether the binary sits at the install's root or under its `bin/` differs by backend.
+        # shellcheck source=.github/scripts/ci-retry.sh
+        . "$GITHUB_ACTION_PATH/../../scripts/ci-retry.sh"
+        retry_fetch "the worker image's jj" 60 -- "$HOME/.local/bin/mise" install "$jj_tool"
+        jj_path=$("$HOME/.local/bin/mise" x "$jj_tool" -- sh -c 'command -v jj')
+        install -m 0755 "$jj_path" "$HOME/.local/bin/jj"
         echo "$jj_tool: $HOME/.local/bin/jj"
         "$HOME/.local/bin/jj" --version

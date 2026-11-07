@@ -58,7 +58,10 @@ permissions: {}
 jobs:
   pr-title:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    # Budget (the Budgets note in .github/workflows/ci.yaml's header): 600 s, the 10 minutes
+    # this job carried, plus its slowest retried step alone — check-pr-text.sh's three `gh api`
+    # reads, 3 x (5 x 30 + 150) = 900 s. 600 + 900 = 1500 s -> 25 min.
+    timeout-minutes: 25
     permissions:
       contents: read
       issues: read
@@ -82,6 +85,9 @@ jobs:
       # RUNNER_TEMP; a branch that names none is refused.
       - name: Find the pull request payload
         id: payload
+        # Its own retry arithmetic, so an exhausted read fails this step by name rather than
+        # being cut part way by the job: one `gh api` read, 5 x 30 + 150 = 300 s -> 5 min.
+        timeout-minutes: 5
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -97,7 +103,19 @@ jobs:
           number=${BASH_REMATCH[2]}
           pull="$RUNNER_TEMP/pull-request.json"
           payload="$RUNNER_TEMP/pull-request-event.json"
-          gh api "repos/$GITHUB_REPOSITORY/pulls/$number" > "$pull"
+          # The read retries through .github/scripts/ci-retry.sh: five bounded attempts, the last
+          # starting 150 s after the first, so a refusal from the API costs this lane a wait
+          # rather than the required pr-title check (dispatch://INFRA-1545, R1). The redirection
+          # sits inside the command the helper runs rather than around the call, so each attempt
+          # starts the file over and the bound still reaches gh itself, for the reason
+          # .github/scripts/ci-ok-report.sh gives where it does the same.
+          #
+          # 30 s per attempt: the bound that file derives there for a JSON read of one page of a
+          # REST route, about 3 s of work, which this read is no larger than.
+          . .github/scripts/ci-retry.sh
+          # shellcheck disable=SC2016 # $1 and $2 are sh -c's own arguments, expanded by that shell
+          retry_fetch "the queued pull request" 30 -- \
+            sh -c 'gh api "$1" > "$2"' gh-api "repos/$GITHUB_REPOSITORY/pulls/$number" "$pull"
           jq --argjson number "$number" '{pull_request: ., number: $number}' "$pull" > "$payload"
           echo "path=$payload" >> "$GITHUB_OUTPUT"
 
@@ -110,6 +128,9 @@ jobs:
       # which the runner prints in the job log; only its path is in `env:`. A workflow `env:` cannot
       # override a GITHUB_* variable, so the shell sets GITHUB_EVENT_PATH for the script.
       - name: Check the title, body, branch name, commits, comments and reviews
+        # Its own retry arithmetic: check-pr-text.sh's three `gh api` reads, 3 x (5 x 30 + 150)
+        # = 900 s -> 15 min.
+        timeout-minutes: 15
         env:
           GH_TOKEN: ${{ github.token }}
           PAYLOAD: ${{ steps.payload.outputs.path }}

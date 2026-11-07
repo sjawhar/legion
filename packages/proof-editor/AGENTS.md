@@ -16,10 +16,22 @@ commit stays the audit source however far the fork line moves. `src/directive-fa
 from micromark-extension-directive 4.0.0 instead, and `src/html-flow.ts` from
 micromark-core-commonmark 2.0.3.
 
-The upstream modules this package imports at runtime come from the git dependency, pinned at
-**dc6a852b2ab45463dc9d3d17762235450c8ff0d6** on the fork's cleaned `library` line. Moving that
-pin changes nothing in the table; it changes what `node_modules/proof-sdk-upstream` holds, and
-`tests/upstream-pin.test.ts` is what checks it.
+The upstream modules this package imports at runtime are pinned at
+**dc6a852b2ab45463dc9d3d17762235450c8ff0d6** on the fork's cleaned `library` line, and come from
+`proof-sdk-dc6a852b2ab45463dc9d3d17762235450c8ff0d6.tgz`, committed beside this file and
+installed by `package.json`'s `"proof-sdk-upstream": "file:./proof-sdk-<commit>.tgz"`. It used to
+be a `github:` dependency, which made every `bun install` — every CI job's and every image
+build's — fetch 31 MB from api.github.com, so a bad minute there failed jobs that read nothing
+else of GitHub (INFRA-1545). Moving that pin changes nothing in the table; it changes what
+`node_modules/proof-sdk-upstream` holds, and `tests/upstream-pin.test.ts` is what checks it.
+
+`scripts/build-upstream-tarball.ts` is what writes the tarball, and § Commands below says how
+to run it. It downloads a commit's tree from `sjawhar/proof-sdk` and packs the `src/`,
+`package.json` and `LICENSE` of it that the git dependency used to install, and nothing else, to
+the same bytes on every run: the member list is sorted rather than left to readdir order, every
+entry carries the commit's author date and `0:0` ownership, and gzip writes no timestamp. So a
+pin is raised by running it for the new commit, deleting the old tarball, and letting
+`bun install` rewrite `bun.lock`, whose `sha512` for the dependency is the new file's.
 
 | File | What it is |
 | --- | --- |
@@ -271,7 +283,7 @@ both `lib/` and `dev/lib/`, because Vite resolves the `development` export condi
 
 Everything `src/` imports as `proof-sdk-upstream/src/…` — the mark plugins, the mark popover,
 `editor/schema/{proof-marks,code-block-ext,frontmatter}`, `formats/*` — still belongs to the fork
-and comes from a git dependency pinned to that same commit. Three resolvers reach it, and each
+and comes from the committed tarball of that same commit. Three resolvers reach it, and each
 needs telling, because proof-sdk's `package.json` `exports` publishes only its built `dist`:
 
 | Consumer | Mechanism |
@@ -322,8 +334,8 @@ fails: it reads the Dark Reader fix where it lives, renders each proof mark, red
 replacement in a happy-dom view, rejects an insert split by another, comments twice over one word,
 round-trips that through markdown and deletes one of the two, and renders one diagram of every
 Mermaid type while still refusing a flowchart that ends in an arrow. Moving the pin changes the
-package dependency, `bun.lock`, `upstream/` and this file's source audit references; no Bun patch
-applies to this source.
+tarball, the package dependency and the `.gitignore` negation that tracks it, `bun.lock`,
+`upstream/` and this file's source audit references; no Bun patch applies to this source.
 
 ## No build step
 
@@ -338,6 +350,7 @@ bun run test                   # the moved suites through src/tests/harness.ts, 
 bun run typecheck              # tsc against tsconfig.check.json (src/, tests/ and scripts/)
 bun run lint                   # Biome over the package; the root biome.json turns it off for the copy
 bun run upstream-declarations  # rewrite upstream/ from the pinned sources (only a moved pin needs it)
+bun run build-upstream-tarball <commit>  # write proof-sdk-<commit>.tgz, the sources the pin installs
 ```
 
 ## Conventions

@@ -261,13 +261,15 @@ limit, where they evict main's entries.
   go.sum change downloads only the changed modules, and Go's build cache is content-addressed, so a
   stale entry costs a run only what changed. Share a family only with the jobs that build the same
   packages, or whichever job saves first owns the entry the others then miss.
-- Save with `actions/cache/save` as the last step before the `ci-ok-report` step, with
+- Save with `actions/cache/save` before the `ci-ok-report` step, which stays the job's last, with
   `if: github.event_name == 'push' && success() && steps.go-cache.outputs.cache-hit != 'true'`.
   The workflow's only push trigger is main.
 - The release workflows' Go builds (release.yaml's `legion_build`, release-envoy-infra.yaml's
   `build`) restore `go-daemon` and `go-envoy-infra` and save nothing, so they keep the prefix as
   `restore-keys` on main too: an entry they never save cannot grow.
-- `.github/actions/setup-bun` reads and writes its cache only on main; use it as it is.
+- `.github/actions/setup-bun` restores `~/.bun/bin` on every ref, keyed on the version `.bun-version` pins, and passes `no-cache: true` on every ref.
+  setup-bun then finds that binary, reads its `bun --revision`, takes it as an existing installation, and downloads nothing.
+  The `lint` job saves that `bun` family on a push to main, as the Go families above are saved; use the action as it is.
 
 ## The merge queue runs the router too
 

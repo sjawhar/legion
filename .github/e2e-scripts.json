@@ -9,7 +9,11 @@
     "`apt` is what the job installs for that script alone, `bun` whether it needs bun and this",
     "repository's node_modules, `evidence_variable` the environment variable the script reads for",
     "its evidence directory (empty where it takes none and keeps its work directory instead), and",
-    "`timeout_minutes` the job's limit, measured from the script's header with headroom."
+    "`timeout_minutes` the job's limit: the script's own measured duration with headroom, as its",
+    "header gives it, plus the retry arithmetic of the slowest retried step the row selects, as",
+    "ci.yaml's Budgets note sets it out. A row with `apt` carries the apt steps' 625 + 775 = 1400 s,",
+    "and every row carries install-jj's 607 + 450 = 1057 s, so a budget under them would cut a retry",
+    "part way rather than let the step fail naming itself."
   ],
   "hosted": [
     {
@@ -18,7 +22,7 @@
       "apt": [],
       "bun": false,
       "evidence_variable": "CHILD_ADOPTION_EVIDENCE_DIR",
-      "timeout_minutes": 25,
+      "timeout_minutes": 43,
       "why_hosted": "Run it from a checkout on a Linux host with go and awk, as LEGION_TEST_PG_DSN=... bash scripts/e2e/child-adoption.sh; CI's service satisfies it, and this script starts none",
       "jj": true
     },
@@ -28,7 +32,7 @@
       "apt": [],
       "bun": false,
       "evidence_variable": "CI_RED_NO_TAKEOVER_EVIDENCE_DIR",
-      "timeout_minutes": 25,
+      "timeout_minutes": 43,
       "why_hosted": "Run it from a checkout on a Linux host with go and awk, as LEGION_TEST_PG_DSN=... bash scripts/e2e/ci-red-no-takeover.sh; CI's service satisfies it, and the script starts no container, installing the nats-server it needs with go install",
       "jj": true
     },
@@ -38,7 +42,7 @@
       "apt": ["postgresql-client"],
       "bun": true,
       "evidence_variable": "",
-      "timeout_minutes": 25,
+      "timeout_minutes": 49,
       "why_hosted": "DATABASE_URL is required and must name a loopback host; its prerequisite loop takes go, bun, curl, psql and openssl, and it starts no container",
       "jj": false
     },
@@ -48,7 +52,7 @@
       "apt": [],
       "bun": true,
       "evidence_variable": "HANDOFF_RECORDS_EVIDENCE_DIR",
-      "timeout_minutes": 25,
+      "timeout_minutes": 43,
       "why_hosted": "Run it from a checkout on a Linux host with go, bun (after bun install) and awk, as LEGION_TEST_PG_DSN=... bash scripts/e2e/handoff-records.sh; CI's pgvector service is the server it needs, its role creates Dispatch's database there, it builds and starts Dispatch and the daemon itself, and it reaches no outside service; a run takes two to four minutes",
       "jj": true
     },
@@ -58,7 +62,7 @@
       "apt": [],
       "bun": false,
       "evidence_variable": "MERGED_ROOT_WAITS_EVIDENCE_DIR",
-      "timeout_minutes": 25,
+      "timeout_minutes": 43,
       "why_hosted": "Run it from a checkout on a Linux host with go and awk, as LEGION_TEST_PG_DSN=... bash scripts/e2e/merged-root-waits.sh; CI's service satisfies it, and this script starts none",
       "jj": true
     },
@@ -68,7 +72,7 @@
       "apt": [],
       "bun": false,
       "evidence_variable": "NO_REQUIRED_CHECKS_EVIDENCE_DIR",
-      "timeout_minutes": 30,
+      "timeout_minutes": 48,
       "why_hosted": "Run it from a checkout on a Linux host with go and awk, as LEGION_TEST_PG_DSN=... bash scripts/e2e/no-required-checks.sh; the proof waits for three reads of what each base requires, so a run takes about seven minutes",
       "jj": true
     },
@@ -78,7 +82,7 @@
       "apt": ["tmux"],
       "bun": false,
       "evidence_variable": "",
-      "timeout_minutes": 20,
+      "timeout_minutes": 44,
       "why_hosted": "The daemon refuses to start without tmux on PATH, and CI's tmux is the runner's apt binary; with LEGION_E2E_PG_DSN set the script starts no container of its own, which is how ci.yaml's test job already runs it",
       "jj": false
     },
@@ -88,7 +92,7 @@
       "apt": ["postgresql-client"],
       "bun": true,
       "evidence_variable": "",
-      "timeout_minutes": 20,
+      "timeout_minutes": 44,
       "why_hosted": "DATABASE_URL is required and must name a loopback host; its prerequisite loop takes go, bun, curl, psql and openssl, and it starts no container",
       "jj": false
     }

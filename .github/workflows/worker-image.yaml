@@ -103,7 +103,10 @@ jobs:
     # .github/scripts/check-image-trigger-paths.sh admits this call-mode term.
     if: ${{ inputs.attest_digest == '' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # Budget (the Budgets note in .github/workflows/ci.yaml's header): 1800 s, the 30 minutes
+    # this job carried, plus its slowest retried step alone — the ci-ok report's two `gh api`
+    # reads, 2 x (5 x 30 + 150) = 600 s. 1800 + 600 = 2400 s -> 40 min.
+    timeout-minutes: 40
     # Job-level (not workflow-level): this file is a called workflow, and job-level concurrency
     # behaves identically for its two triggers, `workflow_call` and `workflow_dispatch`.
     # A pull request's runs share one group per PR number. A new head's run cancels the build of the
@@ -296,6 +299,9 @@ jobs:
           persist-credentials: false
       - name: Report ci-ok when this is the run's last job
         if: always() && github.event_name == 'pull_request'
+        # Its own retry arithmetic: ci-ok-report.sh's two `gh api` reads, 2 x (5 x 30 + 150)
+        # = 600 s -> 10 min.
+        timeout-minutes: 10
         uses: ./.github/actions/ci-ok-report
         with:
           job: worker-image
