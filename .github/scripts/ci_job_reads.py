@@ -398,6 +398,16 @@ SOAK_STEP = "Server-change soak of the listener"
 SOAK_SCRIPT = f"""\
 pattern=$(../../{TAGGED_TESTS} serverchange ./cmd/listener)
 go test -tags serverchange -count=1 -timeout 15m -v -run "$pattern" ./cmd/listener"""
+# The document service's race step runs under .github/scripts/race_memory.py, which fails it with
+# a log when the race binary's memory passes RACE_MEM_LIMIT_KB (ci.yaml's comment on the step says
+# why), so its line is a shell assignment and a script, not a go command the simple form reduces.
+RACE_DOCS_STEP = "Race-test the document service"
+RACE_DOCS_SCRIPT = ("RACE_MEM_LIMIT_KB=8388608 ../../.github/scripts/race_memory.py "
+                    "go test -json -race -count=1 -timeout 60m ./internal/dispatch/docs/")
+# The same package under Go's cleanup detector. GODEBUG is a GO* name, which is outside
+# ENV_ALLOWED wherever it is set, so this step too is pinned whole rather than reduced.
+FINALIZERS_STEP = "Test the document service under the cleanup detector"
+FINALIZERS_SCRIPT = "GODEBUG=checkfinalizers=1 go test -v -count=1 -timeout 29m ./internal/dispatch/docs/"
 
 
 # The four packages the test job's race step runs, and which its plain step therefore leaves out.
@@ -978,15 +988,32 @@ GATES = [
     ) + setup_go("envoy-infra-go", f"{INFRA}/go.mod") + CI_SELF),
 
     # The lane's three jobs: each step's text and packages come from ENVOY_RACE_LANE, which the
-    # envoy-go unit step and its plain companion are built from too.
+    # envoy-go unit step and its plain companion are built from too. envoy-go-race-docs is the one
+    # whose step is not race_step's text: it runs the package under .github/scripts/race_memory.py
+    # (dispatch://INFRA-1085), so its gate pins that whole line while the lane table still names
+    # the package, which is what keeps it out of the unit step.
     gate("envoy_go_race", "envoy-go-race", runs=[race_step(RACE_JOBS["envoy-go-race"])],
          reads=setup_go("envoy-go-race", f"{ENVOY}/go.mod") + CI_SELF),
 
     gate("envoy_go_race_api", "envoy-go-race-api", runs=[race_step(RACE_JOBS["envoy-go-race-api"])],
          reads=setup_go("envoy-go-race-api", f"{ENVOY}/go.mod") + CI_SELF),
 
-    gate("envoy_go_race_docs", "envoy-go-race-docs", runs=[race_step(RACE_JOBS["envoy-go-race-docs"])],
-         reads=setup_go("envoy-go-race-docs", f"{ENVOY}/go.mod") + CI_SELF),
+    gate("envoy_go_race_docs", "envoy-go-race-docs", exact=[
+        pinned_step("envoy-go-race-docs", RACE_DOCS_STEP, ENVOY, RACE_DOCS_SCRIPT, [
+            (ENVOY, ["./internal/dispatch/docs/"], "go test -race -count=1 -timeout 60m ./internal/dispatch/docs/", {"race": True}),
+        ]),
+    ], reads=reads(
+        (".github/scripts/race_memory.py", f"{at('envoy-go-race-docs', RACE_DOCS_STEP)} runs the package under it"),
+    ) + setup_go("envoy-go-race-docs", f"{ENVOY}/go.mod") + CI_SELF),
+
+    # A second gate on envoy_go_race_docs: this job runs the same package, so it reads that
+    # closure and no other, and check-ci-filters.sh keys a claim by (job, step), so the two gates
+    # claim different steps and do not collide.
+    gate("envoy_go_race_docs", "envoy-go-docs-finalizers", exact=[
+        pinned_step("envoy-go-docs-finalizers", FINALIZERS_STEP, ENVOY, FINALIZERS_SCRIPT, [
+            (ENVOY, ["./internal/dispatch/docs/"], "go test -v -count=1 -timeout 29m ./internal/dispatch/docs/", {}),
+        ]),
+    ], reads=setup_go("envoy-go-docs-finalizers", f"{ENVOY}/go.mod") + CI_SELF),
 
     gate("dispatch_memory", "dispatch-memory", exact=[
         pinned_step("dispatch-memory", MEMORY_STEP, ENVOY, MEMORY_SCRIPT, [
@@ -1042,6 +1069,9 @@ GATES = [
          f"{at('envoy-smoke', 'Download the docker provider plugin the live tests pin')}: sed reads const DockerPluginVersion"),
         (".github/scripts/repo-paths.sh",
          f"{at('envoy-smoke', SCHEMA_STEP)}: it derives the download URL the build stamps in"),
+        (".github/scripts/disk_watch.py",
+         f"{at('envoy-smoke', 'Start the disk watch over the live tests')} and "
+         f"{at('envoy-smoke', 'Report the disk the live tests used')} run it"),
     ) + setup_go("envoy-smoke", f"{ENVOY}/go.mod") + CI_SELF),
 
     gate("envoy_e2e_local", "envoy-e2e-local", runs=[

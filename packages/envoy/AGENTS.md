@@ -709,6 +709,19 @@ Each race job runs only when a file its own filter in `.github/workflows/ci.yaml
 — `envoy_go_race_docs`, the closure of the `docs` package alone, whose job gives it a 60-minute deadline, and `envoy_go_race_api` for the API;
 see Critical conventions for what keeps those filters current.
 
+A cleanup this package registers captures nothing that reaches the document it is attached to.
+`runtime.AddCleanup` says what that costs: "If ptr is reachable from cleanup or arg, ptr will never be collected and the cleanup will never run."
+The runtime keeps a cleanup's closure alive for as long as the document, and the service and each of its listings reaches every resident document through ygo's room table, so a closure holding either of them strongly made a dropped service and every room still loaded in it immortal, which is what took `envoy-go-race-docs` over its runner's memory (dispatch://INFRA-1085): each test binary builds many services.
+A running Dispatch process keeps one service for its whole life, so there the cycle pinned a service that was alive anyway, and an evicted room's document was still freed.
+`keepInstance` (`docs/roomcursor.go`) and `listResident` (`docs/tree.go`) therefore hold their owner through `weak.Make` and do nothing when its `Value()` is nil;
+a pointer to a field of the service, such as a listing, counts as the service, and dies with that one allocation.
+The rule covers the cleanup's argument alike, so an argument reaching the document is the same cycle:
+`keepInstance` once passed its `*roomLoad`, which reaches a document by two routes through `roomInstance.unstored`: each `queuedClass`'s `UpdateCredit` carries the `service`, and it carries the `state` whose `roomState.reservedFor` is a `*crdt.Doc`, so it holds the load weakly too and passes an empty struct.
+`envoy-go-docs-finalizers` runs `GODEBUG=checkfinalizers=1 go test -v -count=1 -timeout 29m ./internal/dispatch/docs/` on the same `envoy_go_race_docs` filter, and fails on `is reachable from cleanup or cleanup argument` and then `fatal error: detected possible issues with cleanups and/or finalizers`;
+its `-v` also carries this package's leak line, `docs: <built> services built, <alive> still alive after <duration>`, which names each test that built a service and never shut it down, so a test that builds a `*Service` gives it a `t.Cleanup` that shuts it down.
+This package is the only one of the repository that registers a cleanup today, and one added in another package comes with a detector job of its own, in the same pull request;
+`docs/testing.md` states the rule in full.
+
 Writes to one room never meet each other unlocked.
 A browser's update reaches the room as ygo applies it, inside one Yjs transaction under the document's lock (`sync.ApplySyncMessage`, `crdt.ApplyUpdateV1`), so two browsers' updates take turns.
 `Server.Apply` holds no lock across its callback, so the service never walks the room's tree there:
@@ -3091,7 +3104,7 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   When using the MCP bridge, Envoy should stay naive about the message content — the MCP server owns the domain logic.
 
 - Every Go job of `.github/workflows/ci.yaml` runs only when a file its own filter there names changes, the Envoy jobs this module's tagged and race suites run in among them:
-  `dispatch-memory` (`dispatch_memory`), `dispatch-multiprocess` (`dispatch_multiprocess`), `listener-server-change` (`listener_server_change`), `broker-multiprocess` (`broker_multiprocess`), `envoy-go-race` (`envoy_go_race`), `envoy-go-race-api` (`envoy_go_race_api`), `envoy-go-race-docs` (`envoy_go_race_docs`) and `envoy-infra-go` (`envoy_infra_go`).
+  `dispatch-memory` (`dispatch_memory`), `dispatch-multiprocess` (`dispatch_multiprocess`), `listener-server-change` (`listener_server_change`), `broker-multiprocess` (`broker_multiprocess`), `envoy-go-race` (`envoy_go_race`), `envoy-go-race-api` (`envoy_go_race_api`), `envoy-go-race-docs` and `envoy-go-docs-finalizers`, which share `envoy_go_race_docs`, and `envoy-infra-go` (`envoy_infra_go`).
   Each filter lists the packages the job's command compiles with its build tags, the packages of each binary its tests build, and the files its tests read.
   Any change that makes a job's command, or a binary its tests build, compile a new package or read a new file - production code included, not only a test - adds that package or file to that job's filter in the same pull request.
   `.github/scripts/check-ci-filters.sh` (ci.yaml's `ci-filters` job) recomputes each go command's package closure and fails naming a file a filter misses;
