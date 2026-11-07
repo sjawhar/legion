@@ -253,7 +253,7 @@ func main() {
 		secretStore, credentials = secrets.AWS{Client: sm, KMS: kms.NewFromConfig(awsCfg), KeyARN: cfg.SecretsKMSKey}, "aws-sdk"
 	}
 	slog.Info("secret store", "store", cfg.SecretsStore, "credentials", credentials)
-	loader := policy.Loader{Store: secretStore, Prefix: cfg.SecretsPrefix, Services: serviceNames(cfg)}
+	loader := policy.Loader{Store: secretStore, Prefix: cfg.SecretsPrefix, Services: serviceNames(cfg), ServiceAccounts: cfg.ServiceAccountSecrets}
 	// One key source per issuer, read by everything that needs that issuer's keys: the verifiers
 	// discoverVerifiers builds and, for the cluster's issuer and Google's, the RFC 8693 exchange
 	// below, which resolves a subject token's own key through the same *oidc.Keys. So the boot
@@ -688,9 +688,10 @@ func refusePortZeroPublicURLInProduction(publicURL, fakeSecretsFile string) erro
 
 // newRequestMachine builds the requests.Machine the broker decides every secret request with, from
 // its configuration: the audience and skew every request object is checked against, and, for each
-// service account, the registered service a pod running as it proves, and for each Google
-// service account, the one a machine of that fleet proves. A grant lasts the lifetime its
-// request signed, or until its session ends.
+// service account, the registered service a pod running as it proves, for each Google
+// service account, the one a machine of that fleet proves, and, for each google-service-account
+// secret, the one account the deployment binds it to and so the only one its release mints a
+// token for. A grant lasts the lifetime its request signed, or until its session ends.
 func newRequestMachine(cfg config.Config, st *store.Store, current *policy.Current, secretStore secrets.Store, replay func(context.Context, string, time.Time) (bool, error)) *requests.Machine {
 	m := &requests.Machine{
 		Store: st, Policy: current, Secrets: secretStore, PendingTTL: agentSecretPendingTTL,
@@ -699,11 +700,15 @@ func newRequestMachine(cfg config.Config, st *store.Store, current *policy.Curre
 		VMServicesByAccount: cfg.VMServicesByAccount,
 		Minters: kindMinters(secrets.GitHubApp{}, secrets.GoogleLogin{},
 			secrets.AzureLogin{TokenFile: cfg.AzureTokenFile, SecretName: cfg.AzureLoginSecret},
-			// The google-service-account minter takes no configuration: it impersonates with the
-			// broker pod's own Workload Identity credentials, which it finds on its first mint
-			// and keeps, and asks Google's own IAM endpoint. It is passed by pointer because
-			// that is where it keeps them.
-			&secrets.GoogleServiceAccount{}),
+			// The google-service-account minter takes the deployment's binding of each such
+			// secret to the one account it may mint for (BROKER_SERVICE_ACCOUNT_SECRETS): the
+			// broker holds Token Creator on every bound account, so the binding and not the
+			// secret's stored value is what chooses the account, and a secret the deployment
+			// binds to none mints nothing. It still impersonates with the broker pod's own
+			// Workload Identity credentials, which it finds on its first mint and keeps, and
+			// asks Google's own IAM endpoint. It is passed by pointer because that is where it
+			// keeps those credentials.
+			&secrets.GoogleServiceAccount{Accounts: cfg.ServiceAccountSecrets}),
 	}
 	m.Chain = requests.NewChainVerifier(st, cfg.PublicURL, time.Duration(cfg.ProofSkewSeconds)*time.Second)
 	return m
@@ -850,9 +855,11 @@ func issuerKeys(ctx context.Context, issuer string) (*oidc.Keys, error) {
 }
 
 // kindMinters is the broker's minter for each kind. Its arguments are the production minters in
-// newRequestMachine; a test passes ones aimed at its own endpoints and projected token file. The
-// google-service-account minter is a pointer: its method value would otherwise copy the
-// credentials it caches away from the minter every later mint reads.
+// newRequestMachine; a test passes ones aimed at its own endpoints and projected token file, and
+// its own binding of each google-service-account secret to the account that minter may mint for,
+// which in production is BROKER_SERVICE_ACCOUNT_SECRETS; a minter given no binding at all mints
+// no secret of that kind. The google-service-account minter is a pointer: its method value would
+// otherwise copy the credentials it caches away from the minter every later mint reads.
 func kindMinters(githubApp secrets.GitHubApp, googleLogin secrets.GoogleLogin, azureLogin secrets.AzureLogin, googleServiceAccount *secrets.GoogleServiceAccount) map[string]requests.Minter {
 	return map[string]requests.Minter{
 		policy.KindGitHubApp:            githubApp.Mint,

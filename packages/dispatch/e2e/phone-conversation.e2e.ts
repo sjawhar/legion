@@ -2,12 +2,15 @@ import { expect, type Locator, type Page, test } from "@playwright/test";
 
 import { RECONNECT_SPREAD_MS } from "../web/src/api/live-socket";
 import { MIN_REFETCH_INTERVAL_MS } from "../web/src/api/query-refresh";
+import { DWELL_MS } from "../web/src/features/shell/useDwell";
 import {
   createComment,
   createIssue,
   createMessage,
   createProject,
   getComment,
+  getIssue,
+  getMyState,
   patchIssue,
   resolveComment,
 } from "./api";
@@ -37,6 +40,31 @@ async function reconnected(page: Page, pill: Locator): Promise<void> {
       return pill.count();
     }, PROBE)
     .toBe(0);
+}
+
+/** Holds the page's clock still, so a dwell cannot be spent by the time a row's next step takes.
+ *  `install()` replaces the page's timers without stopping them - it leaves the clock running at
+ *  real speed - and `pauseAt` is what stops it; from there only a `runFor` spends page time
+ *  (`create-issue-related.e2e.ts:32` pauses the same way). It takes a time on the page's own
+ *  clock, which the Node process's `Date.now()` can be behind, and a clock refuses to move
+ *  backwards, so the lead of a second is past any skew. It fires every page timer due inside
+ *  that jump, so every call site below makes it before the page is loaded, where none is armed. */
+async function pauseClock(page: Page): Promise<void> {
+  await page.clock.pauseAt(Date.now() + 1000);
+}
+
+/** Spends a paused clock a millisecond at a time until `locator` matches `count` elements. A
+ *  page whose clock is paused draws no answer of its own accord: TanStack batches every query's
+ *  delivery on a zero-delay page timer, and a paused clock fires no timer at all. A millisecond
+ *  of page time fires those and leaves the dwell's second, which is what the rows below hold
+ *  still, as good as unspent: a page that needs thirty of these steps to draw has spent 30 ms. */
+async function drawn(locator: Locator, count: number): Promise<void> {
+  await expect
+    .poll(async () => {
+      await locator.page().clock.runFor(1);
+      return locator.count();
+    }, PROBE)
+    .toBe(count);
 }
 
 function commentTurn(page: Page, commentId: string): Locator {
@@ -724,6 +752,117 @@ test("on a phone, Jump to latest covers none of the docked composer's Retry or D
   }
 });
 
+// The shell's status corner floats in the same corner of the same foot of the screen as `Jump to
+// latest`: the pending-writes indicator above the connection pill (`app.tsx`), wider than the
+// pill and painted over it. So while a write of the reader's is out and the live socket is let
+// go, the corner would take the taps a reader scrolled back through the turns means for the
+// pill. The corner publishes how far up from the screen's bottom edge it reaches, as a composer
+// does (`useFootInset`), and the pill rides above that, so neither the indicator nor the
+// connection pill covers any of it.
+test("on a phone, the shell's status corner covers none of Jump to latest @phone", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Status corner over the pill" });
+  for (let index = 0; index < 15; index += 1) {
+    await createMessage(issue.key, { body: `Older turn ${index}` }, session);
+  }
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    // The return to the network at the end waits a reconnect delay the page draws; its own clock
+    // spends that rather than the wall clock.
+    await page.clock.install();
+    const network = await pageNetwork(page);
+    await page.setViewportSize(phone);
+    await page.goto(`/issues/${issue.key}/conversation`);
+    await expect(page.getByText("Older turn 14")).toBeVisible();
+    const jump = page.getByTestId("jump-to-latest");
+    const pill = page.getByTestId("connection-pill");
+    const pendingWrites = page.getByRole("region", { name: "Pending changes" });
+
+    // The outage draws the pill, and a pin pressed under it is kept and never answered, so the
+    // indicator names it above the pill for as long as this row reads them.
+    await network.offline();
+    await expect(pill).toHaveText("Reconnecting…");
+    await page
+      .getByRole("list", { name: "Conversation turns" })
+      .locator(":scope > li")
+      .filter({ has: page.getByText("Older turn 14", { exact: true }) })
+      .getByRole("button", { name: "Pin" })
+      .click();
+    await expect(pendingWrites).toBeVisible();
+
+    await scrollToOldest(page);
+    await expect(jump).toBeVisible();
+    await expectUncovered(pill, jump);
+    await expectUncovered(pendingWrites, jump);
+
+    await network.online();
+    await reconnected(page, pill);
+  } finally {
+    await alice.close();
+  }
+});
+
+// Both foot controls at once, which is the reader's ordinary case while the live socket is down:
+// the shell's status corner shows and the docked composer sits under it. `Jump to latest` is
+// placed above the reach the corner publishes (`--foot-status-inset`, `useFootInset`). That
+// reach was once measured only when the corner's own box or the screen changed size, never when
+// `--foot-composer-inset` moved the corner. So a corner shown before the composer published its
+// reach (the socket refused while the page loads, below), and one the composer's growth moved
+// afterwards (a refusal's Retry row), both left the pill placed against a reach the corner had
+// left: it dropped down the screen into the docked composer and took the taps meant for Send,
+// Retry and the draft. The hook's cascade measures every element it holds again whenever a
+// published value changes, and this row is what guards that fix.
+test("on a phone, Jump to latest covers none of the docked composer while the status corner shows @phone", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Pill over the composer" });
+  for (let index = 0; index < 15; index += 1) {
+    await createMessage(issue.key, { body: `Older turn ${index}` }, session);
+  }
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.setViewportSize(phone);
+    // The socket alone is down, as a server's restart or a proxy leaves it: the page loads over
+    // HTTP and the corner shows its pill from the page's first attempt, before the Conversation
+    // has drawn the composer the corner then rides above.
+    await page.routeWebSocket(/\/ws\/live$/u, async (route) => {
+      await route.close({ code: 1006, reason: "the network is down" });
+    });
+    await page.goto(`/issues/${issue.key}/conversation`);
+    await expect(page.getByText("Older turn 14")).toBeVisible();
+    const pill = page.getByTestId("connection-pill");
+    await expect(pill).toHaveText("Reconnecting…");
+    const form = page.getByRole("form", { name: "Comment composer" });
+    const jump = page.getByTestId("jump-to-latest");
+
+    await scrollToOldest(page);
+    await expect(jump).toBeVisible();
+    await expectUncovered(jump, form);
+
+    // The other order: the corner is on the page before the composer grows under it, and the
+    // refusal's row raises the composer by its own height.
+    const comments = `**/api/v1/issues/${issue.key}/comments`;
+    const refuse = await refusePosts(page, comments);
+    await form.getByLabel("Comment").fill("Kept through every refusal");
+    await form.getByRole("button", { exact: true, name: "Send" }).click();
+    refuse();
+    await expect(form.getByText(WRITE_REFUSED_TEXT)).toBeVisible();
+
+    await scrollToOldest(page);
+    await expect(jump).toBeVisible();
+    await expectUncovered(jump, form);
+  } finally {
+    await alice.close();
+  }
+});
+
 // The shell's connection pill floats at the foot of the screen, where a phone's docked composer
 // sits and grows upward with a refusal's row. While the page is offline the live socket is let go
 // and the pill reads `Reconnecting…`; it sits above the composer, on the narrowest phone and a
@@ -905,19 +1044,247 @@ test("on a phone, Jump to latest stays off a thread opened over the Conversation
   }
 });
 
-/** Sweeps the band above the turns in the page: at every 4 px step it scrolls, lets two frames
- *  pass so the pill's own scroll listener and the render React queues for it have both landed,
- *  and records where a tap at the centre of each control above the turns - the issue's header,
- *  its tabs and the All / Open / Closed filter - does not reach it as it should: a tab must take
- *  its own tap, and no control may lose its tap to `Jump to latest`. Controls whose centre is off
- *  screen, or clipped out of view by a scrolling ancestor (the issue tablist scrolls sideways at
- *  this width, so a tab past its edge is not on screen to tap at all), are not tapped. A step
- *  away from where the page settled that draws no pill is recorded too. */
+// A thread over an older conversation, opened full-screen, covers the Conversation, and the
+// reader cannot see the newest card the issue's read mark is written from: while such a thread
+// is open that mark is never written, however long the newest turn sits behind it, and Back
+// gives the dwell back, so no issue is left unread for good. A thread over the newest
+// conversation is that conversation read and writes the mark from its own card, which is the
+// row below. The mark is nothing the Conversation draws, so this row reads it where it is
+// kept - the reader's own state on the server, `GET /api/v1/me/state` - and watches the page's
+// writes of it.
+test("on a phone, a thread over an older conversation holds the issue's read mark until Back @phone", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Read mark under a thread" });
+  const earlier = await createComment(issue.key, { body: "Earlier comment" });
+  await createMessage(issue.key, { body: "Newest turn" }, session);
+  // Nothing here has been read, so both cards carry `New` and a dwell on the newest one - the
+  // only card the mark watches - would read the issue through its head.
+  const head = (await getIssue(issue.key)).last_seq;
+  const mark = async () => (await getMyState())[issue.key]?.last_read_seq ?? 0;
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.setViewportSize(phone);
+    // The dwell is a page timer, so the page's own clock spends it rather than the run: until it
+    // is spent the thread opens over a dwell still counting, as a reader's Expand thread within
+    // the first second does. The clock is paused as well as installed, since `install()` leaves
+    // it running at real speed: the list's own dwell would otherwise be spent by the time this
+    // row has counted the `New` marks and opened the thread, and the mark would be written
+    // before the thread the row is about ever covered the list.
+    await page.clock.install();
+    await pauseClock(page);
+    const marks: string[] = [];
+    page.on("request", (request) => {
+      if (
+        request.method() === "PUT" &&
+        new URL(request.url()).pathname === `/api/v1/me/issues/${issue.key}/state`
+      ) {
+        marks.push(request.postData() ?? "");
+      }
+    });
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const turns = page.getByRole("list", { name: "Conversation turns" });
+    await drawn(turns.getByText("New", { exact: true }), 2);
+
+    await openThread(page, earlier.id);
+    // Several dwells' worth of the page's clock behind the thread, and then two round trips: the
+    // page's own, which answers only once a `PUT` the dwell started had left the page, and the
+    // read of the mark itself.
+    await page.clock.runFor(DWELL_MS * 3);
+    await page.evaluate(() => fetch("/api/v1/me/state").then(({ status }) => status));
+    expect(await mark()).toBe(0);
+    expect(marks).toEqual([]);
+
+    // The list is the reader's again on Back, and the dwell marks the issue read through its
+    // head, as it would have had no thread ever opened.
+    await leaveThread(page);
+    await expect
+      .poll(async () => {
+        await page.clock.runFor(DWELL_MS);
+        return mark();
+      }, PROBE)
+      .toBe(head);
+  } finally {
+    await alice.close();
+  }
+});
+
+// The other side of the rule: a comment link opens that comment's thread full-screen as the
+// page lands on a phone, so a reader following one from the Inbox, a Replies row or a copied
+// reference reads the conversation in the thread and never sees the list behind it. A thread
+// showing the newest conversation is the issue read through its head, so the mark is written
+// from the thread itself rather than waiting for a Back that may never come: `usePhoneThread`
+// adds no history entry, so the browser's back leaves the issue, and the list it would have
+// been written from is never shown. This row lands on the link from another page, so that back
+// leaves the issue altogether and no dwell of the list can write the mark after it.
+test("on a phone, a comment link to the newest conversation marks the issue read from its thread @phone", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Read mark from the thread" });
+  await createMessage(issue.key, { body: "Older turn" }, session);
+  // The link's own comment, made last, so it is the newest conversation: the one card the mark
+  // is written from, and the card the thread shows.
+  const newest = await createComment(issue.key, { body: "Newest comment" });
+  const head = (await getIssue(issue.key)).last_seq;
+  const mark = async () => (await getMyState())[issue.key]?.last_read_seq ?? 0;
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.setViewportSize(phone);
+    // The dwell is a page timer, so the page's own clock spends it rather than the run. The
+    // clock is paused as well as installed, since `install()` leaves it running at real speed:
+    // the dwell would then be spent while the row was still reading the thread, before the
+    // wait for the write below was registered, and that wait would never answer.
+    await page.clock.install();
+    await pauseClock(page);
+    const marks: string[] = [];
+    page.on("request", (request) => {
+      if (
+        request.method() === "PUT" &&
+        new URL(request.url()).pathname === `/api/v1/me/issues/${issue.key}/state`
+      ) {
+        marks.push(request.postData() ?? "");
+      }
+    });
+    // Where the reader comes from, so the back below leaves the issue rather than landing on
+    // the Conversation, whose own dwell would write the mark whatever the thread did.
+    await page.goto("/projects/CORE/issues");
+    const issueLink = page.getByRole("link", { name: new RegExp(issue.key) }).first();
+    await drawn(issueLink, 1);
+    await expect(issueLink).toBeVisible();
+
+    await page.goto(`/issues/${issue.key}/comments/${newest.id}`);
+    const thread = threadView(page);
+    await drawn(thread.getByText("Newest comment", { exact: true }), 1);
+    await expect(thread).toBeVisible();
+    await expect(thread.getByText("Newest comment", { exact: true })).toBeVisible();
+    expect(await mark()).toBe(0);
+
+    // The dwell's second, spent in the thread, writes the mark from the card the reader has on
+    // screen; the write is awaited here so the back below cannot cut it off.
+    const written = page.waitForResponse(
+      (response) =>
+        response.request().method() === "PUT" &&
+        new URL(response.url()).pathname === `/api/v1/me/issues/${issue.key}/state`
+    );
+    await expect
+      .poll(async () => {
+        await page.clock.runFor(DWELL_MS);
+        return marks.length;
+      }, PROBE)
+      .toBe(1);
+    await written;
+
+    await page.goBack();
+    await expect(page).toHaveURL(/\/projects\/CORE\/issues$/);
+    expect(await mark()).toBe(head);
+  } finally {
+    await alice.close();
+  }
+});
+
+// The mark written from the thread lands about a second after its card is on screen, which is
+// the second a reader spends reaching for the thread's own Reply. It moves `lastReadSeq`, and
+// that value is in the `unreadBoundary` read's key, so the read re-enters `isPending`, every
+// card's `New` unmounts and the thread's rows move up a row - under the press. That is the
+// webkit-iphone failure of run 42233316986 (job 127949708013), where Reply moved 24 px between
+// the mousedown and the mouseup, the click went to the list behind the dialog and the thread's
+// composer never opened. Whichever way the mark is written, nothing the reader is pressing may
+// move under the press. The write is held here and let go under the press, so the race is run
+// rather than waited for, and the row asserts the write was sent at all: a press with nothing
+// held would run no race and pass whatever the page did.
+test("on a phone, the newest conversation's read mark moves nothing under a press in its thread @phone", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Read mark under a press" });
+  // The one conversation, so the thread the reader opens is the newest one.
+  const root = await createComment(issue.key, { body: "Thread root" });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.setViewportSize(phone);
+    const { promise: held, resolve: release } = Promise.withResolvers<void>();
+    let sent = false;
+    await page.route(`**/api/v1/me/issues/${issue.key}/state`, async (route) => {
+      if (route.request().method() !== "PUT") return route.fallback();
+      sent = true;
+      await held;
+      return route.fallback();
+    });
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const thread = await openThread(page, root.id);
+    const reply = thread.getByRole("button", { exact: true, name: "Reply" });
+    await expect(reply).toBeVisible();
+    // The dwell's own second, spent on the wall clock, after which the route holds the write.
+    // Nothing below is a race unless that write was sent, so the row asserts it rather than
+    // falling through when it never comes.
+    await expect.poll(() => sent).toBe(true);
+
+    const before = await reply.boundingBox();
+    if (before === null) throw new Error("the thread's Reply has no box");
+    await page.mouse.move(before.x + before.width / 2, before.y + before.height / 2);
+    await page.mouse.down();
+    // The held write, let go under the press, and its answer, which is what moves the rows: the
+    // box below is read once that answer has landed rather than after a guess at how long it
+    // would take.
+    const written = page.waitForResponse(
+      (response) =>
+        response.request().method() === "PUT" &&
+        new URL(response.url()).pathname === `/api/v1/me/issues/${issue.key}/state`
+    );
+    release();
+    await written;
+    // Three frames of the page's own: the task its `fetch` resolves in, the render React queues
+    // for that answer, and the layout that render makes.
+    await page.evaluate(
+      () =>
+        new Promise((done) =>
+          requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(done)))
+        )
+    );
+    const under = await reply.boundingBox();
+    await page.mouse.up();
+
+    expect(under, "the thread's Reply moved under the reader's press").toEqual(before);
+    await expect(
+      thread
+        .getByRole("form", { name: "Comment composer" })
+        .filter({ has: page.getByRole("textbox", { name: "Comment" }) })
+    ).toBeVisible();
+  } finally {
+    await alice.close();
+  }
+});
+
+/** Sweeps the band from the top of the page down to `end` in the page: at every 4 px step it
+ *  scrolls, lets two frames pass so the pill's own scroll listener and the render React queues
+ *  for it have both landed, and records where a tap at the centre of a control does not reach
+ *  it as it should: a tab must take its own tap, and no control may lose its tap to `Jump to
+ *  latest`. Every control above the turns is tapped - the issue's header, its tabs and the All
+ *  / Open / Closed filter - and inside the turns the two that decide a suggestion, Accept and
+ *  Reject, which are what the pill took while it sat at the head of the list. `end` is the
+ *  bottom of the newest card, so that card is the one card the band carries, and it is swept
+ *  from where it lands under the controls up off the top of the screen: no card crosses the
+ *  foot band here, where the pill does cover a card's Accept and Reject for as long as the
+ *  card is passing. The pill floats at the foot now, where the list scrolls behind it as it
+ *  does behind any floating control, so a turn's quiet actions - Copy reference, Reply, Pin -
+ *  pass under it and are not tapped.
+ *  Controls whose centre is off screen, or clipped out of view by a scrolling ancestor (the
+ *  issue tablist scrolls sideways at this width, so a tab past its edge is not on screen to tap
+ *  at all), are not tapped either. A step away from where the page settled that draws no pill is
+ *  recorded too. */
 async function tapsLostAcrossBand(
   page: Page,
-  band: { settled: number; turnsTop: number }
+  band: { end: number; settled: number }
 ): Promise<string[]> {
-  return page.evaluate(async ({ settled, turnsTop }) => {
+  return page.evaluate(async ({ end, settled }) => {
     const turns = document.querySelector('[aria-label="Conversation turns"]');
     if (turns === null) throw new Error("expected the Conversation's turns");
     const frame = () =>
@@ -927,7 +1294,7 @@ async function tapsLostAcrossBand(
     const pillBox = () =>
       document.querySelector('[data-testid="jump-to-latest"]')?.getBoundingClientRect();
     const lost: string[] = [];
-    for (let top = 1; top <= turnsTop; top += 4) {
+    for (let top = 1; top <= end; top += 4) {
       window.scrollTo(0, top);
       // One frame carries the scroll into layout and runs the pill's listener; a step that
       // changes whether the pill shows takes one more for the render React queued for it.
@@ -946,7 +1313,10 @@ async function tapsLostAcrossBand(
         const box = control.getBoundingClientRect();
         const x = box.left + box.width / 2;
         const y = box.top + box.height / 2;
-        if (pill?.contains(control) || box.width === 0 || box.bottom > turnsTopNow) continue;
+        const label = control.getAttribute("aria-label");
+        const decides = label === "Accept suggestion" || label === "Reject suggestion";
+        if (pill?.contains(control) || box.width === 0) continue;
+        if (box.bottom > turnsTopNow && !decides) continue;
         if (x < 0 || x >= window.innerWidth || y < 0 || y >= window.innerHeight) continue;
         let clipped = false;
         for (
@@ -964,10 +1334,7 @@ async function tapsLostAcrossBand(
         const reached = hit !== null && (control.contains(hit) || hit.contains(control));
         const lostToPill = hit !== null && pill?.contains(hit) === true;
         if (reached || (control.getAttribute("role") !== "tab" && !lostToPill)) continue;
-        const name =
-          control.getAttribute("aria-label") ??
-          (control.closest("label") ?? control).textContent?.trim() ??
-          "";
+        const name = label ?? (control.closest("label") ?? control).textContent?.trim() ?? "";
         lost.push(
           `scrolled to ${top}: ${name} at ${Math.round(x)},${Math.round(y)} reached ${hit?.outerHTML.slice(0, 80)}`
         );
@@ -977,20 +1344,37 @@ async function tapsLostAcrossBand(
   }, band);
 }
 
-// On a phone the issue's header, its tabs and the filters sit above the turns, the latest turn
+// On a phone the issue's header, its tabs and the filters sit above the turns, the newest turn
 // just under them, so a reader scrolling back up passes a band where they are on screen while
-// `Jump to latest` shows. The pill never rises above where the turns begin, so a tap on a tab, or
-// on any control above the turns, reaches it everywhere in that band.
+// `Jump to latest` shows. The pill is fixed at the foot there, above the docked composer, so
+// every control above the turns keeps its own tap through that band, and so does the newest
+// card's Accept and Reject, the pair the pill took for itself while it sat at the head of the
+// list. The band ends at that card's bottom, so the decisions this row checks are the newest
+// card's above the foot band, never a card's crossing it: a card scrolled through the foot
+// passes under the pill and loses those two taps for as long as it is there, which is accepted
+// - scrolling the card on, or the pill's own tap, which hides the pill, clears it, as it does
+// for that card's Reply and Pin.
 // SLOW(>=2s): the band is swept 4 px at a time, a frame per step, and every control above the
-// turns is hit-tested at each one.
-test("on a phone, Jump to latest covers none of the issue's tabs or the controls above the turns @phone", async ({
+// turns, with the suggestion's decisions under it, is hit-tested at each one.
+test("on a phone, Jump to latest covers none of the issue's tabs, the controls above the turns, or the newest card's Accept and Reject above the foot band @phone", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
-  const issue = await createIssue({ project: "CORE", title: "Pill over the tabs" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: "The quick brown fox",
+    title: "Pill over the tabs",
+  });
   for (let index = 0; index < 15; index += 1) {
     await createMessage(issue.key, { body: `Older turn ${index}` }, session);
   }
+  // The newest turn, so it is the first card under the band: a collapsed suggestion, whose
+  // Accept and Reject sit in the content column, where the pill was painted over them.
+  await createComment(issue.key, {
+    anchor: { artifact: "spec", quote: "quick" },
+    body: "Suggested replacement.",
+    suggestion: { replace_with: "swift" },
+  });
   const alice = await asUser(browser, "alice");
 
   try {
@@ -1000,18 +1384,25 @@ test("on a phone, Jump to latest covers none of the issue's tabs or the controls
     await expect(page.getByText("Older turn 14")).toBeVisible();
     const jump = page.getByTestId("jump-to-latest");
     const turns = page.getByRole("list", { name: "Conversation turns" });
+    await expect(page.getByRole("button", { name: "Accept suggestion" })).toBeVisible();
     // Where the page settled on the latest turn, the one place in the band with no pill.
     const settled = await page.evaluate(() => window.scrollY);
-    const turnsTop = await turns.evaluate(
-      (list) => list.getBoundingClientRect().top + window.scrollY
-    );
+    // The band ends where the newest card has gone off the top of the screen - its bottom is
+    // the scroll position the sweep stops at - so every control on that card is hit-tested on
+    // its way up, not only the header row the card opens with.
+    const end = await turns.evaluate((list) => {
+      const first = list.firstElementChild;
+      if (first === null) throw new Error("expected a first turn");
+      const box = first.getBoundingClientRect();
+      return box.bottom + window.scrollY;
+    });
     // Both ends of the band keep Playwright's own visibility check; the sweep between them runs
     // in the page, one round trip rather than three per step.
     await page.evaluate(() => window.scrollTo(0, 1));
     if (Math.abs(1 - settled) > 1) await expect(jump).toBeVisible();
-    const lost = await tapsLostAcrossBand(page, { settled, turnsTop });
-    await page.evaluate((y) => window.scrollTo(0, y), turnsTop);
-    if (Math.abs(turnsTop - settled) > 1) await expect(jump).toBeVisible();
+    const lost = await tapsLostAcrossBand(page, { end, settled });
+    await page.evaluate((y) => window.scrollTo(0, y), end);
+    if (Math.abs(end - settled) > 1) await expect(jump).toBeVisible();
     expect(lost).toEqual([]);
   } finally {
     await alice.close();

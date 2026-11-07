@@ -2,17 +2,20 @@ package secrets_test
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
 
 	"golang.org/x/oauth2"
 
+	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
 )
 
@@ -49,8 +52,9 @@ func iamServer(t *testing.T, handle http.HandlerFunc) (*httptest.Server, *atomic
 }
 
 // TestGoogleServiceAccountMintImpersonatesTheStoredAccount pins what the broker asks Google for:
-// the stored account's generateAccessToken, as the broker's own credential, for one hour at the
-// cloud-platform scope, and the bare access token back.
+// the generateAccessToken of the account the deployment binds to the secret, which is the one
+// its stored value names too, as the broker's own credential, for one hour at the cloud-platform
+// scope, and the bare access token back.
 func TestGoogleServiceAccountMintImpersonatesTheStoredAccount(t *testing.T) {
 	var gotPath, gotMethod, gotAuthorization, gotContentType, gotBody string
 	server, calls := iamServer(t, func(w http.ResponseWriter, r *http.Request) {
@@ -60,8 +64,11 @@ func TestGoogleServiceAccountMintImpersonatesTheStoredAccount(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"accessToken": "impersonated-access-token", "expireTime": "2026-11-06T13:00:00Z"})
 	})
 
-	got, err := (&secrets.GoogleServiceAccount{BaseURL: server.URL, HTTP: server.Client(), Source: brokerSource()}).
-		Mint(t.Context(), secrets.MintRequest{Name: "GCP_FLEET", Value: serviceAccountValue})
+	minter := &secrets.GoogleServiceAccount{
+		BaseURL: server.URL, HTTP: server.Client(), Source: brokerSource(),
+		Accounts: map[string]string{"GCP_FLEET": serviceAccountEmail},
+	}
+	got, err := minter.Mint(t.Context(), secrets.MintRequest{Name: "GCP_FLEET", Value: serviceAccountValue})
 	if err != nil {
 		t.Fatalf("Mint: %v", err)
 	}
@@ -111,8 +118,11 @@ func TestGoogleServiceAccountMintNamesGooglesVerdict(t *testing.T) {
 				_, _ = io.WriteString(w, tc.body)
 			})
 
-			_, err := (&secrets.GoogleServiceAccount{BaseURL: server.URL, HTTP: server.Client(), Source: brokerSource()}).
-				Mint(t.Context(), secrets.MintRequest{Value: serviceAccountValue})
+			minter := &secrets.GoogleServiceAccount{
+				BaseURL: server.URL, HTTP: server.Client(), Source: brokerSource(),
+				Accounts: map[string]string{"GCP_FLEET": serviceAccountEmail},
+			}
+			_, err := minter.Mint(t.Context(), secrets.MintRequest{Name: "GCP_FLEET", Value: serviceAccountValue})
 			if err == nil || secrets.MintErrorClass(err) != tc.class {
 				t.Fatalf("Mint error = %v (class %s), want class %s", err, secrets.MintErrorClass(err), tc.class)
 			}
@@ -145,8 +155,11 @@ func TestGoogleServiceAccountMintErrorsQuoteNoToken(t *testing.T) {
 				_, _ = io.WriteString(w, tc.body)
 			})
 
-			_, err := (&secrets.GoogleServiceAccount{BaseURL: server.URL, HTTP: server.Client(), Source: brokerSource()}).
-				Mint(t.Context(), secrets.MintRequest{Value: serviceAccountValue})
+			minter := &secrets.GoogleServiceAccount{
+				BaseURL: server.URL, HTTP: server.Client(), Source: brokerSource(),
+				Accounts: map[string]string{"GCP_FLEET": serviceAccountEmail},
+			}
+			_, err := minter.Mint(t.Context(), secrets.MintRequest{Name: "GCP_FLEET", Value: serviceAccountValue})
 			if err == nil {
 				t.Fatal("Mint: want an error")
 			}
@@ -244,7 +257,10 @@ func TestGoogleServiceAccountResolvesItsOwnCredentialsOnce(t *testing.T) {
 
 	// No Source: the minter finds the broker's own credentials for itself, as it does in
 	// production, where they are the pod's Workload Identity.
-	minter := &secrets.GoogleServiceAccount{BaseURL: server.URL, HTTP: server.Client()}
+	minter := &secrets.GoogleServiceAccount{
+		BaseURL: server.URL, HTTP: server.Client(),
+		Accounts: map[string]string{"GCP_FLEET": serviceAccountEmail},
+	}
 	for mint := 1; mint <= 2; mint++ {
 		got, err := minter.Mint(t.Context(), secrets.MintRequest{Name: "GCP_FLEET", Value: serviceAccountValue})
 		if err != nil || got != "impersonated-access-token" {
@@ -256,5 +272,128 @@ func TestGoogleServiceAccountResolvesItsOwnCredentialsOnce(t *testing.T) {
 	}
 	if calls.Load() != 2 {
 		t.Errorf("the IAM endpoint saw %d calls, want one per mint", calls.Load())
+	}
+}
+
+// TestGoogleServiceAccountScopes pins what a release's scopes reach Google as: the whole scope
+// URLs the secret's scopes tag named, each under https://www.googleapis.com/auth/, in the one
+// order policy.ParseScopes answers and no other, beside the fixed one-hour lifetime; a release
+// whose secret names none asks for cloud-platform alone, as every token of this kind did before
+// the tag existed. The list is built the way a release builds it, from a policy.Secret's
+// ScopeURLs, so what is pinned is the path a release takes and not a hand-written list.
+func TestGoogleServiceAccountScopes(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		tag  string
+		want []string
+	}{
+		{"the scopes its tag names", "apps.groups.settings admin.directory.group", []string{
+			"https://www.googleapis.com/auth/admin.directory.group",
+			"https://www.googleapis.com/auth/apps.groups.settings",
+		}},
+		{"no scopes at all", "", []string{"https://www.googleapis.com/auth/cloud-platform"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var secret policy.Secret
+			if tc.tag != "" {
+				parsed, err := policy.ParseScopes(tc.tag)
+				if err != nil {
+					t.Fatalf("ParseScopes(%q): %v", tc.tag, err)
+				}
+				secret.Scopes = parsed
+			}
+			var sent struct {
+				Scope    []string `json:"scope"`
+				Lifetime string   `json:"lifetime"`
+			}
+			server, _ := iamServer(t, func(w http.ResponseWriter, r *http.Request) {
+				if err := json.NewDecoder(r.Body).Decode(&sent); err != nil {
+					t.Errorf("the request body is no JSON object of its fields: %v", err)
+				}
+				_ = json.NewEncoder(w).Encode(map[string]string{"accessToken": "impersonated-access-token"})
+			})
+
+			minter := &secrets.GoogleServiceAccount{
+				BaseURL: server.URL, HTTP: server.Client(), Source: brokerSource(),
+				Accounts: map[string]string{"GCP_FLEET": serviceAccountEmail},
+			}
+			if _, err := minter.Mint(t.Context(), secrets.MintRequest{
+				Name: "GCP_FLEET", Value: serviceAccountValue, GoogleScopes: secret.ScopeURLs(),
+			}); err != nil {
+				t.Fatalf("Mint: %v", err)
+			}
+			if !slices.Equal(sent.Scope, tc.want) {
+				t.Errorf("the request named scope %v, want exactly %v", sent.Scope, tc.want)
+			}
+			if sent.Lifetime != "3600s" {
+				t.Errorf("the request named lifetime %q, want the fixed 3600s", sent.Lifetime)
+			}
+		})
+	}
+}
+
+// Which account the broker will impersonate is the deployment's binding of the secret, never the
+// account its stored value names on its own. Whoever may write a secret may store any account in
+// it, and the broker holds Token Creator on every account it is bound to, so a value rewritten
+// to name another person's dev-<name> account, and a secret the deployment binds to nothing at
+// all, are each refused before the broker's own credential is resolved and before any call is
+// made: each refused mint runs against a minter holding no Source, with
+// GOOGLE_APPLICATION_CREDENTIALS naming a file that is not there, so a mint resolving that
+// credential before it weighs the binding answers ErrMintUpstream and never the ErrMintNotBound
+// below, and the fake IAM endpoint sees no request of its own. The refusal names the secret and
+// the bound account, which an operator reads to fix the setting, and never the stored value.
+func TestGoogleServiceAccountBindingRefusesAnUnboundSecret(t *testing.T) {
+	const otherAccount = "dev-sami@theorem-agent-identities.iam.gserviceaccount.com"
+	const otherValue = `{"service_account":"` + otherAccount + `"}`
+	server, calls := iamServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{"accessToken": "impersonated-access-token"})
+	})
+	accounts := map[string]string{"DEV_ADITYA": serviceAccountEmail}
+	bound := &secrets.GoogleServiceAccount{
+		BaseURL: server.URL, HTTP: server.Client(), Source: brokerSource(), Accounts: accounts,
+	}
+
+	got, err := bound.Mint(t.Context(), secrets.MintRequest{Name: "DEV_ADITYA", Value: serviceAccountValue})
+	if err != nil || got != "impersonated-access-token" {
+		t.Fatalf("Mint of the bound secret = %q, %v; want the bare access token", got, err)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("the bound mint made %d requests, want one", calls.Load())
+	}
+	for _, tc := range []struct {
+		name  string
+		req   secrets.MintRequest
+		names []string
+	}{
+		{"a stored value naming another person's account",
+			secrets.MintRequest{Name: "DEV_ADITYA", Value: otherValue},
+			[]string{"DEV_ADITYA", serviceAccountEmail}},
+		{"a secret the deployment binds to nothing",
+			secrets.MintRequest{Name: "GCP_ADMIN", Value: serviceAccountValue},
+			[]string{"GCP_ADMIN"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", filepath.Join(t.TempDir(), "absent.json"))
+			minter := &secrets.GoogleServiceAccount{
+				BaseURL: server.URL, HTTP: server.Client(), Accounts: accounts,
+			}
+			_, err := minter.Mint(t.Context(), tc.req)
+			if !errors.Is(err, secrets.ErrMintNotBound) || secrets.MintErrorClass(err) != "binding" {
+				t.Fatalf("Mint = %v (class %s), want ErrMintNotBound of class binding: the binding is weighed before the broker's own credential, which is absent here and refuses as ErrMintUpstream", err, secrets.MintErrorClass(err))
+			}
+			for _, named := range tc.names {
+				if !strings.Contains(err.Error(), named) {
+					t.Errorf("Mint error %q does not name %q", err, named)
+				}
+			}
+			for _, withheld := range []string{tc.req.Value, otherAccount} {
+				if strings.Contains(err.Error(), withheld) {
+					t.Errorf("Mint error %q quotes %q", err, withheld)
+				}
+			}
+			if calls.Load() != 1 {
+				t.Errorf("a refused mint left the IAM endpoint at %d requests, want the bound mint's one", calls.Load())
+			}
+		})
 	}
 }

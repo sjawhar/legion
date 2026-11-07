@@ -2,7 +2,8 @@
 // request machine: what a refused session is told, what becomes of a live grant the list drops
 // the session from — by a retag, or by an account mapping that stops proving the pod's service
 // — what an approval of such a request records, even when another of its names would be refused
-// first, and the hour a listed secret bounds its grants to.
+// first, what a secret's own max-grant bounds its grants to, and what the list decides on its
+// own for a kind whose rules make a service's pod wait for the secret's one person owner.
 package requests
 
 import (
@@ -22,14 +23,19 @@ import (
 // an empty answer.
 const listedValue = "listed-v1"
 
-// anHour is the lifetime every request below signs. A listed secret must bound its grants to an
-// hour (policy.RequesterRules), and a request signing longer is refused before the policy decides
-// it at all (overMaxGrant), which is this file's last case rather than its premise.
+// anHour is the lifetime most requests below sign; two sign a multiple of it to ask past an hour's
+// cap. policytest.ListedSecret gives each secret this file lists a max-grant of an hour, and a
+// request signing longer than a secret's own max-grant is refused before the policy decides it at
+// all (overMaxGrant), which is one of this file's cases rather than its premise. The hour is that
+// fixture's choice and no rule of the list's: policy.TagRules demands a max-grant of an admin
+// secret and of a google-service-account one alone, so a secret that merely lists its requesters
+// keeps whatever cap it sets, or none at all (TestUncappedListedLoginAwaitsOwner).
 const anHour = 3600
 
 // listedSecret is policytest.ListedSecret holding the one value this file releases: a namespace
-// secret whose requesters tag names requesters, carrying the max-grant every listed secret must
-// set for the loader to serve it.
+// secret whose requesters tag names requesters, carrying that fixture's max-grant of an hour so
+// that the requests below sign for exactly as long as the secret allows. A test of a secret the
+// list leaves uncapped, or of a kind whose own rules demand a cap, builds its secret itself.
 func listedSecret(name, owner, tier, requesters string) secrets.LocalSecret {
 	return policytest.ListedSecret(name, owner, tier, requesters, listedValue)
 }
@@ -249,10 +255,13 @@ func TestRequestersAnApprovalAfterTheDropIsRecordedAsADenial(t *testing.T) {
 	}
 }
 
-// TestRequestersAListedSecretGrantsForAnHourAtMost: the hour a listed secret's grants are bounded
-// to is enforced where every other max-grant is, before the policy decides the request — a two
-// hour request is refused and names the bound, and the hour one is granted for the hour.
-func TestRequestersAListedSecretGrantsForAnHourAtMost(t *testing.T) {
+// TestRequestersAListedSecretGrantsForNoLongerThanItsOwnMaxGrant: the hour this listed secret's
+// own max-grant tag bounds its grants to is enforced where every other max-grant is, before the
+// policy decides the request — a two hour request is refused and names the bound, and the hour
+// one is granted for the hour. The bound is the secret's own tag and nothing its requesters tag
+// demands: a secret that lists who may ask for it sets whatever cap it likes, or none at all
+// (TestUncappedListedLoginAwaitsOwner).
+func TestRequestersAListedSecretGrantsForNoLongerThanItsOwnMaxGrant(t *testing.T) {
 	ctx := context.Background()
 	m, enr, key, _ := newFixture(t)
 	retag(t, m, listedSecret("LISTED_KEY", fixtureOperator, policy.TierAgent, fixtureOperator))
@@ -325,6 +334,42 @@ func TestRequestersAPodsGrantEndsWhenItsAccountStopsProvingItsService(t *testing
 				t.Fatalf("grant revoked_by %q with %d grant.revoked rows by %s; want it ended once", by, audits, GrantEndedActor)
 			}
 		})
+	}
+}
+
+// TestReuseRefusesAPodWhoseServiceIsNoLongerListed drives reuseLiveGrant's requesters re-check on
+// its own. That re-check runs behind a gate of three terms — the policy's version has moved, a
+// granted name is a service's own (anyServiceOwned), or a granted name carries a requesters tag
+// (anyListed) — and here only the last of them can open it: the secret is shared, so no name is
+// service-owned, and emptying the account mapping changes no tag, so the policy's version stands
+// still. A pod that asks again for the name it already holds, off the list by that mapping alone,
+// is answered a denied request of its own naming the secret and the rule, and the grant the reuse
+// passed over is ended for good there rather than left live until its next release reads it.
+func TestReuseRefusesAPodWhoseServiceIsNoLongerListed(t *testing.T) {
+	ctx := context.Background()
+	m, _, _, _ := newFixture(t)
+	retag(t, m, listedSecret("LISTED_POD_KEY", policy.OwnerShared, policy.TierAgent, fixtureService))
+	pod, podKey := newServiceEnrollment(t, m.Store, fixtureService, fixtureSubject, "pod-"+t.Name())
+	granted, err := m.Create(ctx, pod, signRequestFor(t, m, podKey, anHour, "LISTED_POD_KEY"), "")
+	if err != nil || granted.State != "granted" || granted.GrantID == nil {
+		t.Fatalf("Create(LISTED_POD_KEY) = %+v, %v; want it granted at once to the pod the list names", granted, err)
+	}
+	version := m.Policy.Get().Version
+
+	m.ServicesByAccount = map[string]string{}
+	const want = "LISTED_POD_KEY: " + policy.ReasonRequesterNotListed
+	denied, err := m.Create(ctx, pod, signRequestFor(t, m, podKey, anHour, "LISTED_POD_KEY"), "")
+	if now := m.Policy.Get().Version; now != version {
+		t.Fatalf("the policy moved from version %s to %s; this case turns on the version standing still, so that the requesters tag is the only term that can open the re-check", version, now)
+	}
+	if err != nil || denied.State != "denied" || denied.ID == granted.ID || denied.GrantID != nil {
+		t.Fatalf("Create once the account no longer proves the service = %+v, %v; want a denied request of its own, not the live grant reused", denied, err)
+	}
+	if denied.Detail == nil || *denied.Detail != want {
+		t.Fatalf("the denied request's detail = %v, want %q", denied.Detail, want)
+	}
+	if by, audits := endedForGood(t, m, *granted.GrantID); by != GrantEndedActor || audits != 1 {
+		t.Fatalf("the grant the reuse passed over: revoked_by %q with %d grant.revoked rows by %s; want it ended once", by, audits, GrantEndedActor)
 	}
 }
 
@@ -402,5 +447,93 @@ func TestRequestersAWithheldNameTheListDropsIsDeniedRatherThanRefused(t *testing
 	}
 	if _, _, err := m.Values(ctx, *auto.GrantID, enr, nil); !errors.Is(err, ErrGrantNotLive) {
 		t.Fatalf("Values of the withheld grant = %v; want it still ended", err)
+	}
+}
+
+// accountValue is the stored value of the google-service-account secret below: the one account
+// its token would act as. No request here releases it, so no minter ever reads it; it is here
+// because the kind's secret is no secret without one.
+const accountValue = `{"service_account": "releases@example-project.iam.gserviceaccount.com"}`
+
+// TestServiceRequesterAwaitsOwner: a human-tier google-service-account secret may name registered
+// services beside the one person who owns it (policy.TagRules), and the list is then all the
+// service's pods get. The pod asks and waits: the tier decides once the list has let it through,
+// so the card is the owner's to approve rather than a token handed over without asking, which is
+// what keeps a service account a person still stands behind. Every session the list leaves out is
+// refused as before — another person's is denied requester-not-listed and leaves no card on
+// anyone's page, so naming a service widens who may ask and nothing else.
+func TestServiceRequesterAwaitsOwner(t *testing.T) {
+	ctx := context.Background()
+	m, _, _, _ := newFixture(t)
+	account := policytest.KindSecret("GCLOUD_ACCOUNT_KEY", fixtureOperator, policy.TierHuman,
+		policy.KindGoogleServiceAccount, accountValue)
+	account.Tags[policy.TagRequesters] = fixtureOperator + " " + fixtureService
+	retag(t, m, account)
+
+	pod, podKey := newServiceEnrollment(t, m.Store, fixtureService, fixtureSubject, "pod-"+t.Name())
+	pending, err := m.Create(ctx, pod, signRequestFor(t, m, podKey, anHour, "GCLOUD_ACCOUNT_KEY"), "")
+	if err != nil || pending.State != "pending" || pending.RecordID == nil || pending.GrantID != nil {
+		t.Fatalf("Create(GCLOUD_ACCOUNT_KEY) by a pod of the listed service = %+v, %v; want it pending with no grant", pending, err)
+	}
+	if pending.Approver == nil || *pending.Approver != fixtureOperator {
+		t.Fatalf("the pod's card names approver %v, want the secret's one person owner %s", pending.Approver, fixtureOperator)
+	}
+	waiting, err := m.PendingForApprover(ctx, fixtureOperator)
+	if err != nil || len(waiting) != 1 || waiting[0].RecordID != *pending.RecordID {
+		t.Fatalf("the owner's pending list = %+v, %v; want the pod's card %s waiting on it", waiting, err, *pending.RecordID)
+	}
+
+	other, otherKey := newEnrollment(t, m.Store, "session", "box-other-"+t.Name(), new(otherPerson), nil)
+	const want = "GCLOUD_ACCOUNT_KEY: " + policy.ReasonRequesterNotListed
+	denied, err := m.Create(ctx, other, signRequestFor(t, m, otherKey, anHour, "GCLOUD_ACCOUNT_KEY"), "")
+	if err != nil || denied.State != "denied" || denied.GrantID != nil || denied.RecordID != nil {
+		t.Fatalf("Create(GCLOUD_ACCOUNT_KEY) by another person's session = %+v, %v; want it denied with no grant and no card", denied, err)
+	}
+	if denied.Detail == nil || *denied.Detail != want {
+		t.Fatalf("the denied request's detail = %v, want %q", denied.Detail, want)
+	}
+	// The owner's page is as it was, and the refused person's is empty: a request the list denied
+	// leaves nothing for anyone to approve, neither under the owner the secret names nor under
+	// the person who asked, whose page would also show a card any approver may decide.
+	if waiting, err := m.PendingForApprover(ctx, fixtureOperator); err != nil || len(waiting) != 1 || waiting[0].RecordID != *pending.RecordID {
+		t.Fatalf("the owner's pending list after the refusal = %+v, %v; want the pod's card %s still alone on it", waiting, err, *pending.RecordID)
+	}
+	if waiting, err := m.PendingForApprover(ctx, otherPerson); err != nil || len(waiting) != 0 {
+		t.Fatalf("the refused person's pending list = %+v, %v; want it empty", waiting, err)
+	}
+}
+
+// TestUncappedListedLoginAwaitsOwner: a secret that merely lists its requesters bounds no grant.
+// A human-tier google-login secret may therefore carry a requesters list and no max-grant at all,
+// and its owner's own request may ask for eight hours — longer than the hour the deleted rule
+// forced on every listed secret — and be left pending at that length for its owner to approve,
+// rather than refused ErrGrantRequiresLifetime before the policy decides it: a list says who may
+// ask, never for how long. The request signs that lifetime rather than naming none, because one
+// naming none takes DefaultHumanGrantLifetime, fifteen minutes, which is inside an hour and so
+// would be accepted just as readily by a broker that capped every listed secret at one.
+func TestUncappedListedLoginAwaitsOwner(t *testing.T) {
+	ctx := context.Background()
+	m, enr, key, _ := newFixture(t)
+	login := policytest.KindSecret("UNCAPPED_LOGIN_KEY", fixtureOperator, policy.TierHuman, policy.KindGoogleLogin, "refresh-v1")
+	login.Tags[policy.TagRequesters] = fixtureOperator
+	retag(t, m, login)
+	if cap := m.Policy.Get().Secrets["UNCAPPED_LOGIN_KEY"].MaxGrant; cap != 0 {
+		t.Fatalf("the secret under test caps its grants at %s; this case is the listed secret that caps none", cap)
+	}
+
+	const eightHours = 8 * anHour
+	req, err := m.Create(ctx, enr, signRequestFor(t, m, key, eightHours, "UNCAPPED_LOGIN_KEY"), "")
+	if errors.Is(err, ErrGrantRequiresLifetime) {
+		t.Fatalf("Create(UNCAPPED_LOGIN_KEY, 8h) = %v; want no refusal over the grant's length from a secret that bounds none", err)
+	}
+	if err != nil || req.State != "pending" || req.RecordID == nil || req.Detail != nil || req.GrantID != nil {
+		t.Fatalf("Create(UNCAPPED_LOGIN_KEY, 8h) = %+v, %v; want it pending on its owner, neither denied nor granted", req, err)
+	}
+	if req.LifetimeSeconds == nil || *req.LifetimeSeconds != eightHours {
+		t.Fatalf("the pending request asks for %v seconds, want the %d seconds it signed: nothing changes a signed lifetime, and a secret with no cap does not refuse it", req.LifetimeSeconds, eightHours)
+	}
+	waiting, err := m.PendingForApprover(ctx, fixtureOperator)
+	if err != nil || len(waiting) != 1 || waiting[0].RecordID != *req.RecordID {
+		t.Fatalf("the owner's pending list = %+v, %v; want the uncapped request's card %s waiting on it", waiting, err, *req.RecordID)
 	}
 }

@@ -65,8 +65,10 @@ export async function seedFakeGithub(repos: Record<string, FakeGithubRepo>): Pro
 
 /** Makes the local delivery reconcile succeed against an empty acme/widgets history, so a pass that
  * runs inside a test leaves the freshness row Live rather than red with the reconcile's error. Only
- * a test that asserts the row says Live needs it. A deployed server has its own GitHub and is left
- * as it is. */
+ * a test that asserts the row says Live needs it. Its opposite is delivery.e2e.ts's "the freshness
+ * row shows a named reconcile failure" row, which seeds the same repository without `actions` from
+ * its own body, so that every pass inside its window fails with the one error it asserts. A
+ * deployed server has its own GitHub and is left as it is. */
 export async function seedDeliveryReconcileGithub(): Promise<void> {
   if (process.env.PLAYWRIGHT_BASE_URL) return;
   await putFakeGithubRepos({

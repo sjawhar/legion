@@ -51,7 +51,16 @@ func TestEachKindReachesItsOwnMinter(t *testing.T) {
 		secrets.GitHubApp{Base: github.URL, HTTP: github.Client()},
 		secrets.GoogleLogin{TokenURL: google.URL, HTTP: google.Client()},
 		secrets.AzureLogin{},
-		&secrets.GoogleServiceAccount{BaseURL: iam.URL, HTTP: iam.Client(), Source: oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "broker-own-token"})},
+		&secrets.GoogleServiceAccount{
+			BaseURL: iam.URL, HTTP: iam.Client(),
+			Source: oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "broker-own-token"}),
+			// The minter mints only for the account the deployment binds to the secret the
+			// request names, so this stands in for BROKER_SERVICE_ACCOUNT_SECRETS; with no
+			// binding every mint of the kind would be refused before the IAM endpoint below
+			// were asked anything, and this test would prove nothing about which minter the
+			// kind reaches.
+			Accounts: map[string]string{"DEV_ADITYA": "dev-aditya@theorem-agent-identities.iam.gserviceaccount.com"},
+		},
 	)
 
 	app, err := json.Marshal(map[string]string{"app_id": "123456", "private_key": pemText})
@@ -68,7 +77,7 @@ func TestEachKindReachesItsOwnMinter(t *testing.T) {
 		t.Fatalf("google-login minter = %q, %v; want the Google endpoint's access token", minted, err)
 	}
 	account := `{"service_account":"dev-aditya@theorem-agent-identities.iam.gserviceaccount.com"}`
-	minted, err = minters[policy.KindGoogleServiceAccount](context.Background(), secrets.MintRequest{Value: account})
+	minted, err = minters[policy.KindGoogleServiceAccount](context.Background(), secrets.MintRequest{Name: "DEV_ADITYA", Value: account})
 	if err != nil || minted != "service-account-access-token" {
 		t.Fatalf("google-service-account minter = %q, %v; want the IAM endpoint's access token", minted, err)
 	}

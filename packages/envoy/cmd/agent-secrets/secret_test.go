@@ -1005,8 +1005,9 @@ func TestEarliestPurgeIsTheOnePlaceDeletedDateIsRead(t *testing.T) {
 	}
 }
 
-// TestSecretShowNeverPrintsTheValue: show prints a secret's owner, tier, dates and versions, a
-// date Secrets Manager answers none for as absent, and never the value, as text or as JSON.
+// TestSecretShowNeverPrintsTheValue: show prints a secret's name, secret name, owner, tier,
+// requesters, created and last-changed times and versions, a field the secret holds none of as
+// "-", no deletion for a secret not scheduled for one, and never the value, as text or as JSON.
 func TestSecretShowNeverPrintsTheValue(t *testing.T) {
 	const value = "show-must-not-print-this"
 	local := secrets.NewLocal(policytest.Secret("SHOWN_KEY", "ada@example.com", policy.TierHuman, value))
