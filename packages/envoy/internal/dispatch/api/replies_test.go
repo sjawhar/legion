@@ -504,7 +504,7 @@ func TestMarkThreadReadRacingASessionReply(t *testing.T) {
 }
 
 // A mark racing an answer to a block ask, whose attribute write refreshes a comment's anchor and so
-// appends that event before the answer's update moves Alice's row (docs/marks.go's refreshAnchors,
+// appends that event before the answer moves Alice's row (docs/anchor_refresh.go's refreshAnchors,
 // then ask_transitions.go's update asks): the mark takes the issue before Alice's row, so it never
 // holds the row the answer's trigger waits on while waiting for the event lock the answer holds.
 func TestMarkThreadReadRacingABlockAskAnswerThatRefreshesAnAnchor(t *testing.T) {

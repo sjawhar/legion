@@ -45,8 +45,11 @@ the turn and be refused (`AgentBusyError`). An aside still queued at an interrup
 RPC `abort` a Legion daemon sends) is folded into the context with no run and read at the next
 turn. The host also folds an aside with no turn when it lands after the run's last step (during the
 run's `agent_end` handlers or an automatic compaction) and the person interrupted after it was
-sent. So every card carries a marker in its `details` (`EnvoyCardMarker`), and its `message_end`
-arms one check on
+sent. So every card carries a marker in its `details` (`EnvoyCardMarker`), which also holds the
+host state at the hand-over (`handOver`: `startup`, `run-active`, `prompt-setup`, `idle`, `inert`
+or `unknown`), so a later reading of the stored transcripts says which state held a card that
+waited; the inert path stamps `inert` and carries no card id, since the wake tracks no inert card.
+A card's `message_end` arms one check on
 the host's timer: when the session is idle, no run has started since the card, no interrupt is in
 effect and no assistant message follows the card in the branch, the check sends one hidden wake for
 every card it found unread, `deliverAs: "nextTurn"` with `triggerTurn` and `LOCAL_ENVOY_NOTICE`,

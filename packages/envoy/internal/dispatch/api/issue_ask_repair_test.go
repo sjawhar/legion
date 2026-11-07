@@ -522,9 +522,17 @@ func TestARepairThatChangesNothingAppendsNoUpdateAndMarksNoDocument(t *testing.T
 	requireLiveText(t, f.handler, closed.PrimaryArtifactID, `#close-decision urgency="med" multiple="false" state="resolved"`)
 	plainAsk := createSessionAsk(t, f.handler, older.Key, "Which region?")
 	peer := connectBrowserPeer(t, f.documents, older.PrimaryArtifactID)
+	stored := storedUpdateCount(t, f.database, older.PrimaryArtifactID)
 	peer.appendParagraph(t, `:::ask{#browser-decision urgency="low" multiple="false"}`+"\nWritten in a browser?\n:::\n")
 	peer.barrier(t)
 	awaitLiveText(t, f.handler, older.PrimaryArtifactID, "#browser-decision")
+	// The room holds the block, and its room stores it in a batch of its own that goes a linger
+	// after the room took it (docs.roomAppendLinger). The close below is backdated an hour, and
+	// the append gate refuses a browser update its room took that long after the issue closed,
+	// so a block still waiting to be stored then would be dropped rather than stored - and the
+	// repair, which reads the document the store holds once the room has closed, would have
+	// nothing to sweep. The row is what says the block is the store's.
+	awaitStoredUpdates(t, f.database, older.PrimaryArtifactID, stored+1)
 	if id := findBlockAsk(t, f.handler, older.Key, older.PrimaryArtifactID, "browser-decision"); id != "" {
 		t.Fatalf("the browser's block is ask %s, want it unindexed", id)
 	}
@@ -782,6 +790,31 @@ func awaitLiveText(t *testing.T, handler http.Handler, document, part string) {
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("document %s live text never held %q:\n%s", document, part, live)
+		}
+	}
+}
+
+// storedUpdateCount is how many updates document's stored history holds now.
+func storedUpdateCount(t *testing.T, database *store.Store, document string) int {
+	t.Helper()
+	var updates int
+	if err := database.Pool.QueryRow(context.Background(),
+		`select count(*) from doc_updates where artifact_id = $1`, document).Scan(&updates); err != nil {
+		t.Fatalf("count the stored updates of document %s: %v", document, err)
+	}
+	return updates
+}
+
+// awaitStoredUpdates waits until document's stored history holds at least want updates, which is
+// how a test waits for a browser's update to be durable: its room stores it in a batch of its
+// own, after the linger that gathers the room's next keystrokes into the same one.
+func awaitStoredUpdates(t *testing.T, database *store.Store, document string, want int) {
+	t.Helper()
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		if stored := storedUpdateCount(t, database, document); stored >= want {
+			return
+		} else if time.Now().After(deadline) {
+			t.Fatalf("document %s holds %d stored updates, want %d: an append never landed", document, stored, want)
 		}
 	}
 }

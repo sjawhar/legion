@@ -314,7 +314,7 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 	}
 	// A write whose transactions changed nothing made no update and writes nothing. Appended, an
 	// empty update would refresh the anchors and mark the document owing a settlement again
-	// (markUpdateOwed), which every repair pass over a closed issue would then sweep.
+	// (updateOwedStatement), which every repair pass over a closed issue would then sweep.
 	if len(op.updates) == 0 {
 		return websocket.ErrNoChanges
 	}
@@ -1762,14 +1762,15 @@ func (s *Service) registerStampedAskBlocks(ctx context.Context, room string, sta
 // The other version taken from the stored document, storing nothing of the room, is a comment's
 // anchor on a closed issue (closedIssueCommentAnchor), whose room holds updates the store will
 // never take. It is decided before the room is read, because such a version reads none of it,
-// and before anything is stored rather than from a refused flush: a flush refused part way has
-// already appended the room's earlier updates, the ones the room took inside the margin, and the
-// stored document holds none of them, since storedWithUpdates reads the pool that owns loads and
-// not this transaction. Decided first, the transaction appends nothing of the room at all, and
-// that pool read is exact: this transaction holds the document's advisory lock from the head it
-// read (lockedHead), so the store stands at that head and no append can move it. The mark such a
-// version pins is the store's too: VerifyMark reads the same stored tree for it, so a mark only
-// the room holds is no anchor at all (closedIssueCommentAnchor).
+// and before anything is stored rather than from a refused flush: the gate cuts a flush of the
+// room's run at the first update its closed issue no longer admits, and a flush cut that way
+// answers ErrIssueClosed and records nothing, so a version that learned of the close there would
+// roll its transaction back and take the comment with it (Service.flushThrough). Decided first,
+// the transaction appends nothing of the room at all, and the read of the pool that owns loads is
+// exact: this transaction holds the document's advisory lock from the head it read (lockedHead),
+// so the store stands at that head and no append can move it (storedWithUpdates). The mark such
+// a version pins is the store's too: VerifyMark reads the same stored tree for it, so a mark
+// only the room holds is no anchor at all (closedIssueCommentAnchor).
 func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, actor *model.Actor) (renderedTree, authorCapture, error) {
 	tx, _ := txFromContext(ctx)
 	if write := joinedLiveWrite(ctx, room); write != nil {
