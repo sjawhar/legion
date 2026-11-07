@@ -1497,7 +1497,12 @@ owns the claim — a bun test under `e2e/__tests__/` for a harness module of thi
 directory (`e2e/__tests__/round-robin-proxy.test.ts` is the shape to follow: it
 spawns the module with `Bun.spawn`, waits for its listening line, drives it
 against stub upstreams and kills it in `afterAll`), that package's own tests for
-a command, and a Go test for a claim about the server (INFRA-1404).
+a command, and a Go test for a claim about the server (INFRA-1404). Two rows
+still in this suite take no page fixture: `e2e/cli-reply-answers.e2e.ts:10`,
+which drives the CLI, and `e2e/two-builds.multiprocess.e2e.ts:723`, which waits
+out the two-build block index's window. Both sit outside the ten rows
+INFRA-1404 moved and are tracked as dispatch://INFRA-1554, so they are
+exceptions on record rather than the shape to copy.
 
 The markdown shapes the parity rows read live in
 `packages/envoy/internal/dispatch/pmdoc/testdata/corpus/`, and all three suites
@@ -1510,7 +1515,20 @@ editor, because the spec editor draws Go's reading (already pinned by
 `fixtures.json`) and a comment parses through the headless engine (which a web
 unit test runs).
 
-A third keeps an Inbox assertion from measuring the wrong mechanism: a test that expects a row to leave the Inbox list releases focus AND the pointer from it first, because `ViewportAnchor` and `heldRow` keep the row the reader's hand is on rendered wherever the list has moved it. Blurring alone is not enough - `.check()` and `.click()` leave the mouse over the row.
+Two files keep markdown of their own, each for a reason the table cannot meet.
+`packages/envoy/internal/dispatch/pmdoc/writer_spelling_test.go` copies corpus
+markdown into its rows because what it asserts is the bytes Go stores for a
+shape, which the table does not carry: `fixtures.json`'s `rendered_by_milkdown`
+is the browser engine's re-serialization of its own parse (a backslash escape)
+where Go stores a character reference, and `pmdoc/render_test.go`'s
+`TestRenderMatchesMilkdownForFixtures` compares the two only through `plain()`,
+which strips both. `e2e/unknown-directive.e2e.ts` keeps bodies of its own
+because each carries a container the block schema does not know, and the
+generator's writing parse refuses such a document outright, as the document
+service does; a Conversation body is drawn by the read-only engine instead, so
+no corpus file can hold them.
+
+One more rule keeps an Inbox assertion from measuring the wrong mechanism: a test that expects a row to leave the Inbox list releases focus AND the pointer from it first, because `ViewportAnchor` and `heldRow` keep the row the reader's hand is on rendered wherever the list has moved it. Blurring alone is not enough - `.check()` and `.click()` leave the mouse over the row.
 
 Two rules keep an assertion honest. First, name the state the fixture puts the system in and ask whether the
 assertion would still pass with the change reverted; if it would, the fixture satisfies it for another reason

@@ -9,7 +9,31 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc/heavybodies"
 )
 
-// A document write of each heavy body gets the verdict the reader gives it: the eight shapes of
+// heavyWrite is one heavy body as this package writes it: the name its row carries, the bytes
+// that go out, and whether the write is answered 201 rather than refused.
+type heavyWrite struct {
+	name, body string
+	stored     bool
+}
+
+// heavyWrites is every heavy body of pmdoc/heavybodies flattened into the writes this package
+// makes of them, the shapes grown to the body cap first and the nested bare-directive bodies
+// after: the order the verdict test's subtests and BenchmarkHeavyDocumentWrite's sub-benchmarks
+// are named in, which is why both take their rows from here rather than flattening the two lists
+// apart.
+func heavyWrites() []heavyWrite {
+	shapes, nested := heavybodies.Shapes(), heavybodies.NestedDirectives()
+	writes := make([]heavyWrite, 0, len(shapes)+len(nested))
+	for _, shape := range shapes {
+		writes = append(writes, heavyWrite{name: shape.Name, body: shape.Grow(), stored: shape.Refusal == ""})
+	}
+	for _, directive := range nested {
+		writes = append(writes, heavyWrite{name: directive.Name, body: directive.Markdown})
+	}
+	return writes
+}
+
+// A document write of each heavy body gets the verdict the reader gives it: the nine shapes of
 // heavybodies.Shapes are stored or refused 400 INVALID_MARKDOWN, and both deeply nested
 // bare-directive bodies are refused the same way. The mapping from the reader's refusal to that
 // code lives in one place (writeDocumentError, server.go), and until this test no API test
@@ -40,14 +64,9 @@ func TestHeavyDocumentWriteVerdicts(t *testing.T) {
 			t.Fatalf("%s (%d characters): status=%d body=%s, want 400 INVALID_MARKDOWN", name, len(body), response.Code, response.Body.String())
 		}
 	}
-	for index, shape := range heavybodies.Shapes() {
-		t.Run(shape.Name, func(t *testing.T) {
-			write(t, fmt.Sprintf("heavy-%d.md", index), shape.Grow(), shape.Refusal == "")
-		})
-	}
-	for index, body := range heavybodies.NestedDirectives() {
-		t.Run(body.Name, func(t *testing.T) {
-			write(t, fmt.Sprintf("nested-directive-%d.md", index), body.Markdown, false)
+	for index, heavy := range heavyWrites() {
+		t.Run(heavy.name, func(t *testing.T) {
+			write(t, fmt.Sprintf("heavy-%d.md", index), heavy.body, heavy.stored)
 		})
 	}
 }

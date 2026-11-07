@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
-	"github.com/sjawhar/envoy/internal/dispatch/pmdoc/heavybodies"
 )
 
 // uploadVersionHistory is how many versions the benchmark spec has before its timed uploads.
@@ -66,7 +65,7 @@ func BenchmarkUploadVersion(b *testing.B) {
 }
 
 // BenchmarkHeavyDocumentWrite measures POST /api/v1/issues/{key}/artifacts over the heavy bodies
-// of pmdoc/heavybodies: the eight shapes at the block cap, stored or refused, and the two deeply
+// of pmdoc/heavybodies: the nine shapes at the block cap, stored or refused, and the two deeply
 // nested bare-directive bodies, which are refused. Each iteration writes its body under a name
 // of its own, so what is timed is a first write of such a body into a document of its own -
 // what a writer sending one of these meets - rather than another version of a growing document,
@@ -87,31 +86,19 @@ func BenchmarkHeavyDocumentWrite(b *testing.B) {
 	b.Cleanup(func() { slog.SetDefault(previous) })
 	handler, _, _ := newTestServer(b, testServerOptions{settle: time.Hour})
 	issueKey := newBenchmarkIssue(b, handler, "HEAVY", "Heavy bodies", "Heavy document writes")
-	type heavyWrite struct {
-		name, body string
-		stored     bool
-	}
-	shapes, nested := heavybodies.Shapes(), heavybodies.NestedDirectives()
-	writes := make([]heavyWrite, 0, len(shapes)+len(nested))
-	for _, shape := range shapes {
-		writes = append(writes, heavyWrite{name: shape.Name, body: shape.Grow(), stored: shape.Refusal == ""})
-	}
-	for _, directive := range nested {
-		writes = append(writes, heavyWrite{name: directive.Name, body: directive.Markdown})
-	}
-	for index, write := range writes {
-		b.Run(write.name, func(b *testing.B) {
+	for index, heavy := range heavyWrites() {
+		b.Run(heavy.name, func(b *testing.B) {
 			b.ReportAllocs()
-			b.SetBytes(int64(len(write.body)))
+			b.SetBytes(int64(len(heavy.body)))
 			for iteration := range b.N {
 				response := uploadVersionRequest(b, handler, "/api/v1/issues/"+issueKey+"/artifacts", map[string]string{
-					"name": fmt.Sprintf("heavy-%d-%d.md", index, iteration), "content": write.body,
+					"name": fmt.Sprintf("heavy-%d-%d.md", index, iteration), "content": heavy.body,
 				})
-				if write.stored && response.Code != http.StatusCreated {
-					b.Fatalf("%s: status=%d body=%s, want 201", write.name, response.Code, response.Body.String())
+				if heavy.stored && response.Code != http.StatusCreated {
+					b.Fatalf("%s: status=%d body=%s, want 201", heavy.name, response.Code, response.Body.String())
 				}
-				if !write.stored && response.Code != http.StatusBadRequest {
-					b.Fatalf("%s: status=%d body=%s, want 400", write.name, response.Code, response.Body.String())
+				if !heavy.stored && response.Code != http.StatusBadRequest {
+					b.Fatalf("%s: status=%d body=%s, want 400", heavy.name, response.Code, response.Body.String())
 				}
 			}
 		})

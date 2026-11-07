@@ -49,6 +49,12 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
+// SLOW(>=2s): 4,221 ms in an issue pod with one worker, 3,053 ms in this head's four-worker CI
+// report (`dispatch-e2e-report-1` of run 42334783358). It seeds seven cards - a comment, a
+// message and an ask holding the unknown container directive, a message and an ask whose typed
+// block breaks its rule, a lone-carriage-return message and a byte-order-mark message - and
+// reads all seven behind one page load, where the four rows it replaced each paid the page-load
+// floor of their own.
 test("Conversation draws an unknown or broken block as formatted markdown with its fence lines as text, in a comment, a message and an ask, after a lone carriage return and after a byte-order mark", async ({
   browser,
 }) => {

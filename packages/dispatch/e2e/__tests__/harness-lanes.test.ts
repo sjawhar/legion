@@ -203,6 +203,10 @@ test("psql names both variables when neither its lane nor the plain name has a d
   );
 });
 
+// Two `playwright test --list` children, each about 1.4 s on an issue pod's two cores, so the
+// row sits just under bun's 5 s default and crosses it whenever anything else holds the machine:
+// it red once in four runs of `bun run test` here while the rest of the suite was green
+// (INFRA-1404). The bound is the harness's, not the configuration's, so it is generous.
 test("the Playwright config refuses a --workers that is not the lane count", async () => {
   const listed = ["bunx", "playwright", "test", "--config", config, "--list", "--reporter=line"];
   const mismatched = await run([...listed, "--workers", "3"], {});
@@ -215,4 +219,4 @@ test("the Playwright config refuses a --workers that is not the lane count", asy
   expect(`${shorthand.stderr}${shorthand.stdout}`).toContain(
     "This run has 3 lanes, each a harness of its own, so --workers 2 would not match"
   );
-});
+}, 60_000);

@@ -3,9 +3,13 @@ package dashboard
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -83,10 +87,22 @@ func TestEveryAssetOfBothBuildsAnswersFromEitherProcess(t *testing.T) {
 	assets := NewStore(pool)
 	processes := []struct {
 		name    string
+		dist    string
+		files   map[string][]byte
 		handler http.Handler
 	}{
-		{name: "the process serving the first build", handler: newAssetRouter(t, pool, firstDist, assets)},
-		{name: "the process serving the second build", handler: newAssetRouter(t, pool, secondDist, assets)},
+		{
+			name:    "the process serving the first build",
+			dist:    firstDist,
+			files:   firstFiles,
+			handler: newAssetRouter(t, pool, firstDist, assets),
+		},
+		{
+			name:    "the process serving the second build",
+			dist:    secondDist,
+			files:   secondFiles,
+			handler: newAssetRouter(t, pool, secondDist, assets),
+		},
 	}
 	builds := []struct {
 		name  string
@@ -96,15 +112,25 @@ func TestEveryAssetOfBothBuildsAnswersFromEitherProcess(t *testing.T) {
 		{name: "the second build", files: secondFiles},
 	}
 
-	asked := 0
 	for _, build := range builds {
 		for path, want := range build.files {
 			if !strings.HasPrefix(path, "assets/") {
 				continue
 			}
 			for _, process := range processes {
-				asked++
 				t.Run(build.name+"'s "+path+" from "+process.name, func(t *testing.T) {
+					// What the row is for: where the file is not the serving build's own, that
+					// process's dist must not hold it, so the 200 below can only have come from
+					// the asset store - routes.staticHandler reads WebDistDir first and falls
+					// back to the store for what it lacks (routes/assets.go). The shared runtime
+					// chunk is in both dists, and both processes read it from their own.
+					if _, own := process.files[path]; !own {
+						local := filepath.Join(process.dist, filepath.FromSlash(path))
+						if _, err := os.Stat(local); !errors.Is(err, fs.ErrNotExist) {
+							t.Fatalf("%s holds %s in its own dist (stat %s: %v), so this row would answer from the file and prove nothing of the asset store",
+								process.name, path, local, err)
+						}
+					}
 					server := httptest.NewServer(process.handler)
 					defer server.Close()
 					response, err := server.Client().Get(server.URL + "/" + path)
@@ -123,11 +149,5 @@ func TestEveryAssetOfBothBuildsAnswersFromEitherProcess(t *testing.T) {
 				})
 			}
 		}
-	}
-	// Both directions of both paths: five asset files in the first build and four in the second,
-	// each asked of both processes. A build whose assets stopped being published would still pass
-	// every row it owns locally, so the count is asserted rather than left to the loop.
-	if want := 2 * (5 + 4); asked != want {
-		t.Errorf("asked for %d build-and-process pairs, want %d", asked, want)
 	}
 }

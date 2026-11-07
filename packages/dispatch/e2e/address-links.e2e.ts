@@ -45,6 +45,10 @@ test.beforeEach(async () => {
 });
 
 test.describe("a bare web address is a link in a document written through the API, as in a comment", () => {
+  // SLOW(>=2s): 3,811 ms in this head's four-worker CI report (`dispatch-e2e-report-1` of run
+  // 42334783358), 2,545 ms at the merge base's merge-group run. Nine paragraphs, each a bare
+  // address, asserted twice - once in the Conversation and once in the document editor - which
+  // is ten link lookups per surface.
   test("after punctuation or an escaped scheme colon", async ({ browser }) => {
     await createProject({ key: "CORE", name: "Core" });
     const issue = await createIssue({

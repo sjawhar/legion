@@ -47,7 +47,22 @@
 // tests read it through testdata/fixtures.json, Dispatch's web unit tests and
 // one browser row per markdown parity family read the same file through
 // packages/dispatch/web/src/__tests__/pmdoc-fixtures.ts, and none of the three
-// keeps a copy of a shape. testdata/fixtures.json and testdata/splices.json are
+// keeps a copy of a shape but for two, each of which the table cannot hold:
+//
+//   - writer_spelling_test.go copies corpus markdown into its rows, because what
+//     it asserts is the bytes Go stores for a shape, which the table does not
+//     carry: fixtures.json's rendered_by_milkdown is the browser engine's
+//     re-serialization of its own parse (a backslash escape) where Go stores a
+//     character reference, and render_test.go's
+//     TestRenderMatchesMilkdownForFixtures compares the two only through plain(),
+//     which strips both.
+//   - packages/dispatch/e2e/unknown-directive.e2e.ts keeps bodies of its own,
+//     because each carries a container the block schema does not know, and the
+//     generator's writing parse refuses such a document outright, as the document
+//     service does. A Conversation body is drawn by the read-only engine instead,
+//     so no corpus file can hold them.
+//
+// testdata/fixtures.json and testdata/splices.json are
 // generated, not hand-written. To add a document fixture, drop a markdown file
 // in testdata/corpus/ and regenerate:
 //
