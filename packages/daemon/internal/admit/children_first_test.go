@@ -364,7 +364,7 @@ func TestTheWaitingLineLeavesOutAParentWhoseChildrenAreOpen(t *testing.T) {
 		if err != nil {
 			t.Fatalf("list the issues: %v", err)
 		}
-		facts, err := record.ReadLineFacts(context.Background(), tx, record.NewStore(), testProject, issues)
+		facts, err := record.ReadLineFacts(context.Background(), tx, record.NewStore(), testProject, issues, nil)
 		if err != nil {
 			t.Fatalf("read the line facts: %v", err)
 		}

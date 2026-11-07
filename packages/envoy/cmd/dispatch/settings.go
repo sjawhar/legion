@@ -37,9 +37,10 @@ type setting struct {
 }
 
 // settings is every Dispatch setting, in the order an operator meets them: storage, identity,
-// where the server listens, NATS, the Envoy listener, projects, the GitHub App, cookies,
-// service-account tokens, the secrets broker, meaning search's model service, the model the
-// server generates text with, the dashboard, and local and test runs.
+// where the server listens and how many document rooms and connections it holds, NATS, the Envoy
+// listener, projects, the GitHub App, cookies, service-account tokens, the secrets broker, meaning
+// search's model service, the model the server generates text with, the dashboard, and local and
+// test runs.
 var settings = []setting{
 	{Name: "DATABASE_URL", Required: "yes",
 		Description: "Postgres connection string. The server migrates the database before serving; `census`, `backfill-block-ids`, `backfill-anchor-blocks`, `backfill-files`, `rebuild-refs` and `stored-order` read it too. A `pool_max_conns` parameter is refused."},
@@ -68,7 +69,11 @@ var settings = []setting{
 	{Name: "DISPATCH_LISTEN_FD", Required: "no",
 		Description: "An inherited listening TCP socket (descriptor number) the server serves on instead of binding; for test harnesses that hold the port. `DISPATCH_PORT` and `DISPATCH_LISTEN_HOST`, when set and not empty, must name the socket's address; `DISPATCH_SERVER_URL` is not derived from it. A descriptor that is not a listening TCP socket refuses startup, and the server binds nothing in its place."},
 	{Name: "DISPATCH_PPROF_PORT", Required: "no",
-		Description: "Port on `127.0.0.1` the Go profiler (`net/http/pprof`, under `/debug/pprof/`) listens on, reachable only from inside the pod or through `kubectl port-forward`; unset or empty, nothing listens. A value that is not a port 1-65535 refuses startup."},
+		Description: "Port on `127.0.0.1` the Go profiler (`net/http/pprof`, under `/debug/pprof/`) and the process's `expvar` variables (`/debug/vars`, the document rooms' figures as `dispatch_rooms`) listen on, reachable only from inside the pod or through `kubectl port-forward`; unset or empty, nothing listens. A value that is not a port 1-65535 refuses startup."},
+	{Name: "DISPATCH_MAX_LIVE_ROOMS", Default: "`1000`", Required: "no",
+		Description: "Most document rooms the server holds in memory at once; a document socket that would open one more is refused (503) until a room goes. A positive integer."},
+	{Name: "DISPATCH_MAX_DOC_CONNECTIONS", Default: "`1000`", Required: "no",
+		Description: "Most browser connections to document rooms the server holds at once; one more document socket is refused (503) until one leaves. A positive integer."},
 	{Name: "XDG_CONFIG_HOME", Default: "`~/.config`", Required: "no",
 		Description: "Directory whose `legion/envoy.json` is the user `envoy.json`, which `DISPATCH_SERVER_URL` and `NATS_URLS` fall back to; set but empty, it is `~/.config` too, and a path that is not absolute refuses startup."},
 	{Name: "DISPATCH_SERVER_URL", Default: "`dispatch.serverUrl` from `envoy.json`", Required: "no",
@@ -189,6 +194,12 @@ var settings = []setting{
 		Description: "Set to `1` so a test process runs the delivery reconcile's first pass as it starts, rather than at a random moment within its first 5 minutes, for an end-to-end test that must see a pass inside its window. Set only with `DISPATCH_TEST_HOOKS=1`."},
 	{Name: "DISPATCH_TEST_CI_RECONCILE_INTERVAL", Default: "`5m`", Required: "no",
 		Description: "How often a test process's CI reconcile pass runs, in place of the five minutes a deployment runs it at; a positive Go duration, for an end-to-end test only and never a real deployment. Set only with `DISPATCH_TEST_HOOKS=1`."},
+	{Name: "DISPATCH_TEST_DELIVERY_RECONCILE_INTERVAL", Default: "`5m`", Required: "no",
+		Description: "How often a test process's delivery reconcile pass runs, in place of the five minutes a deployment runs it at; a positive Go duration, for an end-to-end test only and never a real deployment. Set only with `DISPATCH_TEST_HOOKS=1`."},
+	{Name: "DISPATCH_TEST_MAINTENANCE_SWEEP_INTERVAL", Default: "`1m`", Required: "no",
+		Description: "How often a test process's maintenance sweep runs - the Idempotency-Keys and spent DPoP proofs past their windows, and the deliveries a process that died left owed - in place of the minute a deployment runs it at; a positive Go duration, for an end-to-end test only and never a real deployment. Set only with `DISPATCH_TEST_HOOKS=1`."},
+	{Name: "DISPATCH_TEST_PROCESS_HEARTBEAT", Default: "`5s`", Required: "no",
+		Description: "How often a test process stamps its row in the registry of live server processes, in place of the five seconds a deployment runs it at; the live window a heartbeat is judged by stays three of it, so no run can set a window shorter than its own heartbeat, and a process refused at boot waits that window and one heartbeat for its refuser to lapse. A positive Go duration, for an end-to-end test only and never a real deployment. Set only with `DISPATCH_TEST_HOOKS=1`."},
 }
 
 // removedSettings are the variables a release stopped reading, each with what replaced it. None is

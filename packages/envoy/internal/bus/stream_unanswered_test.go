@@ -79,7 +79,7 @@ func TestAStreamReadTheServerLeavesUnansweredIsSentAgainAndTheStartGoesOn(t *tes
 	losing := &unansweredJetStream{JetStreamContext: js, unansweredReads: 1}
 	cfg := parseConnectOptions([]ConnectOption(nil)).streamConfig()
 
-	if err := ensureStreamWithConfig(losing, &cfg); err != nil {
+	if err := ensureStreamWithConfig(losing, &cfg, capsAnUnsetStream); err != nil {
 		t.Fatalf("a start whose first stream read drew no answer = %v, want it to go on", err)
 	}
 
@@ -99,7 +99,7 @@ func TestACreateTheServerLeavesUnansweredIsSentAgainAndTheStartGoesOn(t *testing
 	losing := &unansweredJetStream{JetStreamContext: js, unansweredCreate: 1}
 	cfg := parseConnectOptions([]ConnectOption(nil)).streamConfig()
 
-	if err := ensureStreamWithConfig(losing, &cfg); err != nil {
+	if err := ensureStreamWithConfig(losing, &cfg, capsAnUnsetStream); err != nil {
 		t.Fatalf("a start whose first create drew no answer = %v, want it to go on", err)
 	}
 
@@ -126,7 +126,7 @@ func TestARefusedCreateIsSentOnce(t *testing.T) {
 	refused := &unansweredJetStream{JetStreamContext: js, refuseCreate: refusal}
 	cfg := parseConnectOptions([]ConnectOption(nil)).streamConfig()
 
-	err := ensureStreamWithConfig(refused, &cfg)
+	err := ensureStreamWithConfig(refused, &cfg, capsAnUnsetStream)
 	var apiErr *nats.APIError
 	if err == nil || !errors.As(err, &apiErr) || apiErr.ErrorCode != refusal.ErrorCode {
 		t.Fatalf("a start whose create the server refused = %v, want that refusal back", err)
@@ -156,7 +156,7 @@ func TestAStreamReadTheServerNeverAnswersIsGivenUpOn(t *testing.T) {
 	lost := &unansweredJetStream{JetStreamContext: js, unansweredReads: startSendBound + 1}
 	cfg := parseConnectOptions([]ConnectOption(nil)).streamConfig()
 
-	err := ensureStreamWithConfig(lost, &cfg)
+	err := ensureStreamWithConfig(lost, &cfg, capsAnUnsetStream)
 	if !unanswered(err) {
 		t.Fatalf("a start whose stream read is never answered = %v, want the deadline back: a start that goes on sending writes no fatal line of its own", err)
 	}

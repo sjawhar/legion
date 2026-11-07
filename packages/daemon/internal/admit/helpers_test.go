@@ -2,10 +2,7 @@ package admit
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"log/slog"
-	"net/url"
 	"os"
 	"reflect"
 	"testing"
@@ -22,8 +19,8 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
-	legionstore "github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
+	"github.com/sjawhar/legion/daemon/internal/testpg"
 	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 	"github.com/sjawhar/legion/daemon/internal/workflow"
 )
@@ -92,7 +89,14 @@ func newAdmission(t *testing.T, cap int, log *slog.Logger) *Admission {
 // workflow.Config's zero value, which is the armed gate.
 func newAdmissionWithGate(t *testing.T, cap int, gate config.DesignGate, log *slog.Logger) *Admission {
 	t.Helper()
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, DesignGate: gate,
+	return newAdmissionWithSteps(t, cap, gate.Steps(), log)
+}
+
+// newAdmissionWithSteps is newAdmission under a design gate of several steps, which is what a
+// deployment's `gates.design` list resolves to.
+func newAdmissionWithSteps(t *testing.T, cap int, steps []record.DesignStep, log *slog.Logger) *Admission {
+	t.Helper()
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Steps: steps,
 		Clock: func() time.Time { return fixedNow }}, log)
 	admission := New(record.NewStore(), engine, cap, testProject, log)
 	admission.now = func() time.Time { return fixedNow }
@@ -203,7 +207,7 @@ func assertWaiting(t *testing.T, pool *pgxpool.Pool, want []string) {
 		if err != nil {
 			t.Fatalf("list slots: %v", err)
 		}
-		facts, err := record.ReadLineFacts(ctx, tx, records, testProject, issues)
+		facts, err := record.ReadLineFacts(ctx, tx, records, testProject, issues, nil)
 		if err != nil {
 			t.Fatalf("read the line facts: %v", err)
 		}
@@ -326,59 +330,15 @@ func inTx(t *testing.T, pool *pgxpool.Pool, fn func(pgx.Tx)) {
 	}
 }
 
+// migratedPool is a pool on a database carrying every migration, cloned from the package's
+// template (testpg.ClonePool). The DSN is required rather than skipped: these tests are the real
+// Postgres admission tests, and a run that quietly skipped them would prove nothing.
 func migratedPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	dsn := os.Getenv("LEGION_TEST_PG_DSN")
-	if dsn == "" {
+	if os.Getenv("LEGION_TEST_PG_DSN") == "" {
 		t.Fatal("LEGION_TEST_PG_DSN is required for real Postgres admission tests")
 	}
-	base, err := url.Parse(dsn)
-	if err != nil {
-		t.Fatalf("parse LEGION_TEST_PG_DSN: %v", err)
-	}
-	adminURL := *base
-	adminURL.Path = "/postgres"
-	admin, err := pgxpool.New(context.Background(), adminURL.String())
-	if err != nil {
-		t.Fatalf("connect admin database: %v", err)
-	}
-	t.Cleanup(admin.Close)
-	name := "legion_admit_test_" + randomSuffix(t)
-	// A file copy of template1 (docs/testing.md, "A database a Go test creates").
-	if _, err := admin.Exec(context.Background(), "create database "+name+" strategy file_copy"); err != nil {
-		t.Fatalf("create %s: %v", name, err)
-	}
-	t.Cleanup(func() {
-		if _, err := admin.Exec(context.Background(), "drop database "+name+" with (force)"); err != nil {
-			t.Errorf("drop %s: %v", name, err)
-		}
-	})
-	url := *base
-	url.Path = "/" + name
-	st, err := legionstore.Open(context.Background(), url.String())
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	if _, err := st.Migrate(context.Background()); err != nil {
-		st.Close()
-		t.Fatalf("migrate store: %v", err)
-	}
-	st.Close()
-	pool, err := pgxpool.New(context.Background(), url.String())
-	if err != nil {
-		t.Fatalf("open test pool: %v", err)
-	}
-	t.Cleanup(pool.Close)
-	return pool
-}
-
-func randomSuffix(t *testing.T) string {
-	t.Helper()
-	var bytes [8]byte
-	if _, err := rand.Read(bytes[:]); err != nil {
-		t.Fatalf("random suffix: %v", err)
-	}
-	return hex.EncodeToString(bytes[:])
+	return testpg.ClonePool(t, "legion_admit_test")
 }
 
 func testJetStream(t *testing.T) jetstream.JetStream {

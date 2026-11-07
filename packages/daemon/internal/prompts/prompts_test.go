@@ -12,6 +12,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/promptrefs"
+	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
 // A broken role sequence drops the shared core, uses a root prompt for a child, or makes the Go
@@ -329,6 +330,12 @@ func ruleParagraphs(text, marker string) []string {
 // `Production:` line the production check wrote, which is now an `after_merge` result a closed
 // issue takes. The two line names are built from their role rather than written out, so a search
 // of the repository for either finds the texts that teach it and not this test.
+//
+// The production check's own retired sentences are read here too (retiredCheckSentences): the
+// check is no longer the implementer's, and no deployment's event wakes a look. This test reads
+// what Compose joins, so it answers for the prompt a role is actually given;
+// TestNoPartMakesTheProductionCheckTheImplementersOrWakesItFromADeploy reads the same sentences
+// over every part of both trees, where one Compose never joins would otherwise sit unread.
 func TestNoComposedPromptTeachesAnE2ELineOrAProofArray(t *testing.T) {
 	composer, err := New(t.TempDir())
 	if err != nil {
@@ -336,6 +343,7 @@ func TestNoComposedPromptTeachesAnE2ELineOrAProofArray(t *testing.T) {
 	}
 	retired := []string{"`proof` array", "`Production:` line",
 		"pending deploy of", "the production-like proof", "the implementer's proof"}
+	retired = append(retired, retiredCheckSentences...)
 	for _, role := range []string{"implementer", "tester"} {
 		retired = append(retired, fmt.Sprintf("E2E (%s)", role))
 	}
@@ -410,6 +418,148 @@ func TestNewRewritesAPartTheRunningDaemonDidNotWrite(t *testing.T) {
 	for _, name := range current {
 		if info, err := os.Stat(snapshot(name)); err != nil || !info.ModTime().Equal(written) {
 			t.Errorf("%s, already holding the running daemon's content, was written again: %v", name, err)
+		}
+	}
+}
+
+// stepClauses are the clauses of a composed prompt that name marker: its sentences, split again
+// at each comma, since a rule that binds each design-gate step to its document names one pair
+// per clause. A clause is the span a reader takes one binding from, so a test asks which
+// document a step is bound to of the clause that names that step, never of the prompt as a
+// whole: a prompt naming the three steps in one place and the three documents in another would
+// satisfy the second question while teaching nothing.
+func stepClauses(text, marker string) []string {
+	var found []string
+	for _, sentence := range strings.Split(foldWhitespace(text), ". ") {
+		for _, clause := range strings.Split(sentence, ", ") {
+			if strings.Contains(clause, marker) {
+				found = append(found, clause)
+			}
+		}
+	}
+	return found
+}
+
+// The root architect's composed prompt binds each design-gate step to the document that step
+// records, so an architect whose addressing line names a step knows what to register for it; a
+// step bound in a clause that names another step binds nothing, since the architect cannot tell
+// which of the two the document belongs to. The prompt also tells a root whose gate was carried
+// what to do about a step nothing has registered — register it, on this issue's own document —
+// rather than only what not to do, and tells every root how to find which step a review notice
+// was of, since `design-approved`, `design-changes-requested` and `carried-gate-opened` each
+// name a version and no step. The policy words the list replaced are gone from both parts: an
+// architect told to read `gates.design: root-issues` off its addressing would wait for a line
+// the daemon no longer writes.
+func TestTheRootArchitectPartNamesTheGatedSteps(t *testing.T) {
+	composer, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	text := composedText(t, composer, claim.RoleArchitect, true)
+	documents := []struct {
+		step     record.DesignStep
+		document string
+	}{
+		{record.DesignStepDecisions, "decisions document"},
+		{record.DesignStepCriteria, "Verification document"},
+		{record.DesignStepSpec, "primary document"},
+	}
+	for _, bind := range documents {
+		bound := false
+		for _, clause := range stepClauses(text, "`"+string(bind.step)+"` step") {
+			if !strings.Contains(clause, bind.document) {
+				continue
+			}
+			others := false
+			for _, other := range documents {
+				if other.step != bind.step && strings.Contains(clause, "`"+string(other.step)+"`") {
+					others = true
+				}
+			}
+			if !others {
+				bound = true
+			}
+		}
+		if !bound {
+			t.Errorf("the composed root architect prompt binds the `%s` step to its %s in no clause of its own",
+				bind.step, bind.document)
+		}
+	}
+	// The architect reads the steps off its addressing line, so both parts name that line by the
+	// words the daemon writes on it (daemon.DesignGateFragment).
+	if !strings.Contains(text, "`Design gate steps`") {
+		t.Error("the composed root architect prompt never names the `Design gate steps` line its steps come from")
+	}
+	// Folded, because a retired phrase broken across two lines is still a retired phrase a reader
+	// follows, and the line a prompt wraps at is nobody's decision.
+	for _, retired := range retiredGatePhrases {
+		if strings.Contains(foldWhitespace(text), retired) {
+			t.Errorf("the composed root architect prompt still says %q", retired)
+		}
+	}
+	carried := ruleParagraphs(text, "says `carried`")
+	if len(carried) != 2 {
+		t.Fatalf("the composed root architect prompt holds %d paragraphs on a carried root, want one in each part", len(carried))
+	}
+	for _, paragraph := range carried {
+		folded := strings.ToLower(paragraph)
+		if !strings.Contains(folded, "register each step the catch-up reports `unregistered`") {
+			t.Errorf("the carried-root rule does not tell the architect to register each unregistered step: %s", paragraph)
+		}
+		if strings.Contains(folded, "never `register_gate`") {
+			t.Errorf("the carried-root rule still forbids every registration: %s", paragraph)
+		}
+		if !strings.Contains(paragraph, "this issue's own document for that step") {
+			t.Errorf("the carried-root rule does not say which document that registration names: %s", paragraph)
+		}
+	}
+	notices := ruleParagraphs(text, "`design-changes-requested`")
+	if len(notices) != 2 {
+		t.Fatalf("the composed root architect prompt holds %d paragraphs on the review notices, want one in each part", len(notices))
+	}
+	for _, paragraph := range notices {
+		for _, want := range []string{"`gatedSteps`", "`read_record`"} {
+			if !strings.Contains(paragraph, want) {
+				t.Errorf("the review-notice rule does not send the architect to %s for the step the notice leaves out: %s", want, paragraph)
+			}
+		}
+	}
+}
+
+// retiredGatePhrases are the words the step list replaced. A prompt that still carries one tells
+// its reader to look on the addressing line for a sentence the daemon no longer writes.
+var retiredGatePhrases = []string{"gates.design: root-issues", "gates.design: off", "Design gate policy",
+	"either design gate policy", "The gate records one document"}
+
+// The controller reads the same addressing line as a root architect, so its own prompt names the
+// steps sentence and carries none of the words that sentence replaced. Its text is read folded:
+// the retired phrase that outlived the first sweep was one broken across two lines.
+func TestTheControllerPartNamesTheGatedSteps(t *testing.T) {
+	composer, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	for _, headless := range []bool{true, false} {
+		paths, err := composer.ControllerPromptPaths(headless)
+		if err != nil {
+			t.Fatalf("ControllerPromptPaths(headless %t): %v", headless, err)
+		}
+		var text strings.Builder
+		for _, path := range paths {
+			body, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read %s: %v", path, err)
+			}
+			text.Write(body)
+		}
+		folded := foldWhitespace(text.String())
+		if !strings.Contains(folded, "`Design gate steps:`") {
+			t.Errorf("the composed controller prompt (headless %t) never names the `Design gate steps:` line it reads its steps off", headless)
+		}
+		for _, retired := range retiredGatePhrases {
+			if strings.Contains(folded, retired) {
+				t.Errorf("the composed controller prompt (headless %t) still says %q", headless, retired)
+			}
 		}
 	}
 }

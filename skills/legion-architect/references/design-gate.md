@@ -30,21 +30,35 @@ answer, Slack message or direct message of a `Filed for <person> at their reques
 evidence of a controller's `Filed for Legion from <role> on <issue>:` line
 ([The `Filed for` line](skill://legion-controller/references/finding-asks.md#the-filed-for-line)).
 
-## Which gate runs
+## Which steps are gated
 
-The approval step runs only when the `Design gate policy` sentence of your `Legion addressing` line
-says `gates.design: root-issues`. When it says `gates.design: off`, write the spec and register it
-with `register_gate` at its current version, with no approval step: do not request approval and do
-not wait for `design-approved`; the gate opens at registration. File every child of your
-decomposition before that registration, since the gate's opening starts the root's own first phase
-unless Dispatch shows an open child under it. A sub-architect on a child issue
-has no policy line and never runs the gate.
+The `Design gate steps` sentence of your `Legion addressing` line names the steps this deployment
+gates, in the order it gates them, each in backticks: ``Design gate steps: `spec`.``,
+``Design gate steps: `decisions`, `criteria`.``, or `Design gate steps: none.` A sub-architect on
+a child issue has no such sentence and never runs the gate.
+
+Each step is one document of the root issue, and the daemon keeps one gate record for each step:
+
+| Step | The document it records |
+| --- | --- |
+| `decisions` | the issue's decisions document (`decisions.md`) |
+| `criteria` | its Verification document (`verification.md`) |
+| `spec` | its primary document |
+
+The tree's work starts when every step the sentence names is open, so run the armed sequence below
+once for each of them, each on that step's own document. Under `Design gate steps: none.` write
+the spec and register it with `register_gate` at its current version, with no `step` and no
+approval step: do not request approval and do not wait for `design-approved`; the gate opens at
+registration. File every child of your decomposition before that registration, since the gate's
+opening starts the root's own first phase unless Dispatch shows an open child under it.
 
 ## The armed gate
 
-When the gate is armed, run this exact sequence before the tree's work starts, with every child of
-your decomposition filed before step 4, since the gate's opening starts the root's own first phase
-unless Dispatch shows an open child under it:
+Run this exact sequence for each gated step, before the tree's work starts, with every child of
+your decomposition filed before step 4, since the gate's opening starts the root's own first
+phase unless Dispatch shows an open child under it. One approval request covers the `criteria`
+and the `spec` step together (step 4), and each of them is registered on its own document
+(step 5); the `decisions` step is a request of its own.
 
 1. Extend the primary document in place:
 
@@ -74,22 +88,31 @@ unless Dispatch shows an open child under it:
    ```
 
    `--include-verification` asks for the spec and the Verification document in one request, each
-   at its own current settled version, and the human's answer records a review on each. An issue
-   with no `verification.md` is refused `NO_VERIFICATION_DOCUMENT`, and one whose Verification
-   document has no settled version `NO_VERSION`.
+   at its own current settled version, and the human's answer records a review on each: that one
+   request covers the `criteria` and the `spec` step together. An issue with no `verification.md`
+   is refused `NO_VERIFICATION_DOCUMENT`, and one whose Verification document has no settled
+   version `NO_VERSION`.
+
+   The `decisions` step is a request of its own, since `--include-verification` is for the issue's
+   spec alone and any other document is refused `NOT_SPEC_DOCUMENT`:
+
+   ```bash
+   dispatch request-approval --issue <root issue> --artifact decisions.md --summary '<what the human is approving> Reviews: <gap result>, <claim result>; <what they do not show>.'
+   ```
 
    `--summary` says in one to three sentences what the human is approving and nothing else (no
    commentary and no open question), then one sentence with both reviews' results and what they do
    not show, for example `Reviews: no open gap, 14 of 14 claims verified; neither shows that the
    design works once built.` The primary document is the default; the
    command prints `Approval requested for spec.md (document id <UUID>) at version <N> (ask <id>)`.
-5. Register the spec's version with the daemon:
+5. Register each gated step's document and version with the daemon, one call for each step:
 
    ```ts
    legion({
      op: "register_gate",
      issue: "<root issue>",
-     artifactId: "<UUID>", // the spec's document id, which the request printed
+     step: "<decisions|criteria|spec>", // the step this document is for
+     artifactId: "<UUID>", // that step's document id, which the request printed
      version: <N>, // the version the human is asked to approve
    })
    ```
@@ -99,10 +122,12 @@ unless Dispatch shows an open child under it:
    document's approval events by that id alone; the `legion` tool looks a slug or file name up in
    Dispatch and hands the daemon the id.
 
-   The gate records one document. A request naming the spec and the Verification document sends
-   an `artifact.approved` event for each, and the gate opens on the spec's alone, so register the
-   spec's id and version and never the Verification document's: a Verification-only version
-   closes and opens nothing. INFRA-175 is where that changes.
+   Each step records its own document, so register the spec's id and version under `step: "spec"`
+   and the Verification document's under `step: "criteria"`: the request that named both sent an
+   `artifact.approved` event for each, and each step opens on its own document's alone. Leave
+   `step` out only where your line names one step, which is the whole list a one-step deployment
+   gates. Register no step your line does not name: a step the deployment does not gate is
+   refused, and a record of it would hold nothing open.
 
 Facts about the request:
 
@@ -124,18 +149,38 @@ Facts about the request:
   latest version Dispatch holds for that document (the message names both), and a version Dispatch
   never wrote is no registration: the gate is as it was. Read the document's latest version, check
   it is the spec the human is asked to approve, and `register_gate` that version.
+- `register_gate` refused 400 `GATE_STEP_REQUIRED` means this deployment gates more than one step
+  and your call named none; the message names the steps it gates. Call again with `step` naming
+  the one that document is for.
+- `register_gate` refused 409 `GATE_STEP_NOT_CONFIGURED` means the `step` you named is not one
+  this deployment gates; the message names the steps it does gate. Register those and no other.
+- `register_gate` refused 409 `GATE_STEP_DOCUMENT_MISMATCH` means the document you named is not
+  that step's document of that issue; the message names the step and the document it records.
+  Register that step's own document, as the table in "Which steps are gated" says.
 
-Then end your turn. The registration hands the spec to the human: when nothing else of the tree is
-at work, the root returns its admission slot and waits on its design gate (`awaiting_person`), as a
-root question handed to the human does ("Every turn" in `skill://legion-architect/SKILL.md`). Stay
-live to read the human's comments and replies. Their approval or changes request delivers your next
-task, and so does a newer spec version once Dispatch shows the request back on your turn. While the
-root waits on a question instead, the human's approval or changes request of the spec answers that
-wait too, and the task says how the spec stands. Release no wave until a delivered wake shows
-`design-approved` on the root, or a task says its design gate is open: the daemon sends a root
-waiting on a person no `design-approved` notice, and "this resume is your design-approved wake" is
-that wake. On `design-changes-requested`: revise the spec as the human's reason asks, run step 3's
-two reviews on the new version, resolve every finding, request approval again and end your turn. A
+Each of those four refusals is given before anything is recorded, so the gate is as it was.
+
+A `design-approved` or `design-changes-requested` notice carries a version and a reason and names
+no step. Read your own issue record with the `legion` tool's `read_record` to see which step the
+review was of: `gatedSteps` carries one entry for each gated step, with its `artifactId`, its
+`currentVersion`, its `approvedVersion`, its `status` (`unregistered`, `waiting`, `approved` or
+`changes_requested`) and the `changesReason` of a step whose reviewer asked for changes. That
+list, and not the notice, says which steps are open and which still hold the tree's work.
+
+Then end your turn. The registrations hand those documents to the human: when nothing else of the
+tree is at work, the root returns its admission slot and waits on its design gate
+(`awaiting_person`), as a root question handed to the human does ("Every turn" in
+`skill://legion-architect/SKILL.md`). Stay live to read the human's comments and replies. Their
+approval or changes request delivers your next task, and so does a newer spec version once
+Dispatch shows the request back on your turn. While the root waits on a question instead, the
+human's approval or changes request of the spec answers that wait too, and the task says how the
+spec stands. Release no wave until every gated step is open: a delivered wake shows
+`design-approved` on the root, or a task says its design gate is open, and under more than one
+step `gatedSteps` in your record shows each one `approved`. The daemon sends a root waiting on a
+person no `design-approved` notice, and "this resume is your design-approved wake" is that wake.
+On `design-changes-requested`: revise the document that step records as the human's reason asks,
+run step 3's two reviews on the new version, resolve every finding, request approval again and
+end your turn. A
 `design-changes-requested` may name a version below the latest, or arrive after another for the
 same version: it is a request the human made that reached the daemon late, and no approval came
 after it. Each request arrives once. The gate is as the newest review left it; still read the
@@ -143,9 +188,11 @@ reason, and answer it in the spec if the latest version does not already.
 
 ## After approval
 
-Approval is pinned to the spec version: any new version closes the gate again, and no
-`design-approved`-type wake says so; you know from your own edit, or from the `artifact.version`
-event on your issue. The exceptions are the version a human's own answer to a decision block
+Each step's approval is pinned to the version of the document that step records: a new version of
+that document closes that step again, and no `design-approved`-type wake says so; you know from
+your own edit, or from the `artifact.version` event on your issue. One step closing holds the
+tree's work whatever the other steps stand at. The exceptions are the version a human's own
+answer to a decision block
 writes when that answer is the whole change since the version they approved, and a version whose
 text is exactly the text of the version they approved, with no decision block in it decided
 since, such as an accidental edit undone exactly: for either, Dispatch records an `approved`

@@ -39,6 +39,7 @@ interface FakeGithubRepo {
   readonly default_branch?: string;
   readonly commit_pulls?: Record<string, readonly number[]>;
   readonly branch_commits?: Record<string, readonly string[]>;
+  readonly commits?: readonly string[];
   readonly installation_missing?: boolean;
 }
 
@@ -48,7 +49,10 @@ interface FakeGithubRepo {
  * derives the branch commit from their content, so a re-seed with different
  * files moves the commit exactly like a push. `pulls` (keyed by number), and
  * `check_runs` and `workflow_runs` (keyed by commit sha), answer the issue
- * header's GitHub link. A deployed server
+ * header's GitHub link. `commits` names the commits the repository holds with
+ * nothing else attached to them, beside the commits those fields imply: a result
+ * is refused `400 RESULT_COMMIT_UNKNOWN` at any other 40-hex commit, so a row
+ * recording one names it here. A deployed server
  * (`PLAYWRIGHT_BASE_URL`) talks to no fake, so the test that seeds it there is
  * skipped at that point rather than failed. */
 export async function seedFakeGithub(repos: Record<string, FakeGithubRepo>): Promise<void> {
@@ -61,8 +65,10 @@ export async function seedFakeGithub(repos: Record<string, FakeGithubRepo>): Pro
 
 /** Makes the local delivery reconcile succeed against an empty acme/widgets history, so a pass that
  * runs inside a test leaves the freshness row Live rather than red with the reconcile's error. Only
- * a test that asserts the row says Live needs it. A deployed server has its own GitHub and is left
- * as it is. */
+ * a test that asserts the row says Live needs it. Its opposite is delivery.e2e.ts's "the freshness
+ * row shows a named reconcile failure" row, which seeds the same repository without `actions` from
+ * its own body, so that every pass inside its window fails with the one error it asserts. A
+ * deployed server has its own GitHub and is left as it is. */
 export async function seedDeliveryReconcileGithub(): Promise<void> {
   if (process.env.PLAYWRIGHT_BASE_URL) return;
   await putFakeGithubRepos({

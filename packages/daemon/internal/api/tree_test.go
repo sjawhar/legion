@@ -2,7 +2,6 @@ package api
 
 import (
 	"encoding/json"
-	"errors"
 	"slices"
 	"strings"
 	"testing"
@@ -48,10 +47,10 @@ func treesServed(t *testing.T, body []byte) (roots []string, carried bool, issue
 // whose claims record a contract below treeContract is served a state with no `admission.trees`
 // and no issue carrying `tree`, since that pod's plugin reads the state with a strict schema that
 // refuses the whole body for either key, and refuses `trees` emptied as surely as filled. A pod
-// whose claims cannot be read is served the body every reader since 45 takes, which is that one.
-// A pod at this contract, a pod whose claims record no contract at all, and a caller the daemon
-// cannot place in a pod — the operator's `legion state`, which names the live trees — are served
-// both keys.
+// at this contract, a pod whose claims record no contract at all, and a caller the daemon cannot
+// place in a pod — the operator's `legion state`, which names the live trees — are served both
+// keys. A pod whose claims cannot be read is no case here: the claims are the state's own
+// snapshot (stateFor), so a read that fails refuses the whole request before this is asked.
 func TestTheStateRouteServesAPodItsPluginContractsTrees(t *testing.T) {
 	full := stateFrom(t, populatedState(t), "192.0.2.1:41000", podClaims(treeContract-1))
 	wantRoots, wantCarried, wantIssues := treesServed(t, full)
@@ -62,19 +61,18 @@ func TestTheStateRouteServesAPodItsPluginContractsTrees(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		remote string
-		sup    Supervisor
+		claims []supervise.Claim
 		trees  bool
 	}{
-		{name: "a pod whose plugin is the contract before this one", remote: statePodAddr + ":41000", sup: podClaims(treeContract - 1)},
-		{name: "a pod below PodUpdateContract, below every one of them", remote: statePodAddr + ":41000", sup: podClaims(supervise.PodUpdateContract - 1)},
-		{name: "the same pod asking over IPv6", remote: "[::ffff:" + statePodAddr + "]:41000", sup: podClaims(treeContract - 1)},
-		{name: "a pod whose claims cannot be read", remote: statePodAddr + ":41000", sup: claimsOnly{err: errors.New("the claims could not be read")}},
-		{name: "a pod at this contract", remote: statePodAddr + ":41000", sup: podClaims(DaemonAPIVersion), trees: true},
-		{name: "a pod whose claims record no contract", remote: statePodAddr + ":41000", sup: podClaims(0), trees: true},
-		{name: "a caller in no pod", remote: "192.0.2.1:41000", sup: podClaims(treeContract - 1), trees: true},
+		{name: "a pod whose plugin is the contract before this one", remote: statePodAddr + ":41000", claims: podClaims(treeContract - 1)},
+		{name: "a pod below PodUpdateContract, below every one of them", remote: statePodAddr + ":41000", claims: podClaims(supervise.PodUpdateContract - 1)},
+		{name: "the same pod asking over IPv6", remote: "[::ffff:" + statePodAddr + "]:41000", claims: podClaims(treeContract - 1)},
+		{name: "a pod at this contract", remote: statePodAddr + ":41000", claims: podClaims(DaemonAPIVersion), trees: true},
+		{name: "a pod whose claims record no contract", remote: statePodAddr + ":41000", claims: podClaims(0), trees: true},
+		{name: "a caller in no pod", remote: "192.0.2.1:41000", claims: podClaims(treeContract - 1), trees: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			body := stateFrom(t, populatedState(t), tc.remote, tc.sup)
+			body := stateFrom(t, populatedState(t), tc.remote, tc.claims)
 			roots, carried, issues := treesServed(t, body)
 
 			if !tc.trees {

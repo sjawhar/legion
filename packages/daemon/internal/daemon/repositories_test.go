@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -407,6 +408,56 @@ func TestABootWhoseEveryInstallationReadFailsServesNoneAndLogsOneError(t *testin
 	}
 }
 
+// commit_issue_trailer_repos only selects among the project's repositories, which are Dispatch's
+// mapping, so the boot's mapping load says once of each configured name the mapping does not hold
+// that it stamps nothing, naming the name and the project, and says nothing of a name the project
+// serves, whatever the case it is configured in. It reads the mapping's own equivalence, the one
+// the stamping decision reads (specs.issueTrailer), so a configured name the mapping holds only
+// under the other name of a configured rename is served, stamps, and is not warned about. It
+// refuses no boot and widens nothing: the served
+// set is Dispatch's mapping either way, and `legion start --check-config` reads no Dispatch at all,
+// so the file alone cannot decide it.
+func TestTheBootWarnsOfACommitTrailerRepositoryTheProjectDoesNotServe(t *testing.T) {
+	const unserved = "commit_issue_trailer_repos names a repository this project does not serve"
+	for _, tc := range []struct {
+		name     string
+		repos    []ghrepo.Repository
+		renames  ghrepo.Renames
+		warnings int
+		named    string
+	}{
+		{name: "a name the mapping does not hold", repos: []ghrepo.Repository{ghrepo.MustParse("acme/gadgets")},
+			warnings: 1, named: "repository=acme/gadgets project=LEGION"},
+		{name: "a served name", repos: []ghrepo.Repository{ghrepo.MustParse("acme/widgets")}},
+		{name: "a served name in another case", repos: []ghrepo.Repository{ghrepo.MustParse("Acme/Widgets")}},
+		{name: "the name a configured rename moved the served repository away from",
+			repos:   []ghrepo.Repository{ghrepo.MustParse("acme/widgets-legacy")},
+			renames: ghrepo.MustRenames(ghrepo.MustRename("acme/widgets-legacy", "acme/widgets"))},
+		{name: "one of each", repos: []ghrepo.Repository{ghrepo.MustParse("acme/widgets"), ghrepo.MustParse("acme/gadgets")},
+			warnings: 1, named: "repository=acme/gadgets project=LEGION"},
+		{name: "none configured"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var logged bytes.Buffer
+			w := &workflowRuntime{dispatch: &mappingDispatch{mappings: []dispatch.RepoProject{{Repo: "acme/widgets", Project: "LEGION", Default: true}, {Repo: "zeta/tools", Project: "LEGION"}}},
+				dispatchProject: "LEGION", installs: &installations{}, commitIssueTrailerRepos: tc.repos,
+				repositories: newRepositories("LEGION", tc.renames), log: slog.New(slog.NewTextHandler(&logged, nil))}
+			if err := w.loadMapping(context.Background()); err != nil {
+				t.Fatalf("loadMapping = %v, want the boot to go on", err)
+			}
+			if got := repositoryNames(w.repositories.Accepted()); !slices.Equal(got, []string{"acme/widgets", "zeta/tools"}) {
+				t.Fatalf("served %v, want Dispatch's mapping alone: the key selects, it never widens", got)
+			}
+			if got := strings.Count(logged.String(), unserved); got != tc.warnings {
+				t.Fatalf("the boot says %d times that a configured repository is not served, want %d:\n%s", got, tc.warnings, logged.String())
+			}
+			if tc.named != "" && !strings.Contains(logged.String(), tc.named) {
+				t.Fatalf("the boot's line does not name %q:\n%s", tc.named, logged.String())
+			}
+		})
+	}
+}
+
 // webhookDispatch is a Dispatch over HTTP, read through the real client, that maps acme/widgets
 // (its default) and zeta/tools to LEGION and answers its webhook App check for each repository
 // installed names, by "owner/name", or with the status and body failing names for it. Without
@@ -632,10 +683,10 @@ func TestAnUnrecordedIssueWorksTheProjectsDefaultRepository(t *testing.T) {
 	}
 }
 
-// A tmux pane adopted after a restart holds its write token for the owner of the repository its
-// claim's issue works, the owner its launch was minted for: its record's repository's, or, for an
-// issue the workflow does not record, the project's default's. A token no claim holds is refused.
-func TestAnAdoptedPanesWriteOwnerIsTheOwnerItsIssueWorks(t *testing.T) {
+// A tmux pane adopted after a restart holds its write token for the repository its claim's issue
+// works, the one its launch was minted for: its record's, or, for an issue the workflow does not
+// record, the project's default. A token no claim holds is refused.
+func TestAnAdoptedPanesRepositoryIsTheOneItsIssueWorks(t *testing.T) {
 	ctx := context.Background()
 	github := newNamedGitHub(t, map[string]string{"acme/widgets": "Acme/Widgets@main"})
 	w := &workflowRuntime{pool: isolatedOutboxPool(t), records: record.NewStore(), dispatchProject: "LEGION", repositories: newRepositories("LEGION", ghrepo.Renames{}),
@@ -662,14 +713,14 @@ func TestAnAdoptedPanesWriteOwnerIsTheOwnerItsIssueWorks(t *testing.T) {
 		}
 		return issue, nil
 	}
-	owner := claimRepositoryOwner(issueOf, w.issueRepository)
-	want := map[string]string{"LEGION-2": "zeta", "LEGION-9": "Acme"}
+	repository := claimRepository(issueOf, w.issueRepository)
+	want := map[string]string{"LEGION-2": "zeta/tools", "LEGION-9": "Acme/Widgets"}
 	for token, issue := range issues {
-		if got, err := owner(ctx, token); err != nil || got != want[issue] {
-			t.Errorf("the write owner of %s = %q, %v; want %q", token, got, err, want[issue])
+		if got, err := repository(ctx, token); err != nil || got.String() != want[issue] {
+			t.Errorf("the repository of %s = %q, %v; want %q", token, got, err, want[issue])
 		}
 	}
-	if got, err := owner(ctx, claim.ControllerToken("legion")); err == nil {
-		t.Errorf("the write owner of a token no claim holds = %q, want a refusal", got)
+	if got, err := repository(ctx, claim.ControllerToken("legion")); err == nil {
+		t.Errorf("the repository of a token no claim holds = %q, want a refusal", got)
 	}
 }

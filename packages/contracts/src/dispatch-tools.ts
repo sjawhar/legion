@@ -1351,7 +1351,11 @@ export const dispatchToolSpecs = [
       "(dispatch://KEY/artifact/verification-md#b-<id>); 409 CHECK_AMBIGUOUS names them, and an " +
       "id no Verification document of the issue or of an issue above it holds is 400 " +
       "UNKNOWN_CHECK. A pass counting any failed, skipped or excluded case contradicts itself " +
-      "and is 400 RESULT_CONTRADICTS. The result is recorded against the check's own issue, so " +
+      "and is 400 RESULT_CONTRADICTS. Dispatch asks GitHub whether the repository of the " +
+      "check's issue holds the commit: one it does not hold is 400 RESULT_COMMIT_UNKNOWN, " +
+      "naming the commit and that owner/repo, so record the result after the commit is pushed. " +
+      "A repository Dispatch cannot read records the result as before. " +
+      "The result is recorded against the check's own issue, so " +
       "a child's run of a parent's check appears under that check. A closed issue takes a " +
       "result only for a check whose when is after_merge or default_branch — the production " +
       "check after the merge — and refuses every other one with 409 ISSUE_CLOSED, as it refuses " +
@@ -1850,9 +1854,13 @@ export const dispatchToolSpecs = [
       "List what the Inbox of the person you act for shows, read with your own credential. " +
       "Each heading carries its count, then its rows: Needs you (their open asks waiting on a " +
       "person and not inside a snooze, plus the credential requests they may decide), Waiting on " +
-      "agents, Later (the asks they snoozed) and Credential requests. An ask's line names its " +
+      "agents, Later (the asks they snoozed), Unread threads (the threads they wrote in that " +
+      "somebody else has written in since, and the messages they sent an agent session that it " +
+      "answered) and Credential requests. An ask's line names its " +
       "issue key or document slug, its priority, its kind, the first 80 characters of the " +
-      "question and its dispatch:// reference; a credential request's line names its kind, its " +
+      "question and its dispatch:// reference; a thread's line names its issue key, document " +
+      "slug or session, its kind, the first 80 characters of its subject, who wrote the newest " +
+      "reply, how long ago and where to read it; a credential request's line names its kind, its " +
       "identifiers, when it was requested, the sessions it names and the page where it is " +
       "decided. It needs a credential holding the person scope, and one without it is refused " +
       "403 OAUTH_SCOPE_REQUIRED, naming the scope. This is the person's Dispatch Inbox, and not " +

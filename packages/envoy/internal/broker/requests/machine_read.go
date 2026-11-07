@@ -257,7 +257,8 @@ func (m *Machine) endGrant(ctx context.Context, grantID string, reason error) er
 // release is one granted name's value. A stored secret reads its frozen source and ignores the
 // policy metadata and narrowing. A kind source reads its frozen store source (on Secret
 // Manager its deletion verdict is cached for 30 s, as for every secret), then passes that value
-// and the name, tier and GitHub owners from the policy snapshot Values checked to the minter.
+// and the name, tier, GitHub owners and Google OAuth scopes from the policy snapshot Values
+// checked to the minter.
 // An Azure login also requires this name's grant decision to be approval, never automatic.
 // Only the github-app minter reads narrowing. A minter's refusal of the narrowing itself
 // (secrets.ErrMintNarrowingRefused) is returned as it is,
@@ -284,7 +285,8 @@ func (m *Machine) release(ctx context.Context, g requestedSecret, served policy.
 	}
 	token, err := mint(ctx, secrets.MintRequest{
 		Name: g.name, HumanTier: served.Tier == policy.TierHuman, Value: value,
-		GitHubOwners: served.GitHubOwnerLogins(), GitHubNarrowing: narrowing,
+		GitHubOwners: served.GitHubOwnerLogins(), GoogleScopes: served.ScopeURLs(),
+		GitHubNarrowing: narrowing,
 	})
 	if errors.Is(err, secrets.ErrMintNarrowingRefused) {
 		return "", err
@@ -923,18 +925,34 @@ type ApproverGrant struct {
 // GrantsForApprover lists every live grant approver may revoke, newest first: each grant of a
 // session approver operates, approved or automatic, and each grant approver approved on anyone's
 // session.
+//
+// It also lists every live grant that is on no other person's page at all: one a service's machine
+// login holds, with no approver because the policy gave it without asking and no operator because
+// a pod acts for no person (requests.Machine.requester). Without this a pod could take a
+// shared agent-tier secret and nobody would see it. Every signed-in person sees these, as every
+// signed-in person already lists and revokes the service login behind them, which no person
+// approved (enroll.Service.LiveCredentials, record.MayDecide). The sentinel record.AnyoneApprover
+// and an empty login are no signed-in person and list nothing. No row that already belongs to
+// somebody moves: a grant with an approver, or on a person's own session, is listed for that
+// person and no one else, exactly as before.
+//
 // The enrollment each grant is listed under is joined on the grants row's own enrollment_id, so a
 // grant that followed its session to another box is listed once, naming the box the session runs
 // on now.
 func (m *Machine) GrantsForApprover(ctx context.Context, approver string) ([]ApproverGrant, error) {
 	login := record.CanonicalLogin(approver)
+	if login == "" || login == record.AnyoneApprover {
+		return nil, nil
+	}
 	rows, err := m.Store.Pool.Query(ctx, `select g.id, r.record_id, e.kind, e.runtime_id, coalesce(e.operator,''), e.slot, coalesce(g.approver,''), g.expires_at, g.created_at,
 		coalesce((select array_agg(rs.name order by rs.name) from request_secrets rs where rs.request_id=r.id and rs.decision<>'deny'), '{}')
 		from grants g
 		join requests r on r.id=g.request_id
 		join enrollments e on e.id=g.enrollment_id
+		join launcher_credentials c on c.id=e.launcher_credential_id
 		where g.revoked_at is null and `+grantUnexpired("g")+`
-		and (g.approver=$1 or e.operator=$1)
+		and (g.approver=$1 or e.operator=$1
+			or (g.approver is null and e.operator is null and c.service is not null))
 		order by g.created_at desc`, login)
 	if err != nil {
 		return nil, err
