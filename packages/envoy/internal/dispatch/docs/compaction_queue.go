@@ -42,10 +42,11 @@ var defaultCompactionTiming = compactionTiming{firstCheck: compactTail, backoff:
 
 // noteStoredUpdates tells the document's compaction queue that the room's rows through head are
 // stored. Every committed append and every load of a document notes its room here, and these are
-// all of them: an append on its own transaction (PgVersioned.appendUpdate), a room's own flush
-// (PgVersioned.AppendRoomFlush), a joined transaction's live writes and flushes once it commits
-// (Ledger.commit, through noteAppended), a settlement's and the block-id backfill's flushes and
-// repairs once their transaction commits (commitSettlement), and a load once its read has ended
+// all of them: a room's batch and an append of updates a caller hands the store, each on its own
+// transaction (PgVersioned.appendRoomTx, for AppendRoomFlush and AppendUpdatesWithCredit), a
+// joined transaction's live writes and flushes once it commits (Ledger.commit, through
+// noteAppended), a settlement's and the block-id backfill's flushes and repairs once their
+// transaction commits (commitSettlement), and a load once its read has ended
 // (PgVersioned.loadStored). It queues the room for a check unless the queue already holds it, and
 // has a room whose step is in flight queued again once that step ends (compactionQueue.note); it
 // takes the queue's lock only for that, and never waits for a check or a compaction: every caller

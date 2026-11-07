@@ -13,12 +13,13 @@
     "hooks/**",
     "legion/**",
     "scripts/**",
+    "skills/**",
     "src/**",
     "README.md",
     "AGENTS.md"
   ],
   "legion": {
-    "daemonApiVersion": 49
+    "daemonApiVersion": 55
   },
   "repository": {
     "type": "git",
@@ -26,25 +27,23 @@
   },
   "scripts": {
     "channel": "bun bin/envoy-channel.ts",
-    "build": "bun scripts/build.ts",
-    "check-dist": "bun scripts/build.ts --check",
     "verify-build": "bash scripts/verify-build.sh",
+    "prepack": "bash scripts/pack-skills.sh",
+    "postpack": "bash scripts/pack-skills.sh --restore",
     "typecheck": "bunx tsc --noEmit",
     "test": "bun test --timeout=60000",
     "lint": "bunx biome check src/ hooks/ scripts/"
   },
-  "dependencies": {
+  "devDependencies": {
+    "@biomejs/biome": "^2.3.14",
     "@legion/contracts": "workspace:*",
     "@legion/envoy-client": "workspace:*",
     "@legion/pi-shared": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.30.0",
+    "bun-types": "latest",
     "ky": "^2.0.2",
     "nats": "^2.29.2",
+    "typescript": "^5.3.0",
     "zod": "4.3.6"
-  },
-  "devDependencies": {
-    "@biomejs/biome": "^2.3.14",
-    "bun-types": "latest",
-    "typescript": "^5.3.0"
   }
 }

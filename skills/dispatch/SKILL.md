@@ -10,6 +10,7 @@ Dispatch is a record for the people who decide, never a log of your work.
 - Use the `dispatch` command; the HTTP API only for what no command does. `dispatch <command> --help` gives its rules and an example.
 - Put long text on stdin: `--<field>-file -` with a quoted here-document (`<<'EOF'`); give object and list fields as JSON.
 - Exit 1 is a refusal, 2 a usage error. A refusal lists each problem: fix them all, then call once.
+- A Dispatch command hard to use, or storing or losing something wrongly, is a defect to report, not work around: open an issue in the owning project's code and tell that project's controller; a Legion role tells its architect (`skill://legion-worker/references/findings.md`).
 
 ## Asks and ask blocks
 
@@ -45,7 +46,7 @@ Outside Legion, claim your issue (`dispatch claim`) and move it and your childre
 
 `unresponsive` holders keep their claims 20 minutes (`skill://envoy`).
 
-A claim, or `dispatch issue-update --route session:<your id>` (`--route ''` on release), brings a person's answers, comments and messages; for agents' activity, `envoy_subscribe notifications.dispatch.issue.<KEY>.>`, which shows no quiet event.
+A claim (or `dispatch issue-update --route session:<your id>`, `--route ''` to release) brings a person's answers, comments and messages; `envoy_subscribe notifications.dispatch.issue.<KEY>.>` adds agents' activity, no quiet event.
 
 ## Close what you opened
 
@@ -59,7 +60,7 @@ A claim, or `dispatch issue-update --route session:<your id>` (`--route ''` on r
 
 ## Architecture components
 
-Attach each architectural issue to its components (`--components-json`), the root before decomposing it. Change code and `.dispatch/architecture/<id>.md` in the same review.
+Attach each architectural issue to its components (`--components-json`), the root first; change code and `.dispatch/architecture/<id>.md` together.
 
 ## References
 
@@ -81,7 +82,7 @@ dispatch://PROJECT/artifact/<slug>/ask/<id>
 dispatch://PROJECT/artifact/<slug>/comment/<id>#b-<block>[@vN]
 ```
 
-A bare id, filename or path is not a reference, and outside Dispatch neither is `dispatch://`: give the `https://` link `dispatch` printed. Write each id whole.
+A bare id or path, or `dispatch://` outside Dispatch, is no link: give the `https://` one. Write ids whole.
 
 ## Setup and the HTTP API
 

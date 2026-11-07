@@ -139,6 +139,44 @@ async function waitForReads(pending: Map<Request, number>): Promise<void> {
   await expect.poll(() => pending.size).toBe(0);
 }
 
+/** What a recorded read path carries in place of the issue's key, so that two pages, each
+ *  reading an issue of its own, compare as lists. */
+const ISSUE_PATH = "/api/v1/issues/<issue>";
+
+/** The reads an issue's activity tab makes for itself at its first load. A window that counts
+ *  what an event costs a page opens only after these have gone out, since they are the page's
+ *  own lazy first reads and not the event's doing. */
+const FIRST_ISSUE_READS = [`${ISSUE_PATH}/comments`, `${ISSUE_PATH}/asks`, `${ISSUE_PATH}/events`];
+
+/** Every read the page makes of the one issue `key` names, in order, as the request's pathname
+ *  with that key replaced by `<issue>`. Reads of anything else are left out: the agent list, the
+ *  inbox and the reader's own state are not what a comment on this issue invalidates, so a
+ *  periodic one of those landing inside one page's window and outside another's would make two
+ *  equal pages count differently. The query string is dropped because it names the page's own
+ *  issue's rows - an incremental event read asks for the ids it is missing - which differ
+ *  between two pages by construction and would read as different reads. */
+function trackIssueReads(page: Page, key: string): string[] {
+  const reads: string[] = [];
+  const prefix = `/api/v1/issues/${key}`;
+  page.on("request", (request) => {
+    const { pathname } = new URL(request.url());
+    if (pathname === prefix || pathname.startsWith(`${prefix}/`)) {
+      reads.push(`${ISSUE_PATH}${pathname.slice(prefix.length)}`);
+    }
+  });
+  return reads;
+}
+
+/** Leaves the page in the state a counting window needs: its own first reads of the issue have
+ *  gone out, and nothing it started is still in flight. */
+async function untilIssueReadsSettle(
+  reads: readonly string[],
+  pending: Map<Request, number>
+): Promise<void> {
+  for (const read of FIRST_ISSUE_READS) await expect.poll(() => reads).toContain(read);
+  await waitForReads(pending);
+}
+
 /** Every document the page fetched for itself, in order: its first load and every reload after
  *  it. The `load` event is not that count - Playwright's Firefox fires one for the page's initial
  *  `about:blank`, Chromium none - while a reload is a navigation request of the main frame in
@@ -160,7 +198,8 @@ test.beforeEach(async () => {
 // SLOW(>=2s): one socket for every live view is read over three live views, so the row loads and
 // draws all three in the one tab - the project's board, the session's live thread and the
 // delivery timeline - and each is a page's worth of rendering the claim cannot do without.
-test("a tab holds one live socket for every live view @phone", async ({ browser }) => {
+// @webkit @firefox: the one-socket invariant, which must hold in every engine people read in.
+test("a tab holds one live socket for every live view @webkit @firefox", async ({ browser }) => {
   await createProject({ key: "CORE", name: "Core" });
   await createIssue({ project: "CORE", title: "Board issue" });
   await seedDeliveryFixture();
@@ -222,7 +261,7 @@ const SILENCE_CHECK_MS = 15_000;
 // SLOW(>=2s): real idling is the measurement. The ages below are read in this process, in real
 // wall time, and a connection Dispatch holds open ages whatever the page's timers believe, so no
 // page clock can stand in for the idle itself.
-test("no request to Dispatch stays open while the page idles @phone", async ({ browser }) => {
+test("no request to Dispatch stays open while the page idles", async ({ browser }) => {
   // The 5 s idle and three page loads are all this row spends.
   test.setTimeout(40_000);
   await createProject({ key: "CORE", name: "Core" });
@@ -272,12 +311,28 @@ test("no request to Dispatch stays open while the page idles @phone", async ({ b
 });
 
 // The page rotates before it has seen any event, so its event feed resumes from the sign-in
-// check's head: the change committed while the next socket waits arrives on it, and the rotation
-// costs no request beyond what that change costs a page with no rotation (the control).
+// check's head: the change committed while the next socket waits arrives on it, and the
+// rotation costs no read of the issue beyond what that change costs a page with no rotation
+// (the control). Reads of the issue are what the title claims and all this row counts; a
+// request to any other route is outside both.
+// Each window counts that page's reads of its own issue, by path, because a count of every
+// `/api/` request counted two different things: in CI job 127925489549 the control's window held
+// its tab's lazy first reads of `/comments` and `/asks?state=all` and a periodic
+// `/api/v1/agents`, which no comment event invalidates, while the rotating page had made those
+// reads long before its own window opened - 5 reads against 4, and job 127873213156 counted 6
+// against 4 the same way. So both windows now open only once that page's own first reads have
+// gone out and settled, and the two lists are compared read for read.
 // SLOW(>=2s): the two quiet windows below, one on the control page and one on the rotating
-// page, are what "no extra request" is counted over. A count of what a page did not do over a
-// window is that window's own real time, and the two must stay equal for the counts to compare.
-test("a rotation loses no event and makes no extra request @phone", async ({ browser }) => {
+// page, are what "no extra read of the issue" is counted over. A count of what a page did not
+// do over a window is that window's own real time, and the two must stay equal for the counts
+// to compare.
+// Both tags in the title are what select this row: `@phone` puts it in `iphone`, and `@firefox`
+// in `firefox`, which takes rows by title tag rather than by file name since
+// cybermonklabs/legion#2866. The two occurrences this change fixes were seen in exactly those
+// two projects, so the row must keep both.
+test("a rotation loses no event and makes no extra read of the issue @phone @firefox", async ({
+  browser,
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const baselineIssue = await createIssue({ project: "CORE", title: "Comment request control" });
 
@@ -285,20 +340,16 @@ test("a rotation loses no event and makes no extra request @phone", async ({ bro
   try {
     const control = await alice.newPage();
     const controlPending = trackApiRequests(control);
+    const controlReads = trackIssueReads(control, baselineIssue.key);
     const controlSocket = control.waitForEvent("websocket", isLiveSocket);
     await control.goto(`/issues/${baselineIssue.key}/activity`);
     await expect(control.getByText("Comment request control", { exact: true })).toBeVisible();
     await controlSocket;
-    await waitForReads(controlPending);
+    // The rotating page's window opens long after its first reads; this leaves the control page
+    // in that same state, so that neither window holds a read the page would have made anyway.
+    await untilIssueReadsSettle(controlReads, controlPending);
 
-    const controlRequests: string[] = [];
-    let countControlRequests = false;
-    control.on("request", (request) => {
-      if (countControlRequests && new URL(request.url()).pathname.startsWith("/api/")) {
-        controlRequests.push(request.url());
-      }
-    });
-    countControlRequests = true;
+    const controlWindow = controlReads.length;
     const controlComment = await createComment(
       baselineIssue.key,
       { body: "Control comment request count" },
@@ -310,13 +361,13 @@ test("a rotation loses no event and makes no extra request @phone", async ({ bro
     // A read an event invalidates goes out in the frame after that event, so a window that
     // starts once the comment's link is on screen is a settle rather than a guess.
     await control.waitForTimeout(1_500);
-    countControlRequests = false;
-    const expectedRequestCount = controlRequests.length;
+    const expectedReads = controlReads.slice(controlWindow).sort();
     await control.close();
 
     const issue = await createIssue({ project: "CORE", title: "Rotation target" });
     const page = await alice.newPage();
     const pending = trackApiRequests(page);
+    const reads = trackIssueReads(page, issue.key);
     const sockets = watchLiveSockets(page);
     let holdReconnect = false;
     let held: WebSocketRoute | undefined;
@@ -339,7 +390,7 @@ test("a rotation loses no event and makes no extra request @phone", async ({ bro
     );
     await first;
     await expect.poll(() => sockets.received.includes("events_start")).toBe(true);
-    await waitForReads(pending);
+    await untilIssueReadsSettle(reads, pending);
 
     expect(sockets.received).not.toContain("event");
     holdReconnect = true;
@@ -348,24 +399,18 @@ test("a rotation loses no event and makes no extra request @phone", async ({ bro
     const comment = await createComment(issue.key, { body: "Committed while rotation waits" }, bob);
     await expect(page.getByTestId("connection-pill")).toHaveCount(0);
 
-    const apiRequests: string[] = [];
-    let countRequests = true;
-    page.on("request", (request) => {
-      if (countRequests && new URL(request.url()).pathname.startsWith("/api/")) {
-        apiRequests.push(request.url());
-      }
-    });
     if (held === undefined) throw new Error("the reopened live socket was not held");
+    const rotationWindow = reads.length;
     reconnectReleased.resolve();
     await expect.poll(() => sockets.received).toContain("event");
     await expect(
       page.locator(`a[href="/issues/${issue.key}/comments/${comment.id}"]`)
     ).toBeVisible();
     await expect(page.getByTestId("connection-pill")).toHaveCount(0);
-    // The control's window, to the millisecond: the two counts are of equal quiet.
+    // The control's window, to the millisecond: the two lists are of equal quiet.
     await page.waitForTimeout(1_500);
-    countRequests = false;
-    expect(apiRequests).toHaveLength(expectedRequestCount);
+    // Read for read, sorted, so a failure names the read that differs rather than a count.
+    expect(reads.slice(rotationWindow).sort()).toEqual(expectedReads);
   } finally {
     await alice.close();
   }
@@ -373,9 +418,7 @@ test("a rotation loses no event and makes no extra request @phone", async ({ bro
 
 // SLOW(>=2s): a cold load in WebKit and in Firefox with the page's first live socket held open
 // through it, which each engine then has to replay the missed change on.
-test("a change committed while the page loads is shown without a reload @phone", async ({
-  browser,
-}) => {
+test("a change committed while the page loads is shown without a reload", async ({ browser }) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Before the page load" });
 
@@ -412,9 +455,7 @@ test("a change committed while the page loads is shown without a reload @phone",
   }
 });
 
-test("a first live socket opening without a change makes no API request @phone", async ({
-  browser,
-}) => {
+test("a first live socket opening without a change makes no API request", async ({ browser }) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Quiet page load" });
 
@@ -459,7 +500,7 @@ test("a first live socket opening without a change makes no API request @phone",
   }
 });
 
-test("an agent live view survives a rotation in place @phone", async ({ browser }) => {
+test("an agent live view survives a rotation in place", async ({ browser }) => {
   await setLiveSessions([agent]);
   await publishAgentStreamFrame(agent.session_id, replay(agent.session_id), "replay");
 

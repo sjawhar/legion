@@ -1,0 +1,8 @@
+kind: Changed
+body: |-
+  Daemon API contract 47.
+  `admission.active` and `admission.waiting` list the issues that hold an admission slot and the
+  issues in the waiting line, children as well as roots, because the cap now counts issues in
+  progress rather than trees.
+  A new `admission.trees` names the root of every live tree, so a reader finds a running tree that
+  holds no slot, and each issue carries `tree`, the root of its own.

@@ -11,27 +11,21 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
-// booted is the daemon's boot (intake.DaemonBooted). It does four things, in this order.
+// booted is the daemon's boot (intake.DaemonBooted). It does three things, in this order.
 //
 // First, the upgrade's sweep (sweepMerged): an issue of this project that awaits its merge on a
 // pull request already merged is one the migration moved out of production_check, and the merge
 // that would have closed it will never come again, so the boot closes it as the merge would have
-// (closeMerged) — unless it is a root with a child still in the workflow, which stays where it is
-// and closes when its last child leaves (leave's closeAwaitingRoot), so the deploy suspends no
-// running child under a mass of lingers. The check such a close opens has no merge commit, which
-// its first compare fills from GitHub.
+// (closeMerged) — unless an issue beneath it is still in the workflow, which leaves it where it
+// is to close when the last of them leaves (leave's closeAwaitingMerge), so the deploy suspends no
+// running child under a mass of lingers.
 //
-// Second, a release build's boot compares its own build, and the build Dispatch reported to it,
-// against the open checks of the repository the daemon is built from (compareBuilds): one
-// check_compare row per check, whose GitHub read wakes the check when the build carries its
-// merge. A boot with no revision — every non-release build — compares nothing.
-//
-// Third, the status repair (correctStatuses): every issue the daemon works whose recorded
+// Second, the status repair (correctStatuses): every issue the daemon works whose recorded
 // Dispatch status is not the status of its phase gets the Dispatch status write that corrects it,
 // so a write the daemon lost before the restart is put back by it. The controller tick runs the
 // same repair, so no later loss waits for a restart.
 //
-// Fourth, the resume by rule: every claim of this project that owns its issue's current phase and
+// Third, the resume by rule: every claim of this project that owns its issue's current phase and
 // that the daemon or its own exit suspended (supervise's ByRule) is started again. Nothing else
 // would start it: the phase's start ran before the restart, a re-admission's starts are queued
 // only when a tree is re-admitted, and the next start is the next phase's. This is the one trigger
@@ -42,41 +36,46 @@ import (
 // bundled work back is the next wake for its role, not a daemon restart, so a boot that started it
 // would raise a pod nothing asked for.
 //
-// The phase's owner is the role that works the issue's phase (RoleFor) on an issue in the workflow
-// whose tree is admitted — its root holds a slot — and does not linger: a lingering tree's claims
-// stay suspended until re-admission runs the tree again. Accepting's owner is the tree's
-// architect, which admission starts with the tree, so no issue there is given one. Each owner is
-// given the start admission gives a re-admitted tree's mid-phase child, through the outbox's start
-// like every other start: its claim resumed by rule, and the task that carries its phase on
-// (ResumePhaseTask, the merger's with the head its round approved), which the outbox does not
-// deliver to a claim still holding its phase's task. A role a start already covers (StartFor) gets
-// no second. The sweep runs first so the resume reads the trees it closed as lingering.
-func (e *Engine) booted(ctx context.Context, tx pgx.Tx, fact intake.DaemonBooted) (intake.Result, error) {
+// The phase's owner is the role that works the issue's phase (RoleFor) on an issue in the
+// workflow whose tree is running — this generation of it, by the one rule every reader of that
+// question asks (record.RunningRoots, record.TreeRuns): its lifecycle stands open under the
+// workflow, its root does not linger, and its root is not itself waiting in the line for the
+// tree to be opened. A lingering tree's claims stay suspended until re-admission runs the tree
+// again, and a queued root's members are started by the promotion that opens the tree, which
+// gives each mid-phase member its own start (admit's startMidPhaseMembers): a start queued here
+// instead would re-point the claim at a tree with no lifecycle, and would put the member in the
+// line's first part ahead of its own root. It is the lifecycle rather than the root's slot
+// because a slot now counts one issue at work, and a running tree holds none of its own while
+// its issues wait in the line.
+// Accepting's owner is the tree's architect, which admission starts with the tree, so no issue
+// there is given one. Each owner is given the start admission gives a re-admitted tree's
+// mid-phase child, through the outbox's start like every other start (StartOrOwe): its claim is
+// resumed by rule at once, and the task that carries its phase on (ResumePhaseTask, the merger's
+// with the head its round approved) waits for the issue's slot; the outbox does not deliver it
+// to a claim still holding its phase's task. A role a start already covers (StartFor) gets no
+// second. The sweep runs first so the resume reads the trees it closed as lingering.
+func (e *Engine) booted(ctx context.Context, tx pgx.Tx, _ intake.DaemonBooted) (intake.Result, error) {
 	if err := e.sweepMerged(ctx, tx); err != nil {
 		return intake.Result{}, err
-	}
-	if fact.Revision != "" {
-		if err := e.compareBuilds(ctx, tx, wakeDaemonBoot, fact.Revision); err != nil {
-			return intake.Result{}, err
-		}
-		// Dispatch and the daemon are built from one repository, so a deploy that ships them
-		// together reports one commit twice: the daemon's own compare already covers it.
-		if fact.DispatchBuild != fact.Revision {
-			if err := e.compareBuilds(ctx, tx, wakeDispatchBuild, fact.DispatchBuild); err != nil {
-				return intake.Result{}, err
-			}
-		}
 	}
 	issues, err := e.store.Issues(ctx, tx)
 	if err != nil {
 		return intake.Result{}, err
 	}
-	slots, err := e.store.Slots(ctx, tx)
+	own := make([]record.Issue, 0, len(issues))
+	byKey := make(map[string]record.Issue, len(issues))
+	for _, issue := range issues {
+		byKey[issue.Key] = issue
+		if issue.Project == e.cfg.Project {
+			own = append(own, issue)
+		}
+	}
+	facts, err := record.ReadLineFacts(ctx, tx, e.store, e.cfg.Project, own, e.cfg.Steps)
 	if err != nil {
 		return intake.Result{}, err
 	}
-	byKey, slotted := indexIssues(issues, slots)
-	if err := e.correctStatuses(ctx, tx, issues, byKey, slotted, "boot"); err != nil {
+	running := record.RunningRoots(own, facts)
+	if err := e.correctStatuses(ctx, tx, issues, running, "boot"); err != nil {
 		return intake.Result{}, err
 	}
 	for _, issue := range issues {
@@ -84,8 +83,16 @@ func (e *Engine) booted(ctx context.Context, tx pgx.Tx, fact intake.DaemonBooted
 		if issue.Project != e.cfg.Project || role == "" || role == claim.RoleArchitect || record.OutOfWorkflow(issue.Status) {
 			continue
 		}
-		root, running := runningTree(byKey, slotted, issue)
-		if !running {
+		root, ok := byKey[issue.Tree]
+		if !ok {
+			continue
+		}
+		// The tree must be running — this generation of it, by the one rule every reader of that
+		// question asks (record.TreeRuns, read here through record.RunningRoots): the workflow has
+		// opened its lifecycle and not closed it, the root does not linger, and the root is not
+		// itself waiting in the line for the tree to be opened, whose architect's first task comes
+		// with its promotion.
+		if _, runs := running[root.Key]; !runs {
 			continue
 		}
 		project, err := claim.ProjectToken(issue.Project)
@@ -109,8 +116,8 @@ func (e *Engine) booted(ctx context.Context, tx pgx.Tx, fact intake.DaemonBooted
 		if err != nil {
 			return intake.Result{}, err
 		}
-		if err := e.enqueue(ctx, tx, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: role, Generation: issue.Generation,
-			Phase: issue.Phase, Task: task, ResumeTask: true, RuleResume: true}); err != nil {
+		if err := StartOrOwe(ctx, tx, e.store, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: role,
+			Generation: issue.Generation, Phase: issue.Phase, Task: task, ResumeTask: true, RuleResume: true}, e.now()); err != nil {
 			return intake.Result{}, err
 		}
 		e.logOnCommit(ctx, "workflow: the boot starts a suspended claim that owns its issue's phase", "issue", issue.Key, "role", role,
@@ -120,11 +127,11 @@ func (e *Engine) booted(ctx context.Context, tx pgx.Tx, fact intake.DaemonBooted
 }
 
 // sweepMerged closes every issue of the project that awaits a merge GitHub already reported
-// (booted). Each is re-read before its close: a child's close may have closed its root
-// (closeAwaitingRoot), and a root's close lingers the tree its children then close under. A root
-// whose tree still runs is left where it stands by closeMerged, which owns that rule, and the
-// sweep tells nobody of the wait: a restart must not repeat the architect's notice, and a root can
-// now wait for days across many boots.
+// (booted). Each is re-read before its close: a child's close may have closed the merged issues
+// above it (closeAwaitingMerge), and a root's close lingers the tree its children then close
+// under. A root whose tree still runs is left where it stands by closeMerged, which owns that
+// rule, and the sweep tells nobody of the wait: a restart must not repeat the architect's
+// notice, and a root can now wait for days across many boots.
 func (e *Engine) sweepMerged(ctx context.Context, tx pgx.Tx) error {
 	issues, err := e.store.Issues(ctx, tx)
 	if err != nil {

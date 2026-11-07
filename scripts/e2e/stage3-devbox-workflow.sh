@@ -285,19 +285,25 @@ nats_urls:
 dispatch_url: http://127.0.0.1:$port_dispatch
 dispatch_token_file: $work/dispatch-token
 # The project's repository is Dispatch's mapping (the PUT below makes $repo its default), not a key of
-# legion.yaml.
+# legion.yaml. `production_check: tester` is the word that names the role a merge's production check
+# is handed to, written out here rather than left to the default, so the run proves the setting is
+# read; Stage 4b's rig names no key and proves the default.
 projects:
-  $project: {}
+  $project: {production_check: tester}
 gates:
   design: root-issues
 admission_cap: 2
 review_round_cap: 3
+# The wake pacing off (INFRA-976): this proof starts many roles and waits on bounded times, and at
+# the default of 8 wakes a minute every wake after the first would spend those waits queueing.
+worker_wakes_per_minute: 0
 # The production check's bound (14 days by default) must come due inside the run, since its wake,
-# the check's last look, is production-check-bound's proof; and after the first look's report, since
-# a look open at the bound defers the bound by the look's own two-hour bound: 15 minutes, against a
-# look that took up to 10 minutes from the proof's instruction to its report in acceptance runs.
+# the check's last look, is production-check-bound's proof; and after the look the first look's own
+# wake_at starts, since a look open at the bound defers the bound by the look's own two-hour bound:
+# 30 minutes, against two looks that took up to 10 minutes each from the task to the report in
+# acceptance runs and the three minutes the fixture tells the first look to ask for.
 # linger_hours keeps its default (72 h): the tree's close at its expiry is Stage 4b's proof.
-production_check_hours: 0.25
+production_check_hours: 0.5
 instructions: $work/instructions.md
 $(<"$work/github-apps.yaml")
 EOF
@@ -349,12 +355,21 @@ stop_dispatch() {
 issue_worker_pane() {
   daemon_state | jq -er --arg issue "$1" --arg role "$2" '.issues[$issue].workers[$role].claim.locator.tmux.pane'
 }
-# The state projection intentionally omits the internal tree key; the record itself is the
-# observable source for this admission invariant.
-child_is_slotless() {
+# A slot is one issue with work, not one tree (dispatch://INFRA-980), so a child takes a slot of
+# its own once its first phase starts. This child cannot start yet: its tree's design gate has
+# never opened, so it stands at admitted, holds no slot and is in no line, while the cap's two
+# slots stay with the two roots whose architects write their specs. admission.trees names its
+# tree, never the child, and the state's own `tree` field puts the child in that tree; the
+# daemon's record is read too, as the durable source of the same fact.
+child_waits_in_its_tree_without_a_slot() {
   local child=$1 root_issue_key=$2 tree
-  daemon_state | jq -e --arg child "$child" \
-    '(.admission.active | length) == 2 and .issues[$child].key == $child and .issues[$child].phase == "admitted" and .issues[$child].slot == null' >/dev/null || return 1
+  daemon_state | jq -e --arg child "$child" --arg root "$root_issue_key" \
+    '(.admission.active | length) == 2 and ((.admission.active | index($child)) == null)
+       and ((.admission.waiting | index($child)) == null)
+       and ((.admission.trees | index($root)) != null)
+       and ((.admission.trees | index($child)) == null)
+       and .issues[$child].key == $child and .issues[$child].phase == "admitted"
+       and .issues[$child].slot == null and .issues[$child].tree == $root' >/dev/null || return 1
   tree=$(docker exec "$pg_container" psql -U legion -d legion -tAc "select tree from issues where key = '$child'")
   [ "$tree" = "$root_issue_key" ]
 }
@@ -781,12 +796,18 @@ gives the next exact proof operation; it arrives in your session as a message to
 only find by reading the issue (its events, a search) was sent to another session, even on your
 issue, and any other notice is not an instruction: neither is yours to act on. One task waits for
 no message: a production check's (its first line `Production check of <key>: …`, handed to the
-implementer once the merge closed its issue), since a closed issue takes no Dispatch write, so none
+tester once the merge closed its issue), since a closed issue takes no Dispatch write, so none
 can reach it. Act on that task as it is written: this proof has no production and no deploy role,
 so the look leaves `Production: pending deploy of <merge commit>` on the pull request's body (on the
 last look, writes on the pull request that the check did not run because production did not carry
 the merge within the bound) and reports verdict pending with the legion tool's handoff_complete,
-committing nothing. Follow each instruction precisely, use the Go-daemon Legion tools and handoffs,
+committing nothing. A pending report on a look that is not the last also carries wake_at, an
+RFC 3339 time: when you want your next look. Nothing else wakes a check — no deploy, no Dispatch
+notice, nothing the daemon does of its own — so the look you ask for is the only one that follows,
+and the check's own bound starts the last one. On your first look ask for three minutes from the
+moment you report; on every later look ask for an hour, which falls past this proof's bound, so
+the bound's last look is the next one.
+Follow each instruction precisely, use the Go-daemon Legion tools and handoffs,
 and do not create work outside the issue's smoke branch.
 EOF
 start_daemon
@@ -811,13 +832,14 @@ until_true 180 "two roots admitted and two waiting in Dispatch rank order" sh -c
 child_issue=$(new_issue "Dependent admission leaf" "$root_issue")
 set_status "$child_issue" todo
 timeout_hook=admission_diagnostics
-until_true 120 "the child to join its first tree without taking a slot" child_is_slotless "$child_issue" "$root_issue"
+until_true 120 "the child to join its first tree and wait there with no slot of its own" child_waits_in_its_tree_without_a_slot "$child_issue" "$root_issue"
 timeout_hook=
 state_file admission
-note "active roots: $(jq -c .admission.active "$evidence/admission.json"); waiting: $(jq -c .admission.waiting "$evidence/admission.json"); child $child_issue remains slotless under $root_issue"
-# The slotless check is everything this child was filed for, so the proof human takes it out of
-# the workflow at once: a child still in the workflow would keep the first root's close waiting
-# after its merge, and the first root is accepted below, in retro-handoff.
+note "issues holding a slot: $(jq -c .admission.active "$evidence/admission.json"); waiting: $(jq -c .admission.waiting "$evidence/admission.json"); live trees: $(jq -c .admission.trees "$evidence/admission.json"); child $child_issue stands in $root_issue's tree with no slot of its own"
+# This child was filed for the slot check alone, so the proof human takes it out of the workflow
+# at once: an open child under the first root would hold that root's own first phase
+# (children-first), refuse its sign-off while the child is in the workflow, and keep its close
+# waiting after its merge. The first root is accepted below, in retro-handoff.
 set_status "$child_issue" backlog
 until_true 300 "$child_issue to leave the workflow" issue_phase "$child_issue" "done"
 note "the proof human parked $child_issue (backlog): it takes no further turns and holds no issue above it"
@@ -834,15 +856,15 @@ note "$(wc -l <"$evidence/pane-endpoints-checked.txt") pane checks: DISPATCH_URL
 pass
 
 # The first issue end to end: the gate, every phase, three review rounds, the architect's acceptance,
-# the READY gate, the daemon's merge, which closes the issue, and the production check after the
-# close, through the bound's last look.
+# the READY gate, the daemon's merge, which closes the issue, and the tester's production check
+# after the close, through the look its own report asked for and the bound's last look.
 primary_issue() {
   begin primary-architect-posts-and-registers-spec
   # Every root's architect registers a closed gate on its own and gives its slot back, so the slot
   # the root left at registration went to a waiting root (no-change, restart), and the approved root
   # takes one back only once one of those registers its own gate in turn: the bound is twice
   # architect_registers_gate's 900 s for that registration. admission_cap stays 2: admission order
-  # and the slotless child above are proved against it, and every root of the run gives its slot
+  # and the child that stands in its tree with no slot of its own are proved against it, and every root of the run gives its slot
   # back at its registration, so the slot always comes back within that bound.
   drive_gate "$root_issue" "Stage 3 proof gate operation" 1800
   artifact_id=$gate_artifact
@@ -1102,8 +1124,8 @@ primary_issue() {
   # The merge closes the issue: awaiting_merge and a merged pull request write done, the daemon's
   # one status write after retro. A root's close frees its slot and lingers the tree, every member's
   # claims suspended, and opens the production check on the merge commit, whose first look the
-  # daemon hands the implementer in its live pane: its claim alone comes back, resumed on its kept
-  # session, while the other five stay suspended.
+  # daemon hands the tester — the role this project's `production_check` names — in its live pane:
+  # its claim alone comes back, resumed on its kept session, while the other five stay suspended.
   wait_for_phase "$root_issue" "done" 300
   phase_change_logged "$root_issue" awaiting_merge "done" pull_request_merged ||
     fail "the daemon log has no \"workflow: phase changed\" line moving $root_issue from awaiting_merge to done on pull_request_merged"
@@ -1112,24 +1134,28 @@ primary_issue() {
     fail "$root_issue's production check reads $(daemon_state | jq -c --arg issue "$root_issue" '.issues[$issue].check'), want it open on merge commit $merge_when_clean_commit at its first look, woken by the merge"
   state_file check-opened
   await_tree_suspended "$root_issue" "the lingering tree's architect to be suspended"
-  # The implementer is live at its first look, the five other claims suspended; an implementer that
+  # The tester is live at its first look, the five other claims suspended; a tester that
   # reported the look before this read is suspended again already, which the next wait judges.
-  first_look_handed() { claim_states_are "$root_issue" "ready working idle" suspended || check_look_reported "$root_issue" 1; }
-  until_true 300 "the close to leave the implementer live at its first look, the five other claims of $root_issue suspended" first_look_handed
+  first_look_handed() { claim_states_are "$root_issue" tester "ready working idle" suspended || check_look_reported "$root_issue" 1; }
+  until_true 300 "the close to leave the tester live at its first look, the five other claims of $root_issue suspended" first_look_handed
   first_look_claims=$(issue_claim_states "$root_issue" | paste -sd ',' -)
-  # The first look. The task the daemon handed the implementer is the whole instruction: the proof
+  # The first look. The task the daemon handed the tester is the whole instruction: the proof
   # sends it nothing, since the issue is closed and a closed issue takes no Dispatch write (409
   # ISSUE_CLOSED), and the fixture's instructions say a check task waits for no message. The smoke
   # repository is neither the deploy repository nor a Legion production, so the look's verdict is
   # pending: the check stays open with its first look reported, and the daemon suspends the
-  # implementer's claim, session kept, until the next wake. Its report is the observation, read from
-  # the daemon's state below.
+  # tester's claim, session kept, until the wake that report named. Its report is the observation,
+  # read from the daemon's state below.
   # A look took up to 10 minutes from its task to its report in acceptance runs.
-  until_true 600 "the implementer's pending report on the first look of $root_issue's production check" check_look_reported "$root_issue" 1
-  until_true 300 "the pending report to suspend the implementer's claim beside the five suspended claims of $root_issue" claim_states_are "$root_issue" suspended suspended
-  [ -n "$(issue_worker_session "$root_issue" implementer)" ] || fail "the implementer's claim lost its session at its suspension between looks"
+  until_true 600 "the tester's pending report on the first look of $root_issue's production check" check_look_reported "$root_issue" 1
+  until_true 300 "the pending report to suspend the tester's claim beside the five suspended claims of $root_issue" claim_states_are "$root_issue" tester suspended suspended
+  [ -n "$(issue_worker_session "$root_issue" tester)" ] || fail "the tester's claim lost its session at its suspension between looks"
   state_file check-look-1
-  note "$repo#$pr_number merged by $merge_when_clean_by at $merge_when_clean_commit, which closed $root_issue (phase changed awaiting_merge → done on pull_request_merged; the board done) and opened its production check on that commit; the close suspended the architect, planner, tester, reviewer and merger and handed the implementer the first look in its live pane (claims at the look: $first_look_claims); its pending report left the check open ($(jq -c --arg issue "$root_issue" '.issues[$issue].check | {looks, lookOpen, lastWake: .lastWake.kind, nextWakeAt}' "$evidence/check-look-1.json")) and suspended its claim, session kept"
+  # The report's own wake_at is what starts the next look: the daemon names that row and wakes
+  # nothing of its own, so without it only the bound would look again.
+  check_wake_named "$root_issue" 1 ||
+    fail "the daemon log records no wake named at the first look of $root_issue's production check: $(jq -R -c 'fromjson? | select(.msg | startswith("workflow: production check"))' "$evidence/logs/daemon.log" | tail -3 | tr '\n' ' ')"
+  note "$repo#$pr_number merged by $merge_when_clean_by at $merge_when_clean_commit, which closed $root_issue (phase changed awaiting_merge → done on pull_request_merged; the board done) and opened its production check on that commit; the close suspended the architect, planner, implementer, reviewer and merger and handed the tester the first look in its live pane (claims at the look: $first_look_claims); its pending report left the check open ($(jq -c --arg issue "$root_issue" '.issues[$issue].check | {role, looks, lookOpen, lastWake: .lastWake.kind, nextWakeAt}' "$evidence/check-look-1.json")), named the wake its next look comes from and suspended its claim, session kept"
   pass
 
   begin smoke-main-clean
@@ -1148,26 +1174,34 @@ primary_issue() {
   pass
 
   begin production-check-bound
-  # The check's bound (production_check_hours 0.25: 15 minutes after the close) is its last wake: the
-  # daemon starts the last look, the implementer's pane comes back on its kept session, told look 2,
-  # woken by the bound, the last look. The wait runs from here, after the first look's report and
-  # the smoke main's cleanup: what remains of the 15 minutes, and a bound deferred by a look still
-  # open when it came due (by the look's own two-hour bound) fails here by name rather than hanging.
-  # The last look's pending closes the check as not_run: the implementer's claim is retired, its
-  # session dropped (issue_close), and the state omits the check.
-  until_true 900 "the bound to wake the last look of $root_issue's production check" last_look_started "$root_issue"
+  # Look 2 is the one the first look asked for: the wake that report named, three minutes on, is
+  # the only thing that starts a look before the bound, and the tester's pane comes back on its
+  # kept session for it. A tester that reported look 2 before this read leaves the daemon log's
+  # record of the look, which the state drops once the look ends. Its own pending asks for an
+  # hour, past the bound, so it names no row and the bound's look is next.
+  wake_look_started() { check_look_open "$root_issue" tester 2 "check wake" || check_look_logged "$root_issue" 2 "check wake"; }
+  until_true 900 "the wake the first look named to start look 2 of $root_issue's production check" wake_look_started
+  # The check's bound (production_check_hours 0.5: 30 minutes after the close) starts its last
+  # look, whatever number the looks the agent's own wakes started have reached: the tester's pane
+  # comes back on its kept session, told the last look, woken by the bound. The wait runs from
+  # here, after the first look's report and the smoke main's cleanup: what remains of the 30
+  # minutes, and a bound deferred by a look still open when it came due (by the look's own
+  # two-hour bound) fails here by name rather than hanging. The last look's pending closes the
+  # check as not_run: the tester's claim is retired, its session dropped (issue_close), and the
+  # state omits the check.
+  until_true 1800 "the bound to start the last look of $root_issue's production check" last_look_started "$root_issue"
   state_file check-look-2
   # The daemon's task names the last look and its rule (write on the pull request that the check
   # did not run within the bound, report pending), and the proof sends the closed issue nothing: the
   # close of the check is the observation.
   until_true 600 "the last look's pending report to close $root_issue's production check" check_closed "$root_issue"
-  check_look_logged "$root_issue" 2 bound ||
-    fail "the daemon log records no look 2 of $root_issue's production check woken by the bound as the last look: $(jq -R -c 'fromjson? | select(.msg == "workflow: production check look started")' "$evidence/logs/daemon.log" | tail -2 | tr '\n' ' ')"
+  last_look_logged "$root_issue" ||
+    fail "the daemon log records no last look of $root_issue's production check woken by the bound: $(jq -R -c 'fromjson? | select(.msg == "workflow: production check look started")' "$evidence/logs/daemon.log" | tail -3 | tr '\n' ' ')"
   check_closed_as "$root_issue" not_run ||
     fail "the daemon log records no close of $root_issue's production check as not_run: $(jq -R -c 'fromjson? | select(.msg == "workflow: production check closed")' "$evidence/logs/daemon.log" | tail -1)"
-  until_true 120 "the check's close to retire the implementer's claim beside the five suspended claims of $root_issue" claim_states_are "$root_issue" retired suspended
+  until_true 120 "the check's close to retire the tester's claim beside the five suspended claims of $root_issue" claim_states_are "$root_issue" tester retired suspended
   state_file check-closed
-  note "the bound woke look 2 of $root_issue's production check (the state at the wake: $(jq -c --arg issue "$root_issue" '.issues[$issue].check | if . == null then "already closed" else {looks, lookOpen, lastWake: .lastWake.kind, last} end' "$evidence/check-look-2.json"); the daemon log: look 2, cause bound, last); its pending closed the check as not_run, the state omits it, and the implementer's claim is retired while the five others stay suspended: $(issue_claim_states "$root_issue" | paste -sd ',' -)"
+  note "the wake the first look named started look 2 of $root_issue's production check, and the bound started its last look (the state at the bound's wake: $(jq -c --arg issue "$root_issue" '.issues[$issue].check | if . == null then "already closed" else {role, looks, lookOpen, lastWake: .lastWake.kind, last} end' "$evidence/check-look-2.json"); the daemon log: cause bound, last); its pending closed the check as not_run, the state omits it, and the tester's claim is retired while the five others stay suspended: $(issue_claim_states "$root_issue" | paste -sd ',' -)"
   pass
 }
 
@@ -1352,7 +1386,9 @@ restart_scenarios() {
   until_true 240 "the implementer pane to read the pull request" session_contains "$restart_issue" implementer "CRED-PR=https://github.com/$repo/pull/$pr_number"
   # The directory the agent printed is the one its OMP process was launched with: its repository's
   # owner's directory of the bundle named for its claim, which holds the two gh files the daemon
-  # writes for the pane alone, and nothing else beside it.
+  # writes for the pane and, since INFRA-513 narrowed every token, a directory per other repository
+  # the project serves under that owner, each holding those two files alone; nothing else is in
+  # either.
   cred_pane_pid=$(claim_pane_pid "$restart_issue" implementer) || fail "the implementer pane on $restart_issue has no process locator"
   cred_omp=$(omp_descendant "$cred_pane_pid") || fail "the implementer pane on $restart_issue has no OMP process"
   cred_root=$(pane_value "$cred_omp" LEGION_GH_OWNERS_DIR)
@@ -1365,7 +1401,19 @@ restart_scenarios() {
     [ "$(stat -c %a "$dir")" = 700 ] || fail "$dir is mode $(stat -c %a "$dir"), want 700"
   done
   [ "$(find "$cred_root" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort | tr '\n' ' ')" = "$owner " ] || fail "$cred_root holds $(find "$cred_root" -mindepth 1 -maxdepth 1 -printf '%f\n' | tr '\n' ' '), want $owner's directory alone"
-  [ "$(find "$cred_dir" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort | tr '\n' ' ')" = "config.yml hosts.yml " ] || fail "$cred_dir holds $(find "$cred_dir" -mindepth 1 -maxdepth 1 -printf '%f\n' | tr '\n' ' '), want config.yml and hosts.yml alone"
+  cred_owned=$(find "$cred_dir" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)
+  for want in config.yml hosts.yml; do
+    grep -qxF -- "$want" <<<"$cred_owned" || fail "$cred_dir lacks $want; it holds: $(tr '\n' ' ' <<<"$cred_owned")"
+  done
+  while read -r cred_entry; do
+    case $cred_entry in
+      "" | config.yml | hosts.yml) continue ;;
+      . | .. | *[!a-z0-9._-]*) fail "$cred_dir holds $cred_entry, want config.yml, hosts.yml and repository directories alone" ;;
+    esac
+    [ -d "$cred_dir/$cred_entry" ] || fail "$cred_dir holds $cred_entry, want config.yml, hosts.yml and repository directories alone"
+    cred_held=$(find "$cred_dir/$cred_entry" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort | tr '\n' ' ')
+    [ "$cred_held" = "config.yml hosts.yml " ] || fail "$cred_dir/$cred_entry holds $cred_held, want config.yml and hosts.yml alone"
+  done <<<"$cred_owned"
   [ "$(stat -c %a "$cred_dir/hosts.yml")" = 600 ] || fail "$cred_dir/hosts.yml is mode $(stat -c %a "$cred_dir/hosts.yml"), want 600"
   jq -R -s -e '[split("\n")[] | fromjson? | select(.msg == "tmux runtime: github credential written" and .role == "implementer")] | length > 0' <"$evidence/logs/daemon.log" >/dev/null ||
     fail "the daemon log has no 'github credential written' line for an implementer pane"

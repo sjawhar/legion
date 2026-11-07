@@ -64,6 +64,13 @@ const (
 	// azureFederationAudience is unset: the one Entra's federated credentials expect by default.
 	defaultAzureFederationAudience = "api://AzureADTokenExchange"
 
+	// dispatchAnswererAzure and dispatchAnswererEndpoint are the two places Dispatch generates
+	// text, the values DISPATCH_ANSWERER takes: a chat deployment of an Azure AI Foundry resource
+	// (azureChatEndpoint), or any OpenAI-shaped chat completions service (chatEndpoint). With
+	// neither endpoint the component renders no DISPATCH_ANSWERER and Dispatch configures no model.
+	dispatchAnswererAzure    = "azure"
+	dispatchAnswererEndpoint = "endpoint"
+
 	// defaultDispatchAppCPU and defaultDispatchAppMemory size the app's envoy-dispatch container
 	// when appCpu and appMemory are unset.
 	defaultDispatchAppCPU    = "1"
@@ -95,7 +102,7 @@ const (
 // counted pools and its permanent listeners. The listener's and the front door's pods open none.
 // TestDispatchConnectionsPerPodIsTheServers fails when a counted pool's size changes and this
 // does not.
-const dispatchConnectionsPerPod = 95
+const dispatchConnectionsPerPod = 104
 
 // Autopilot's bounds for the app pod's total request, the general-purpose compute class's for a pod
 // with pod anti-affinity, which every Dispatch pod carries, or with the safe-to-evict annotation,
@@ -313,20 +320,52 @@ type DispatchArgs struct {
 	// and DISPATCH_AZURE_EMBED_ENDPOINT, the base URL the embeddings route is appended to (such as
 	// https://<resource>.services.ai.azure.com/models), which may be an Azure resource's output.
 	// AzureEmbedTokensPerMinute, the deployment's quota, comes with it, and AzureEmbedDeployment
-	// (DISPATCH_AZURE_EMBED_DEPLOYMENT, Dispatch's default when unset) may. Every other Azure input
-	// needs the endpoint.
+	// (DISPATCH_AZURE_EMBED_DEPLOYMENT, Dispatch's default when unset) may. Every other azureEmbed
+	// input needs the endpoint.
 	AzureEmbedEndpoint        pulumi.StringInput `pulumi:"azureEmbedEndpoint,optional"`
 	AzureEmbedDeployment      pulumi.StringInput `pulumi:"azureEmbedDeployment,optional"`
 	AzureEmbedTokensPerMinute *int               `pulumi:"azureEmbedTokensPerMinute,optional"`
 
-	// The endpoint takes exactly one credential. AzureEmbedKeySecret is the key form: the Secret
-	// Manager secret's resource path (projects/<project>/secrets/<id>) holding the deployment's API
-	// key, mounted through the Secret Manager CSI driver as the file DISPATCH_AZURE_EMBED_KEY_FILE
-	// names, so the key never enters the component or its state. AzureTenantId and AzureClientId
-	// are the keyless form, set together (a managed identity's outputs): the pod's projected
-	// service-account token, for audience AzureFederationAudience (api://AzureADTokenExchange when
-	// unset), is the assertion Dispatch exchanges with Entra, through the federated credential the
-	// identity holds for this component's serviceAccountIssuer and serviceAccountSubject.
+	// AzureChatEndpoint turns on the model Dispatch generates text with, a chat deployment of an
+	// Azure AI Foundry resource: DISPATCH_ANSWERER=azure and DISPATCH_AZURE_CHAT_ENDPOINT, the
+	// base URL /chat/completions is appended to, which may be an Azure resource's output.
+	// AzureChatDeployment (DISPATCH_AZURE_CHAT_DEPLOYMENT, the deployment's name, which each
+	// request sends as its model) and AzureChatTokensPerMinute (the deployment's quota, a positive
+	// integer, which paces the answerer's calls) come with it; AzureChatApiVersion (the api-version
+	// query value each request carries; unset, a request sends none) and AzureChatScope (the token
+	// scope the federated sign-in asks for; unset, Dispatch's own default) may. The chat form takes
+	// no API key: it signs in with the shared keyless credential below, so AzureTenantId and
+	// AzureClientId come with it. Every other azureChat input needs the endpoint.
+	AzureChatEndpoint        pulumi.StringInput `pulumi:"azureChatEndpoint,optional"`
+	AzureChatDeployment      pulumi.StringInput `pulumi:"azureChatDeployment,optional"`
+	AzureChatApiVersion      *string            `pulumi:"azureChatApiVersion,optional"`
+	AzureChatScope           *string            `pulumi:"azureChatScope,optional"`
+	AzureChatTokensPerMinute *int               `pulumi:"azureChatTokensPerMinute,optional"`
+
+	// ChatEndpoint is the answerer's other form, any OpenAI-shaped chat completions service:
+	// DISPATCH_ANSWERER=endpoint and DISPATCH_CHAT_ENDPOINT, the base URL /chat/completions is
+	// appended to. ChatModel (DISPATCH_CHAT_MODEL, the model each request names) and
+	// ChatTokenSecret come with it, and the form is refused together with AzureChatEndpoint: one
+	// deployment names one answerer. ChatTokenSecret is the Secret Manager secret's resource path
+	// (projects/<project>/secrets/<id>) whose value is the bearer token every call to that endpoint
+	// presents, the one secret of this group: it is mounted through the Secret Manager CSI driver
+	// as the file DISPATCH_CHAT_TOKEN_FILE names, which Dispatch re-reads on every call, so the
+	// token never enters the component or its state. Every other chat input needs the endpoint.
+	ChatEndpoint    pulumi.StringInput `pulumi:"chatEndpoint,optional"`
+	ChatModel       *string            `pulumi:"chatModel,optional"`
+	ChatTokenSecret pulumi.StringInput `pulumi:"chatTokenSecret,optional" provider:"secret"`
+
+	// The embedder's endpoint takes exactly one credential. AzureEmbedKeySecret is the key form:
+	// the Secret Manager secret's resource path (projects/<project>/secrets/<id>) holding the
+	// deployment's API key, mounted through the Secret Manager CSI driver as the file
+	// DISPATCH_AZURE_EMBED_KEY_FILE names, so the key never enters the component or its state.
+	// AzureTenantId and AzureClientId are the keyless form, set together (a managed identity's
+	// outputs), and they are shared: whichever of the embedder and the answerer is on Azure reads
+	// them, so either endpoint accepts them and a deployment that embeds on Bedrock and answers on
+	// Azure sets them for the answerer. The pod's projected service-account token, for audience
+	// AzureFederationAudience (api://AzureADTokenExchange when unset), is the assertion Dispatch
+	// exchanges with Entra, through the federated credential the identity holds for this
+	// component's serviceAccountIssuer and serviceAccountSubject.
 	AzureEmbedKeySecret     pulumi.StringInput `pulumi:"azureEmbedKeySecret,optional"`
 	AzureTenantId           pulumi.StringInput `pulumi:"azureTenantId,optional"`
 	AzureClientId           pulumi.StringInput `pulumi:"azureClientId,optional"`
@@ -408,6 +447,15 @@ func dispatchSeededInput(args *DispatchArgs) (string, bool) {
 	if args.AzureFederationAudience != nil && bus.HoldsSeed(*args.AzureFederationAudience) {
 		return "azureFederationAudience", true
 	}
+	if args.AzureChatApiVersion != nil && bus.HoldsSeed(*args.AzureChatApiVersion) {
+		return "azureChatApiVersion", true
+	}
+	if args.AzureChatScope != nil && bus.HoldsSeed(*args.AzureChatScope) {
+		return "azureChatScope", true
+	}
+	if args.ChatModel != nil && bus.HoldsSeed(*args.ChatModel) {
+		return "chatModel", true
+	}
 	return "", false
 }
 
@@ -462,6 +510,7 @@ type dispatchSettings struct {
 	pprofPort                                   int
 	disruption                                  dispatchDisruption
 	azure                                       dispatchAzure
+	answerer                                    dispatchAnswerer
 }
 
 // socks5Proxy is the address of the front door's SOCKS5 proxy, the one the app and the listener
@@ -495,50 +544,36 @@ func (s dispatchSettings) serverURL() string {
 	return s.clusterURL()
 }
 
-// dispatchAzure is the Azure embedder's plain configuration, the zero value when
-// azureEmbedEndpoint is unset. When enabled, exactly one of key (azureEmbedKeySecret) and keyless
-// (azureTenantId with azureClientId) is set, and audience is the keyless form's token audience.
+// dispatchAzure is the Azure embedder's plain configuration together with the Azure sign-in the
+// embedder and the answerer share, the zero value when no input of either is set. embedder is
+// azureEmbedEndpoint set, which turns meaning search onto Azure and takes exactly one of key
+// (azureEmbedKeySecret) and keyless (azureTenantId with azureClientId); keyless is that shared
+// sign-in, which the azure answerer takes too, and audience is the token audience it asks for. So
+// keyless with embedder unset is a deployment that embeds on Bedrock and answers on Azure.
 type dispatchAzure struct {
+	embedder        bool
 	key, keyless    bool
 	tokensPerMinute int
 	audience        string
 }
 
-// enabled reports whether azureEmbedEndpoint turned the Azure embedder on: one credential form is
-// then set.
-func (a dispatchAzure) enabled() bool { return a.key || a.keyless }
-
-// newDispatchAzure validates the Azure embedder's inputs: the endpoint turns it on and needs the
-// quota and exactly one credential form; no other Azure input is taken without the endpoint. The
-// Inputs are judged by being set alone, so a value unknown at preview passes as it will at update.
+// newDispatchAzure validates the Azure embedder's inputs and the shared sign-in's: the embed
+// endpoint turns the embedder on and needs the quota and exactly one credential form, and no other
+// azureEmbed input is taken without it. The shared sign-in is taken with either endpoint, since
+// whichever of the embedder and the answerer is on Azure reads it, and refused with neither, where
+// nothing would sign in. The Inputs are judged by being set alone, so a value unknown at preview
+// passes as it will at update.
 func newDispatchAzure(args *DispatchArgs) (dispatchAzure, error) {
 	keyless := args.AzureTenantId != nil || args.AzureClientId != nil
-	if args.AzureEmbedEndpoint == nil {
-		for _, in := range []struct {
-			input string
-			set   bool
-		}{
-			{"azureEmbedDeployment", args.AzureEmbedDeployment != nil},
-			{"azureEmbedTokensPerMinute", args.AzureEmbedTokensPerMinute != nil},
-			{"azureEmbedKeySecret", args.AzureEmbedKeySecret != nil},
+	azure := dispatchAzure{embedder: args.AzureEmbedEndpoint != nil, keyless: keyless}
+	if args.AzureEmbedEndpoint == nil && args.AzureChatEndpoint == nil {
+		if err := refuseDispatchInputsWithout("azureEmbedEndpoint or azureChatEndpoint", "the Azure sign-in is shared, read by whichever of the embedder and the answerer is on Azure", []dispatchInput{
 			{"azureTenantId", args.AzureTenantId != nil},
 			{"azureClientId", args.AzureClientId != nil},
 			{"azureFederationAudience", args.AzureFederationAudience != nil},
-		} {
-			if in.set {
-				return dispatchAzure{}, fmt.Errorf("azureEmbedEndpoint is required when %s is set: every Azure input configures the Azure embedder, which the endpoint turns on", in.input)
-			}
+		}); err != nil {
+			return dispatchAzure{}, err
 		}
-		return dispatchAzure{}, nil
-	}
-	if args.AzureEmbedTokensPerMinute == nil {
-		return dispatchAzure{}, errors.New("azureEmbedTokensPerMinute is required when azureEmbedEndpoint is set: the deployment's tokens-per-minute quota, which Dispatch paces its embedding by")
-	}
-	if *args.AzureEmbedTokensPerMinute <= 0 {
-		return dispatchAzure{}, fmt.Errorf("azureEmbedTokensPerMinute %d must be a positive integer", *args.AzureEmbedTokensPerMinute)
-	}
-	if args.AzureEmbedKeySecret != nil && keyless {
-		return dispatchAzure{}, errors.New("azureEmbedKeySecret is set with azureTenantId or azureClientId: the key and keyless credential forms are exclusive, so set exactly one")
 	}
 	if args.AzureTenantId != nil && args.AzureClientId == nil {
 		return dispatchAzure{}, errors.New("azureClientId is required when azureTenantId is set: the keyless form takes both")
@@ -549,10 +584,6 @@ func newDispatchAzure(args *DispatchArgs) (dispatchAzure, error) {
 	if args.AzureFederationAudience != nil && !keyless {
 		return dispatchAzure{}, errors.New("azureFederationAudience is set without azureTenantId and azureClientId: it is the keyless form's token audience")
 	}
-	if args.AzureEmbedKeySecret == nil && !keyless {
-		return dispatchAzure{}, errors.New("azureEmbedEndpoint needs one credential: azureEmbedKeySecret, or azureTenantId with azureClientId")
-	}
-	azure := dispatchAzure{key: !keyless, keyless: keyless, tokensPerMinute: *args.AzureEmbedTokensPerMinute}
 	if keyless {
 		azure.audience = defaultAzureFederationAudience
 		if args.AzureFederationAudience != nil {
@@ -562,7 +593,133 @@ func newDispatchAzure(args *DispatchArgs) (dispatchAzure, error) {
 			azure.audience = *args.AzureFederationAudience
 		}
 	}
+	if !azure.embedder {
+		if err := refuseDispatchInputsWithout("azureEmbedEndpoint", "every azureEmbed input configures the Azure embedder, which the endpoint turns on", []dispatchInput{
+			{"azureEmbedDeployment", args.AzureEmbedDeployment != nil},
+			{"azureEmbedTokensPerMinute", args.AzureEmbedTokensPerMinute != nil},
+			{"azureEmbedKeySecret", args.AzureEmbedKeySecret != nil},
+		}); err != nil {
+			return dispatchAzure{}, err
+		}
+		return azure, nil
+	}
+	if args.AzureEmbedTokensPerMinute == nil {
+		return dispatchAzure{}, errors.New("azureEmbedTokensPerMinute is required when azureEmbedEndpoint is set: the deployment's tokens-per-minute quota, which Dispatch paces its embedding by")
+	}
+	if *args.AzureEmbedTokensPerMinute <= 0 {
+		return dispatchAzure{}, fmt.Errorf("azureEmbedTokensPerMinute %d must be a positive integer", *args.AzureEmbedTokensPerMinute)
+	}
+	if args.AzureEmbedKeySecret != nil && keyless {
+		return dispatchAzure{}, errors.New("azureEmbedKeySecret is set with azureTenantId or azureClientId: the key and keyless credential forms are exclusive, so set exactly one")
+	}
+	if args.AzureEmbedKeySecret == nil && !keyless {
+		return dispatchAzure{}, errors.New("azureEmbedEndpoint needs one credential: azureEmbedKeySecret, or azureTenantId with azureClientId")
+	}
+	azure.key = !keyless
+	azure.tokensPerMinute = *args.AzureEmbedTokensPerMinute
 	return azure, nil
+}
+
+// dispatchAnswerer is where Dispatch's server generates text, as newDispatchAnswerer checked it:
+// place is "" (no model configured and no DISPATCH_ANSWERER rendered), dispatchAnswererAzure or
+// dispatchAnswererEndpoint. tokensPerMinute, apiVersion and scope belong to the azure place alone,
+// each of the last two "" when its input is unset, where the component renders no such variable
+// and Dispatch takes its own default; model is the endpoint place's chatModel, since the azure
+// place's deployment name is an Input the rendering reads itself.
+type dispatchAnswerer struct {
+	place           string
+	tokensPerMinute int
+	apiVersion      string
+	scope           string
+	model           string
+}
+
+// newDispatchAnswerer validates the answerer's inputs: azureChatEndpoint turns the Azure chat
+// deployment on and chatEndpoint the OpenAI-shaped service, each needing the inputs of its own
+// form and refusing every input of a form its endpoint does not turn on, and the two are refused
+// together, since one deployment names one answerer. keyless is whether the shared Azure sign-in
+// is set (newDispatchAzure), which the azure place needs: its form takes no API key. The Inputs
+// are judged by being set alone, as the embedder's are.
+func newDispatchAnswerer(args *DispatchArgs, keyless bool) (dispatchAnswerer, error) {
+	if args.AzureChatEndpoint == nil {
+		if err := refuseDispatchInputsWithout("azureChatEndpoint", "every azureChat input configures the Azure answerer, which the endpoint turns on", []dispatchInput{
+			{"azureChatDeployment", args.AzureChatDeployment != nil},
+			{"azureChatApiVersion", args.AzureChatApiVersion != nil},
+			{"azureChatScope", args.AzureChatScope != nil},
+			{"azureChatTokensPerMinute", args.AzureChatTokensPerMinute != nil},
+		}); err != nil {
+			return dispatchAnswerer{}, err
+		}
+	}
+	if args.ChatEndpoint == nil {
+		if err := refuseDispatchInputsWithout("chatEndpoint", "every chat input configures the endpoint answerer, which the endpoint turns on", []dispatchInput{
+			{"chatModel", args.ChatModel != nil},
+			{"chatTokenSecret", args.ChatTokenSecret != nil},
+		}); err != nil {
+			return dispatchAnswerer{}, err
+		}
+	}
+	if args.AzureChatEndpoint != nil && args.ChatEndpoint != nil {
+		return dispatchAnswerer{}, errors.New("chatEndpoint is set with azureChatEndpoint: one deployment names one answerer, so set exactly one")
+	}
+	switch {
+	case args.AzureChatEndpoint != nil:
+		return newDispatchAzureAnswerer(args, keyless)
+	case args.ChatEndpoint != nil:
+		return newDispatchEndpointAnswerer(args)
+	}
+	return dispatchAnswerer{}, nil
+}
+
+// newDispatchAzureAnswerer is newDispatchAnswerer for azureChatEndpoint: the quota and the
+// deployment come with the endpoint, the api-version and the scope may, and the sign-in is the
+// shared keyless credential, since the Azure chat form takes no API key.
+func newDispatchAzureAnswerer(args *DispatchArgs, keyless bool) (dispatchAnswerer, error) {
+	answerer := dispatchAnswerer{place: dispatchAnswererAzure}
+	if args.AzureChatTokensPerMinute == nil {
+		return dispatchAnswerer{}, errors.New("azureChatTokensPerMinute is required when azureChatEndpoint is set: the deployment's tokens-per-minute quota, which Dispatch paces its answers by")
+	}
+	if *args.AzureChatTokensPerMinute <= 0 {
+		return dispatchAnswerer{}, fmt.Errorf("azureChatTokensPerMinute %d must be a positive integer", *args.AzureChatTokensPerMinute)
+	}
+	answerer.tokensPerMinute = *args.AzureChatTokensPerMinute
+	if args.AzureChatDeployment == nil {
+		return dispatchAnswerer{}, errors.New("azureChatDeployment is required when azureChatEndpoint is set: the chat deployment's name, which each request sends as its model")
+	}
+	if !keyless {
+		return dispatchAnswerer{}, errors.New("azureChatEndpoint needs the keyless Azure sign-in: azureTenantId with azureClientId, since the Azure chat form takes no API key")
+	}
+	if args.AzureChatApiVersion != nil {
+		if *args.AzureChatApiVersion == "" {
+			return dispatchAnswerer{}, errors.New("azureChatApiVersion is empty; leave it unset for a request that sends no api-version")
+		}
+		answerer.apiVersion = *args.AzureChatApiVersion
+	}
+	if args.AzureChatScope != nil {
+		if *args.AzureChatScope == "" {
+			return dispatchAnswerer{}, errors.New("azureChatScope is empty; leave it unset for the scope Dispatch asks for by default")
+		}
+		answerer.scope = *args.AzureChatScope
+	}
+	return answerer, nil
+}
+
+// newDispatchEndpointAnswerer is newDispatchAnswerer for chatEndpoint: the bearer token's secret
+// and the model come with the endpoint, and the token is the one secret of the group, read from
+// Secret Manager at run time rather than carried as a value.
+func newDispatchEndpointAnswerer(args *DispatchArgs) (dispatchAnswerer, error) {
+	answerer := dispatchAnswerer{place: dispatchAnswererEndpoint}
+	if args.ChatTokenSecret == nil {
+		return dispatchAnswerer{}, errors.New("chatTokenSecret is required when chatEndpoint is set: the Secret Manager secret whose value is the bearer token every call presents")
+	}
+	if args.ChatModel == nil {
+		return dispatchAnswerer{}, errors.New("chatModel is required when chatEndpoint is set: the model each request names")
+	}
+	if *args.ChatModel == "" {
+		return dispatchAnswerer{}, errors.New("chatModel is empty; it is the model each request names")
+	}
+	answerer.model = *args.ChatModel
+	return answerer, nil
 }
 
 // dispatchRollingUpdate bounds a rolling update: how many of the wanted pods may be missing at
@@ -684,6 +841,14 @@ func dispatchClusterOnlyRefusals(args *DispatchArgs) []dispatchInput {
 		{"azureTenantId", args.AzureTenantId != nil},
 		{"azureClientId", args.AzureClientId != nil},
 		{"azureFederationAudience", args.AzureFederationAudience != nil},
+		{"azureChatEndpoint", args.AzureChatEndpoint != nil},
+		{"azureChatDeployment", args.AzureChatDeployment != nil},
+		{"azureChatApiVersion", args.AzureChatApiVersion != nil},
+		{"azureChatScope", args.AzureChatScope != nil},
+		{"azureChatTokensPerMinute", args.AzureChatTokensPerMinute != nil},
+		{"chatEndpoint", args.ChatEndpoint != nil},
+		{"chatModel", args.ChatModel != nil},
+		{"chatTokenSecret", args.ChatTokenSecret != nil},
 	})
 }
 
@@ -712,6 +877,20 @@ func dispatchGroupClause(feature string, group []dispatchInput) string {
 		return ""
 	}
 	return fmt.Sprintf(" (the %s inputs are set together or not at all; unset: %s)", feature, strings.Join(unset, ", "))
+}
+
+// refuseDispatchInputsWithout is the refusal a group of inputs an endpoint turns on shares: with
+// that endpoint unset, the first input of the group the consumer did set is named, together with
+// reason, which says what the endpoint the group needs is for. The first and not all of them,
+// because a consumer who set a whole group has one thing to do about it - set the endpoint - and
+// the group's own order is the order the table is written in. Nothing set is no refusal.
+func refuseDispatchInputsWithout(endpoint, reason string, inputs []dispatchInput) error {
+	for _, in := range inputs {
+		if in.set {
+			return fmt.Errorf("%s is required when %s is set: %s", endpoint, in.input, reason)
+		}
+	}
+	return nil
 }
 
 // refuseDispatchTailnetGroup judges the tailnet group alone: the tailnet name Dispatch is served
@@ -943,6 +1122,12 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 	if err != nil {
 		return dispatchSettings{}, err
 	}
+	// The answerer is resolved after the embedder, since the Azure chat form signs in with the
+	// credential newDispatchAzure judged: the two features share it.
+	answerer, err := newDispatchAnswerer(args, azure.keyless)
+	if err != nil {
+		return dispatchSettings{}, err
+	}
 
 	s := dispatchSettings{
 		frontDoor:       frontDoor,
@@ -968,6 +1153,7 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 	s.appKeySecretName = args.AppPrivateKeySecretName
 	s.appKeySecretKey = args.AppPrivateKeySecretKey
 	s.azure = azure
+	s.answerer = answerer
 	if args.DatabaseVersion != nil {
 		if *args.DatabaseVersion == "" {
 			return dispatchSettings{}, errors.New("databaseVersion is empty; leave it unset for " + defaultDispatchDatabaseVersion)

@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -23,8 +22,8 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
-	legionstore "github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/testpg"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
@@ -207,46 +206,12 @@ func outboxRows(t *testing.T, pool *pgxpool.Pool) int {
 	return rows
 }
 
+// isolatedOutboxPool is a pool on a database carrying every migration, cloned from the package's
+// template (testpg.ClonePool). The rigs' own stores share the package's run database instead
+// (testDSN, testdb.RunDatabaseFor): only the tests that need rows of their own come here.
 func isolatedOutboxPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	base, err := url.Parse(testDSN(t))
-	if err != nil {
-		t.Fatalf("parse test DSN: %v", err)
-	}
-	adminURL := *base
-	adminURL.Path = "/postgres"
-	admin, err := pgxpool.New(context.Background(), adminURL.String())
-	if err != nil {
-		t.Fatalf("connect test admin database: %v", err)
-	}
-	t.Cleanup(admin.Close)
-	name := "legion_outbox_test_" + outboxSuffix(t)
-	// A file copy of template1 (docs/testing.md, "A database a Go test creates").
-	if _, err := admin.Exec(context.Background(), "create database "+name+" strategy file_copy"); err != nil {
-		t.Fatalf("create %s: %v", name, err)
-	}
-	t.Cleanup(func() {
-		if _, err := admin.Exec(context.Background(), "drop database "+name+" with (force)"); err != nil {
-			t.Errorf("drop %s: %v", name, err)
-		}
-	})
-	databaseURL := *base
-	databaseURL.Path = "/" + name
-	st, err := legionstore.Open(context.Background(), databaseURL.String())
-	if err != nil {
-		t.Fatalf("open isolated store: %v", err)
-	}
-	if _, err := st.Migrate(context.Background()); err != nil {
-		st.Close()
-		t.Fatalf("migrate isolated store: %v", err)
-	}
-	st.Close()
-	pool, err := pgxpool.New(context.Background(), databaseURL.String())
-	if err != nil {
-		t.Fatalf("open isolated pool: %v", err)
-	}
-	t.Cleanup(pool.Close)
-	return pool
+	return testpg.ClonePool(t, "legion_outbox_test")
 }
 
 func outboxSuffix(t *testing.T) string {
@@ -299,7 +264,6 @@ func (d *blockingDispatch) EventsAfter(context.Context, string, int64) ([]json.R
 func (d *blockingDispatch) Approval(context.Context, string) (dispatch.Approval, error) {
 	return dispatch.Approval{}, nil
 }
-func (d *blockingDispatch) BuildCommit(context.Context) (string, error) { return "", nil }
 func (d *blockingDispatch) Handoff(context.Context, string) (dispatch.Handoff, error) {
 	return dispatch.Handoff{}, nil
 }
@@ -308,6 +272,9 @@ func (d *blockingDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoPro
 }
 func (d *blockingDispatch) WebhookAppInstalled(context.Context, string) (bool, error) {
 	return true, nil
+}
+func (d *blockingDispatch) PutGatedSteps(context.Context, string, []string) error {
+	return nil
 }
 func (d *blockingDispatch) count() int {
 	d.mu.Lock()
@@ -474,7 +441,6 @@ func (d *refusingDispatch) EventsAfter(context.Context, string, int64) ([]json.R
 func (d *refusingDispatch) Approval(context.Context, string) (dispatch.Approval, error) {
 	return dispatch.Approval{}, nil
 }
-func (d *refusingDispatch) BuildCommit(context.Context) (string, error) { return "", nil }
 func (d *refusingDispatch) Handoff(context.Context, string) (dispatch.Handoff, error) {
 	return dispatch.Handoff{}, nil
 }
@@ -483,6 +449,9 @@ func (d *refusingDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoPro
 }
 func (d *refusingDispatch) WebhookAppInstalled(context.Context, string) (bool, error) {
 	return true, nil
+}
+func (d *refusingDispatch) PutGatedSteps(context.Context, string, []string) error {
+	return nil
 }
 
 // boardDispatch is one issue's Dispatch board: it fails the first failures writes, then applies.
@@ -518,7 +487,6 @@ func (d *boardDispatch) EventsAfter(context.Context, string, int64) ([]json.RawM
 func (d *boardDispatch) Approval(context.Context, string) (dispatch.Approval, error) {
 	return dispatch.Approval{}, nil
 }
-func (d *boardDispatch) BuildCommit(context.Context) (string, error) { return "", nil }
 func (d *boardDispatch) Handoff(context.Context, string) (dispatch.Handoff, error) {
 	return dispatch.Handoff{}, nil
 }
@@ -526,6 +494,7 @@ func (d *boardDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoProjec
 	return nil, nil
 }
 func (d *boardDispatch) WebhookAppInstalled(context.Context, string) (bool, error) { return true, nil }
+func (d *boardDispatch) PutGatedSteps(context.Context, string, []string) error     { return nil }
 
 // A failed transaction is one row's failure, never the runner's end: a Postgres restart drops the
 // pool's connections, and the outbox has to keep draining once they are back. A claim that fails

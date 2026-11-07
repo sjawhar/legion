@@ -39,6 +39,11 @@ var updateGolden = flag.Bool("update", false, "rewrite the golden fixtures this 
 // LEGION-210, behind one the daemon has never observed and so cannot call finished. LEGION-211
 // waits in the same line on an issue of its own, and is in neither `blocked` nor any judgement:
 // a root carrying a run is work already under way.
+//
+// It carries the trees too (dispatch://INFRA-980): LEGION-208's lifecycle stands open under the
+// workflow, and the two roots waiting in the line are live trees of their own, so `trees` names
+// three roots while one issue alone holds a slot — which is the reading `active` can no longer
+// give. Each issue's `tree` names its root, so the child LEGION-209 is told from the three roots.
 func TestTheStateWithTheControllersClaimGolden(t *testing.T) {
 	const issue = "LEGION-208"
 	architect, err := claim.NewToken("legion", issue, claim.RoleArchitect)
@@ -49,13 +54,16 @@ func TestTheStateWithTheControllersClaimGolden(t *testing.T) {
 	admitted := time.Date(2026, 10, 6, 18, 2, 11, 0, time.UTC)
 	store := projectionStore{
 		issues: []record.Issue{
-			{Key: issue, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: issue, Status: "in_progress", Phase: phase.Admitted, Generation: 1, HandedOver: true},
-			{Key: "LEGION-209", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: issue, Status: "todo", Phase: phase.Admitted, Generation: 1},
-			{Key: "LEGION-210", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-210", Status: "todo", Phase: phase.Admitted, Generation: 1, Rank: "00010", HandedOver: true},
-			{Key: "LEGION-211", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-211", Status: "todo", Phase: phase.Implementing, Generation: 2, Rank: "00011", HandedOver: true},
+			{Key: issue, Project: "LEGION", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: issue, Status: "in_progress", Phase: phase.Admitted, Generation: 1, HandedOver: true},
+			{Key: "LEGION-209", Project: "LEGION", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: issue, Status: "todo", Phase: phase.Admitted, Generation: 1},
+			{Key: "LEGION-210", Project: "LEGION", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-210", Status: "todo", Phase: phase.Admitted, Generation: 1, Rank: "00010", HandedOver: true},
+			{Key: "LEGION-211", Project: "LEGION", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-211", Status: "todo", Phase: phase.Implementing, Generation: 2, Rank: "00011", HandedOver: true, HandedOverFrom: "LEGION-200"},
 		},
 		phases: map[string][]record.PhaseRow{issue: {{Issue: issue, Role: claim.RoleArchitect, Claim: architect}}},
 		slots:  []record.Slot{{Issue: issue, Index: 0, AdmittedAt: admitted}},
+		// The tree the architect runs stands open under the workflow, which is what makes it a
+		// live tree now that its slot no longer says so.
+		lifecycles: []string{issue},
 		mirror: []record.DispatchIssueRow{
 			{Key: issue, Project: "LEGION", Status: "in_progress", Blockers: []string{}, Seq: 4},
 			{Key: "LEGION-209", Project: "LEGION", Status: "todo", Blockers: []string{"LEGION-300"}, Seq: 5},
@@ -66,9 +74,10 @@ func TestTheStateWithTheControllersClaimGolden(t *testing.T) {
 		},
 	}
 	architectLocator := sandboxLocator(architect, "legion-legion-legion-208", "4b7e1c2a-0d93-4f6e-8a51-3c2f9e7d1b04", 1)
-	// The architect's session reported its live rows with its ready (LEGION-663), from the process
-	// the locator names, so the fixture carries a claim's capability report; the controller's ready
-	// carries none, and its claim is on no issue besides.
+	// The architect's session sent its live rows on a `claims/ready` of its own, measured at an
+	// idle tick of its own interval rather than at its boot (LEGION-663, INFRA-927), from the
+	// process the locator names, so the fixture carries a claim's capability report; the
+	// controller measures nothing and sends none, and its claim is on no issue besides.
 	reports := map[claim.Token]capabilities.Report{
 		architect: {
 			Claim: architect, Generation: 1, Locator: *architectLocator,
@@ -83,7 +92,7 @@ func TestTheStateWithTheControllersClaimGolden(t *testing.T) {
 			},
 		},
 	}
-	state, err := Project(context.Background(), nil, store, "LEGION", []supervise.Claim{
+	state, err := Project(context.Background(), nil, store, "LEGION", nil, []supervise.Claim{
 		{
 			Token: architect, Project: "legion", Tree: issue, Issue: issue, Role: claim.RoleArchitect,
 			State: supervise.StateReady, Session: "ses_architect_208", Locator: architectLocator,

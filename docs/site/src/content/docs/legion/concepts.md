@@ -1,6 +1,6 @@
 ---
 title: Concepts
-description: The controller, the architect, the phase workers, admission and the legion label, the design gate, handoffs, review, the architect's acceptance, READY, the merge that closes the issue and the production check after it.
+description: The controller, the architect, the phase workers, admission and the legion label, the design gate, handoffs, review, the architect's acceptance, READY, the merge that closes the issue and the production check your project's production_check setting opens after it.
 sidebar:
   order: 2
 ---
@@ -42,10 +42,12 @@ One Legion deployment can work issues across several GitHub repositories, under 
 with exactly one repository per issue — never two. A change that spans repositories is a parent
 issue with one child per repository, each child's own `--repo` fixed when the daemon records it.
 Every pane and pod holds a write token, minted from the role's GitHub App, for its own issue's
-owner alone, and a read-only token for every other owner the project maps (`legion gh`, the `gh`
-wrapper every pane and pod runs, picks the directory by the owner the command names); `git` reaches
-the same bundle through a credential helper keyed the same way, so a push to another owner's
-repository is refused there, not merely discouraged.
+repository alone, and read-only tokens for every other repository the project maps. Its gh bundle
+holds one directory per owner and, under the issue's own owner, one more per other repository
+served there; `legion gh`, the `gh` wrapper every pane and pod runs, reads the repository's own
+directory where the bundle holds one and the owner's otherwise, and `git` reaches the same bundle
+through a credential helper that picks a directory the same way, so a push to any other repository
+is refused there, not merely discouraged.
 
 ## The controller
 
@@ -100,6 +102,14 @@ admission to close. The architect:
 The architect writes no code. A child issue runs the same phases as its root, with a pull request
 of its own, inside the same tree.
 
+**The children do the work first.** An issue starts no phase of its own while Dispatch shows an
+open child under it, a child the architect has filed and not released yet included; the architect
+is told so once, with a notice naming each open child and the Dispatch status that holds it. A
+parent starts its own first phase once the last of them has left the workflow, and its pull
+request then builds on a base that already carries their merges. For the same reason the daemon
+refuses a parent's acceptance, and a root's close, while an issue beneath it is still in the
+workflow.
+
 ## Phase workers
 
 The daemon starts each phase's worker itself, one phase at a time, in the order below. A role keeps
@@ -117,7 +127,7 @@ head — brings the pod back and resumes the same sessions where they stopped.
 | `implementing` | implementer | Writes the change, proves it works, pushes `legion/<KEY>` and opens the pull request. | implement App |
 | `testing` | tester | Runs the changed surface for real, tries to break it, judges whether the tests would catch what breaks, and reads CI for everything static; reports `pass` or `fail`. | review App |
 | `reviewing` | reviewer | Reviews the pull request and submits an approval of the head, or changes requested. | review App |
-| `accepting` | the architect | Reads the tester's handoff, each check of the issue's Verification document with its latest result, and the reviewer's approval of the head, and accepts the issue (on to retro) or sends it back to the implementer or the tester. Issues still running beneath it do not hold the acceptance: a root's close waits for them instead (`awaiting_merge`). No worker runs here; the issue's Dispatch status stays `needs_review`. | review App |
+| `accepting` | the architect | Reads the tester's handoff, each check of the issue's Verification document with its latest result, and the reviewer's approval of the head, and accepts the issue (on to retro) or sends it back to the implementer or the tester. The acceptance is refused while an issue beneath it is still in the workflow, so a parent is accepted after its children, whose merges its own head carries. No worker runs here; the issue's Dispatch status stays `needs_review`. | review App |
 | `retro` | implementer | Writes down what the work taught, as one comment on the issue, and brings up to date whatever the repository's instructions require the pull request description to say about the paths it changes. It commits nothing. | implement App |
 | `merging` | merger | Sends `READY` for the current head; the daemon accepts it only on the approved head, and submits the merge, which GitHub completes under the base branch's own rules. | implement App |
 | `awaiting_merge` | none | Waits for the merge to land under the repository's rules: the daemon's submission, or a person's for a by-hand READY. The merge closes the issue; a root whose tree still runs records the merge and waits here until the last other issue of its tree is done or parked. | none |
@@ -141,9 +151,17 @@ withdrawn.
 
 Legion works only the issues handed to it with the Dispatch label **`legion`** (in any case), so it
 can share a Dispatch project with people and other agents. A root issue is admitted when it carries
-the label, is in `todo`, and a slot is free. The number of slots is `admission_cap` in the daemon's
-configuration, four by default; a labelled `todo` root that finds no free slot waits in line, in the
-project board's order, and takes the next one.
+the label, is in `todo`, and a slot is free. A slot is one issue with work, a root or a child, so
+a tree of four working issues holds four slots. The number of slots is `admission_cap` in the
+daemon's configuration, four by default; an issue that finds no free slot waits in line, and a
+labelled `todo` root takes its place in that line in the project board's order.
+
+An issue holds a slot while a worker of it has work: in planning, implementing, testing,
+reviewing, retro or merging, and a root while its architect writes the spec, before the design
+gate first opens. It holds none while it only waits — for its merge, in `accepting`, on a blocker,
+on its own children, or on a person — and gets one again when it has work again, oldest wait
+first. Giving a slot back stops nothing: every worker of the issue stays live in the issue's pod
+and answers questions until the issue closes.
 
 An issue gets the label in one of three ways:
 
@@ -169,8 +187,11 @@ resolution, or reply that hands an open ask back to the agent; so does your appr
 request of the root's spec, and so does the spec's design gate standing open. The wait also ends
 when nothing is asked of you any more: Dispatch retracts the question because its decision block
 left the spec, a session closes it, or a session hands it back to the agent's turn. The answered
-root goes to the front of the waiting line, ahead of every root that never ran, and the next free
-slot gives the same architect session a task naming what answered it and what is still with you. An
+root goes to the front of the waiting line, among the issues whose work came back and ahead of
+every issue whose first phase has yet to start, and its promotion there gives the same architect
+session a task naming what answered it and what is still with you: at once, taking no slot, once
+the root's design gate has opened, and at the next free
+slot while its architect is still writing the first spec. An
 agent's answer or resolution of another ask answers nothing, and an act of yours from before the
 wait began is one the architect already read. Taking the label off, or a person or an outside session
 claiming the root on Dispatch, takes it out of the workflow instead: Legion never resumes work
@@ -193,7 +214,7 @@ decision: it stays on the ask for the person who asked, and nothing wakes.
 
 ## The design gate
 
-By default (`gates.design: root-issues`), no phase starts until a person approves the root issue's
+By default (`gates.design: [spec]`), no phase starts until a person approves the root issue's
 spec. The architect settles the spec's decision blocks with you first, then asks for approval with a
 summary of what the tree will do. You approve from the document's header or from the approval
 question in your Dispatch Inbox; **Request changes** sends it back with your reason.
@@ -205,9 +226,14 @@ your approval at the new version and the gate reopens, so the architect asks you
 the answer means the spec's text changes too, the architect rewrites it and asks you to approve
 again, naming what changed since your approval. Work already in flight carries on, but the merger's
 `READY` waits for that approval. The daemon only reads approvals; nothing in Legion approves a spec
-on a person's behalf, and the approval Dispatch records at your answer is yours, in your name. A
-deployment that does not want the gate sets `gates.design: off`, and the tree starts as soon as the
-architect has written its spec.
+on a person's behalf, and the approval Dispatch records at your answer is yours, in your name.
+
+`gates.design` is a list, so a deployment can ask for more than one document of the root issue:
+`decisions` is the issue's decisions document, `criteria` its Verification document, and `spec`
+its primary document. The daemon keeps one gate record for each step listed, and the tree starts
+only once a person has approved every one of them; each closes on its own document's next
+version. A deployment that does not want the gate sets `gates.design: []`, and the tree starts as
+soon as the architect has written its spec.
 
 ## Handoffs on the Dispatch issue
 
@@ -229,8 +255,9 @@ approved: the daemon compares the two
 on GitHub, and refuses `READY` (`READY_UNREVIEWED_CHANGE`) when anything
 but a commit under `docs/solutions/` changed since the approval, so that change goes back to
 review. The one other change it lets
-through is the removal of files under `.legion/`, where handoffs were committed before they moved
-to Dispatch: `legion handoffs import` makes that commit once on each branch in flight at the move.
+through is a change whose every path is under `.legion/`, where handoffs were committed before
+they moved to Dispatch: nothing writes or reads a path there now, so nobody reviews one, whatever
+GitHub says the change did to it.
 
 ## Review signalling
 
@@ -389,14 +416,21 @@ and posts on the issue, and tells that role, that the `READY` is withdrawn, nami
 The merge closes the issue: once the pull request merges, the daemon writes `done`, and nothing is
 left of the issue to develop. A root whose tree still runs is the one issue the merge does not
 close at once: the daemon records the merge, the root waits in `awaiting_merge` with its workers
-and its admission slot while its children reach their own merges, its architect is told once which
+live and no admission slot held while the rest of its tree reaches its own merges, its architect
+is told once which
 issues the close waits for, and the close comes when the last of them is done or parked. What is
 left after the close is to see the change work in production, and that is
-work after the close: the implementer — the agent that wrote the change — is handed a production
-check in its live session as the issue closes. Each look of the check reaches the deploy as your
+work after the close, where your project asks for it: `projects.<KEY>.production_check` in
+`legion.yaml` takes `off` or `tester` and is `tester` by default, so the tester is handed a
+production check in its live session as the issue closes, and a project that sets `off` opens no
+check at all — the close retires every claim of the issue and releases its pod. The loader
+refuses any other value, naming the key and the value it read. The check's record carries the
+role, written when the check opened, so changing the setting leaves an open check with the role
+it started under, and only that role may report on it. Each look of the check reaches the deploy
+as your
 deployment instructions say (the merge commit published to your deploy role, with no reply
 awaited), reads whether production carries the merge, and ends one of three ways: `pass`, once
-the implementer drove the change in production through a user's own access path and recorded the
+the agent drove the change in production through a user's own access path and recorded the
 result of the issue's `after_merge` check, naming the merge commit and what woke the look, with
 that result's line on the pull request; `pending`,
 when production does not carry the merge yet; or `fail`, a defect, naming the issue, the pull
@@ -406,25 +440,25 @@ One that needs a decision is a Dispatch ask on Legion's
 daily report issue, so you decide whether it needs an issue.
 The record is that result and the pull request: a closed issue takes a result for an `after_merge` or `default_branch` check, and refuses every other write.
 
-Nothing waits for the deploy: a `pending` look ends, the implementer's pod goes — and its disk
-with it, since an issue's disk belongs to its pod — while its conversation is kept in the session
-database, and the daemon wakes the check — a new pod comes back and
-the same agent takes the next look — when Dispatch's delivery timeline reports the pull request
-deployed (its `issue.deployed` event); when the project names the repository's deploy workflow
-(`projects.<KEY>.deploys` in `legion.yaml`: the repository, the workflow file and a step such as
-`Apply`), at each completed run of that workflow on the repository's default branch whose step
-succeeded after the pull request merged, once per such job; or, for Legion's own repository, when
-a Legion daemon boots on a build that contains the merge, or Dispatch announces that every one of
-its server processes serves such a build. A run of another
-workflow or branch, a run a pull request triggered, a step that was skipped or failed, and a step
-that finished before the merge wake nothing. A wake while a look is open is kept for the next look.
-A look is bounded at two hours, and the whole check at `production_check_hours` (336, fourteen
-days, by default): the wake at that bound is the last look, and a `pending` there closes the check
-as not run, which the implementer writes on the pull request. `legion state` prints how many checks
-are open and the oldest of them.
+Nothing waits for the deploy, and the agent names its own next look. A `pending` on any look but
+the check's last carries `wake_at`, an RFC 3339 time: when the agent wants to look again. The
+look ends, the pod goes — and its disk
+with it, since an issue's disk belongs to its pod — while the conversation is kept in the session
+database, and at the time the agent named a new pod comes back and the same session takes the
+next look. A time less than 60 seconds ahead becomes 60 seconds ahead, and a time at or after the
+check's own bound starts no look of its own, because the look at that bound already stands.
+Nothing else wakes a check: no deploy run, no Dispatch `issue.deployed`, no Dispatch build and no
+daemon boot, and the daemon reads no deployment's production workflows at all.
+A look is bounded at two hours, and a look nobody reported — its two hours, an operator's hold,
+or a claim that failed to start — starts the next look two hours later.
+The whole check is bounded at `production_check_hours` (336, fourteen
+days, by default): the look at that bound is the last, and a `pending` there closes the check
+as not run, which the agent writes on the pull request. `legion state` prints how many checks
+are open and the oldest of them, with when its next look is due.
 
-A child's close deletes its pod, and the disk goes with it; a root's close frees its admission slot
-once no other issue of its tree is still in the workflow, and the finished tree **lingers** for
+A child's close deletes its pod, and the disk goes with it; a root's close releases any admission
+slot its issues still held, which happens once no other issue of its tree is still in the
+workflow, and the finished tree **lingers** for
 `linger_hours` (72 by default) in case work resumes, each member's conversation kept in the session
 database; then its Sandboxes are deleted, once no member's check is open. Closing a root yourself
 from the Dispatch dashboard lingers the tree at once, children and all: your decision outranks

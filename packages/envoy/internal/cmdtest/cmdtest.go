@@ -20,6 +20,7 @@ import (
 // Build builds the main package in the test's working directory, its own command's, into a binary
 // named name that is removed when the test ends. ENVOY_TEST_GO_OVERLAY, when set, is passed to go
 // build -overlay, so a probe can build the binary from changed sources without editing the tree.
+// A test that asks for the same binary again is handed the one it already built (built).
 func Build(t testing.TB, name string) string {
 	t.Helper()
 	return build(t, name)
@@ -34,18 +35,58 @@ func BuildStamped(t testing.TB, name, commit string) string {
 	return build(t, name, "-ldflags", "-X main.buildCommit="+commit)
 }
 
+// built is the binary each test has already built, by builtKey. go build relinks the whole
+// binary into every -o path it is given - about a second apiece on a warm build cache, minutes on
+// a loaded machine - and a row that starts five processes of one command asked for five of them
+// (INFRA-985), so a test builds each command once and hands every process of that test the same
+// binary. The key holds the test itself, so no binary outlives the TempDir it was written into,
+// and the entry goes when the test ends.
+var built sync.Map
+
+// builtKey is one test's build of one command: the test, and everything that decides what go
+// build writes - the binary's name, the overlay, and the flags.
+type builtKey struct {
+	t    testing.TB
+	args string
+}
+
+// builtBinary is one memoised build: once makes it, path is what it wrote, empty where it failed.
+type builtBinary struct {
+	once sync.Once
+	path string
+}
+
 // build is Build with flags passed to go build before the package.
 func build(t testing.TB, name string, flags ...string) string {
 	t.Helper()
+	overlay := os.Getenv("ENVOY_TEST_GO_OVERLAY")
+	key := builtKey{t: t, args: strings.Join(append([]string{name, overlay}, flags...), "\x00")}
+	entry, loaded := built.LoadOrStore(key, &builtBinary{})
+	if !loaded {
+		t.Cleanup(func() { built.Delete(key) })
+	}
+	binary := entry.(*builtBinary)
+	binary.once.Do(func() { binary.path = runBuild(t, name, overlay, flags) })
+	if binary.path == "" {
+		t.Fatalf("build %s: an earlier build of it in this test failed", name)
+	}
+	return binary.path
+}
+
+// runBuild is one go build of the command, into a binary named name under a directory of this
+// test's own. It returns the empty path where the build failed, having failed the test.
+func runBuild(t testing.TB, name, overlay string, flags []string) string {
+	t.Helper()
 	binary := filepath.Join(t.TempDir(), name)
 	args := []string{"build", "-o", binary}
-	if overlay := os.Getenv("ENVOY_TEST_GO_OVERLAY"); overlay != "" {
+	if overlay != "" {
 		args = append(args, "-overlay", overlay)
 	}
 	args = append(args, flags...)
 	args = append(args, ".")
 	if out, err := exec.Command("go", args...).CombinedOutput(); err != nil {
-		t.Fatalf("build %s: %v\n%s", name, err, out)
+		t.Errorf("build %s: %v\n%s", name, err, out)
+		return ""
 	}
 	return binary
 }

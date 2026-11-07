@@ -10,10 +10,11 @@ Read this on a `triage` wake, at every start, and when a person hands you an iss
    match in one request, so no row is missed or repeated while the list changes.
 2. The rows show no parent, so `dispatch read` each one and follow `Links:` up through each
    `child_of` parent. A `child_of` under `Referenced by:` is a child of this issue, not its parent.
-3. Leave a child that has an ancestor in `admission.active` or `admission.waiting`, because that
-   tree's architect owns it.
+3. Leave a child whose `issues.<KEY>.tree` is a root in `admission.trees`, or that has an ancestor
+   that is, because that tree's architect owns it. `admission.trees` is the live trees: a slot is
+   one issue with work, so a running tree holds none of its own while its children work.
 4. Every other row with no `issues.<KEY>` entry in `read_state` is a root to you, a child whose
-   tree is in neither `admission.active` nor `admission.waiting` included. Read who set its label
+   tree is not in `admission.trees` included. Read who set its label
    ("Triage a root", step 2). A root a person labelled is queued by the daemon and needs nothing
    from you. Triage, as a root, each one whose label a session set.
 5. A root `read_state` records and that is now in `triage` is one a person pulled back. Never
@@ -67,9 +68,9 @@ Read this on a `triage` wake, at every start, and when a person hands you an iss
    who will get this tree's questions and its design approval`, or, when `Assignee:` says
    `unassigned`, `Unassigned — nobody's Inbox shows this tree's questions or its design approval
    until someone takes it from the issue header (Assignee, beside Priority)`. Promise the design
-   approval only when your system prompt's `Design gate policy:` line says
-   `gates.design: root-issues`; under `gates.design: off` nobody approves a design, so drop "and
-   its design approval" (and "or its design approval"). Take the assignee from the read, never
+   approval only when your system prompt's `Design gate steps:` sentence names at least one step;
+   when it reads `Design gate steps: none.` nobody approves a design, so drop "and its design
+   approval" (and "or its design approval"). Take the assignee from the read, never
    from how the issue was created, because an issue filed with no assignee still lands on the
    project's default assignee where a person set one. An unassigned root still runs, but its
    architect's asks reach only the Inbox's `Unassigned` filter.

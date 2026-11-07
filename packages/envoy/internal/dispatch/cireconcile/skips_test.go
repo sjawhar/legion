@@ -1,10 +1,19 @@
 package cireconcile
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // absentRow is a repository the App is installed on that GitHub then answers 404 for. It sorts
 // before the mapped repository, so a pass reads it first and has to go on from it.
 const absentRow = "acme/absent"
+
+// renamedAwayRow is the name the mapped repository was renamed away from, held by a mapping of
+// its own as repo_projects holds both names of one repository. The GitHub stand-in knows no
+// repository under it, so every read of it is a 404, as GitHub answers for a name a repository
+// no longer has.
+const renamedAwayRow = "acme/widgets-before"
 
 // A mapping GitHub does not answer for is skipped, counted and named, and the pass goes on to
 // the repositories after it: one repository GitHub has stopped answering about must not cost
@@ -39,6 +48,49 @@ func TestAMappingGitHubDoesNotAnswerIsSkipped(t *testing.T) {
 	}
 	if skipped[0]["repository"] != absentRow {
 		t.Fatalf("the WARN names repository %v, want %s", skipped[0]["repository"], absentRow)
+	}
+}
+
+// A mapping whose repository was renamed away is reconciled under the name the repository is
+// called today, so the pass asks GitHub nothing about the old name and skips nothing for it.
+// GitHub answers 404 for the installation of a name a repository was renamed away from, so a
+// pass reading that row's own name holds no token for it and logs `ci reconcile skipped a
+// repository it holds no token for` on every pass for ever, about a name no one can read by
+// design. The mapping that names no rename is reconciled exactly as it was: its head settles on
+// the checks GitHub holds.
+func TestARenamedMappingIsReconciledUnderTheNameItHasNow(t *testing.T) {
+	h := newHarness(t, reviewerAppID)
+	h.mapRepository(rowRepository)
+	h.mapRenamedRepository(renamedAwayRow, rowRepository)
+	h.listHead()
+	h.github.setCheckRuns(gitHubRepository, headSHA,
+		checkRun(1, "ci-ok", "completed", "success", otherApp, "2026-11-05T03:01:00Z"),
+	)
+	settlements := h.subscribe()
+
+	h.pass()
+
+	settled := h.settlement(settlements, "after a pass over a mapping renamed away and the mapping it names")
+	if settled.Number != pullNumber || settled.SHA != headSHA || settled.Passed.Count != 1 {
+		t.Fatalf("settlement = %+v, want the head of %s settled on its one passing check", settled, gitHubRepository)
+	}
+	if skipped := h.lines("ci reconcile skipped a repository it holds no token for"); len(skipped) != 0 {
+		t.Fatalf("the pass skipped %d repositories it holds no token for, want none:\n%s", len(skipped), h.logs.String())
+	}
+	for _, request := range h.github.received() {
+		if strings.Contains(strings.ToLower(request.url), renamedAwayRow) {
+			t.Errorf("the pass asked GitHub about the name the repository was renamed away from: %s %s", request.method, request.url)
+		}
+	}
+	line := h.passLine()
+	if got := number(t, line, "mappings_skipped"); got != 0 {
+		t.Errorf("the pass line reports %d mappings skipped, want none: %v", got, line)
+	}
+	if got := number(t, line, "heads"); got != 1 {
+		t.Errorf("the pass read %d heads, want the one head of the repository both rows name: %v", got, line)
+	}
+	if sent := h.github.countPath("/repos/" + gitHubRepository + "/pulls"); sent != 1 {
+		t.Errorf("the open pull requests of %s were read %d times, want once for two rows naming it", gitHubRepository, sent)
 	}
 }
 

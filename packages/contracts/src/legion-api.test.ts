@@ -22,6 +22,7 @@ import {
   LegionGrantResponse,
   LegionHandoffCompleteRequest,
   LegionHandoffCompleteResponse,
+  LegionInstant,
   LegionIssueStatusRequest,
   LegionOperatorClaimResponse,
   LegionOperatorClaimsResponse,
@@ -603,9 +604,11 @@ test("the state golden carries each issue's tree memory draw", () => {
 });
 
 // The state golden carries LEGION-207, closed by its merge, with its production check open: the
-// repository, pull request and merge commit the check looks for, its looks, the wake that started
-// the latest and the bound. The check is present only while open, so an issue without one parses,
-// and a wake with no kind is refused.
+// repository, pull request and merge commit the check looks for, the role that works it, its
+// looks, the wake that started the latest and when the next look is due. Its role is the
+// implementer, a check opened before the release that made the role the project's choice, which
+// the migration leaves on every check already open. The check is present only while open, so an
+// issue without one parses, and a wake with no kind, or a check with no role, is refused.
 test("the state golden carries a done issue's open production check", () => {
   const state = fixture("state.json") as {
     issues: Record<string, { phase: string; check?: Record<string, unknown> }>;
@@ -620,6 +623,7 @@ test("the state golden carries a done issue's open production check", () => {
     pullRequest: 1239,
     mergeCommit: "3e9c0a7b5d2f4e8a1c6b9d0f2a4e7c5b8d1f3a60",
     openedAt: "2026-09-22T08:40:12Z",
+    role: "implementer",
     looks: 2,
     lookOpen: true,
     lastWake: {
@@ -632,7 +636,7 @@ test("the state golden carries a done issue's open production check", () => {
   });
 
   // Before the first look wakes there is no wake, and a merge commit the daemon never recorded is
-  // empty until the first build compare fills it.
+  // empty: nothing fills it now, and the checking agent reads it from GitHub.
   const { lastWake: _, ...unwoken } = closed.check;
   closed.check = { ...unwoken, mergeCommit: "", looks: 0, lookOpen: false };
   expect(LegionStateResponse.safeParse(state).error?.issues ?? []).toEqual([]);
@@ -642,10 +646,14 @@ test("the state golden carries a done issue's open production check", () => {
 
   closed.check = { ...unwoken, lastWake: { kind: "", detail: "", at: "2026-09-22T09:10:51Z" } };
   expect(LegionStateResponse.safeParse(state).success).toBeFalse();
+
+  closed.check = { ...unwoken, role: "" };
+  expect(LegionStateResponse.safeParse(state).success).toBeFalse();
 });
 
-// The implementer's check report carries no commit (the look pushed nothing) and a verdict the
-// daemon holds to pass, pending or fail; a phase completion keeps its commit.
+// The checking role's report carries no commit (the look pushed nothing) and a verdict the
+// daemon holds to pass, pending or fail; a phase completion keeps its commit. A pending report
+// names when the agent asks to be woken for its next look, an offset timestamp.
 test("a check report is a completion without a commit", () => {
   const report = { grantId: "grant-207", summary: "Driven in production.", ready: false };
   for (const verdict of ["pass", "pending", "fail"]) {
@@ -654,6 +662,51 @@ test("a check report is a completion without a commit", () => {
   expect(
     LegionHandoffCompleteRequest.safeParse({ ...report, verdict: "pass", commit: "" }).success
   ).toBeFalse();
+  expect(
+    LegionHandoffCompleteRequest.safeParse({
+      ...report,
+      verdict: "pending",
+      wakeAt: "2026-10-19T09:00:00Z",
+    }).success
+  ).toBeTrue();
+  expect(
+    LegionHandoffCompleteRequest.safeParse({ ...report, verdict: "pending", wakeAt: "tomorrow" })
+      .success
+  ).toBeFalse();
+  expect(
+    LegionHandoffCompleteRequest.safeParse({
+      ...report,
+      verdict: "pending",
+      wake_at: "2026-10-19T09:00:00Z",
+    }).success
+  ).toBeFalse();
+});
+
+// What `z.iso.datetime({ offset: true })` alone would take and Go's `time.Time` decode refuses:
+// a time with no seconds. The plugin's `wake_at` validates against this same schema
+// (`packages/pi-shared/src/legion-phase-ops.ts`), so both sides refuse the same strings and the
+// agent is told which field is wrong rather than reading the daemon's generic invalid-body error.
+test("wakeAt refuses a time with no seconds, as the daemon's decode does", () => {
+  const report = {
+    grantId: "grant-207",
+    summary: "Driven in production.",
+    verdict: "pending",
+    ready: false,
+  };
+  const refused = LegionHandoffCompleteRequest.safeParse({
+    ...report,
+    wakeAt: "2026-11-06T10:00Z",
+  });
+  expect(refused.success).toBeFalse();
+  expect(refused.error?.issues.map((issue) => issue.path.join("."))).toEqual(["wakeAt"]);
+  expect(LegionInstant.safeParse("2026-11-06T10:00Z").success).toBeFalse();
+  for (const wakeAt of [
+    "2026-11-06T10:00:00Z",
+    "2026-11-06T10:00:00.5Z",
+    "2026-11-06T10:00:00+02:00",
+  ]) {
+    expect(LegionHandoffCompleteRequest.safeParse({ ...report, wakeAt }).success).toBeTrue();
+  }
 });
 
 // A file-backed phase's completion names the Dispatch handoff record the worker wrote: the
@@ -880,7 +933,8 @@ test("a field the Go shape requires cannot be dropped", () => {
 // nobody has finished — a child held at `admitted` and a waiting root alike — by issue key, each
 // with the keys it waits on, among them keys the state's `issues` does not record. `blocked` is
 // required, so a daemon older than the plugin cannot leave it out, and `waiting` keeps its own
-// meaning beside it: the roots' waiting line.
+// meaning beside it: the admission line, which since contract 51 carries children as well as
+// roots.
 test("the state golden names what every blocked issue waits on", () => {
   const state = LegionStateResponse.parse(fixture("state.json"));
 
@@ -896,6 +950,45 @@ test("the state golden names what every blocked issue waits on", () => {
 
   const malformed = fixture("state.json") as { admission: { blocked: unknown[] } };
   malformed.admission.blocked = [{ issue: "LEGION-209" }];
+  expect(LegionStateResponse.safeParse(malformed).success).toBeFalse();
+});
+
+// Contract 51: the cap counts the issues at work, so `active` and `waiting` name issues of any
+// depth and say nothing about which trees run. `trees` says it instead — the root of every live
+// tree — and each issue's `tree` names its own root, so a child is told from a root. The computed
+// golden carries a child: LEGION-209 stands in LEGION-208's tree, and all three live trees are
+// named while one issue alone holds a slot. Neither key is required: a daemon at this contract
+// strips both from the state it serves a caller whose pod's plugin is older than 51
+// (`api.stateFor`, `withoutTrees`). So a body without them parses, and a reader of it
+// learns nothing about which trees run rather than losing the whole state; what is refused is a
+// `tree` that is no issue key. A daemon older than this plugin is kept away by the boot gate and
+// `legion probe-image`, not by this schema.
+test("the state names the live trees and each issue's own tree", () => {
+  const state = LegionStateResponse.parse(fixture("state-controller-claim.json"));
+
+  expect(state.admission.active).toEqual(["LEGION-208"]);
+  expect(state.admission.trees).toEqual(["LEGION-208", "LEGION-210", "LEGION-211"]);
+  expect(state.issues["LEGION-209"]?.tree).toBe("LEGION-208");
+  expect(state.issues["LEGION-208"]?.tree).toBe("LEGION-208");
+
+  const stripped = fixture("state.json") as {
+    admission: Record<string, unknown>;
+    issues: Record<string, { tree?: unknown }>;
+  };
+  delete stripped.admission.trees;
+  for (const issue of Object.values(stripped.issues)) {
+    delete issue.tree;
+  }
+  const served = LegionStateResponse.safeParse(stripped);
+  expect(served.success).toBeTrue();
+  expect(served.data?.admission.trees).toBeUndefined();
+
+  const malformed = fixture("state.json") as { issues: Record<string, { tree?: unknown }> };
+  const issue = malformed.issues["LEGION-208"];
+  if (issue === undefined) {
+    throw new Error("state fixture lacks LEGION-208");
+  }
+  issue.tree = "not an issue key";
   expect(LegionStateResponse.safeParse(malformed).success).toBeFalse();
 });
 
@@ -1262,6 +1355,17 @@ test("the release records are read with the claim credential in the body", () =>
   expect(
     LegionReleaseRecordsRequest.safeParse({ ...request, since: "yesterday" }).success
   ).toBeFalse();
+  // The session sends `since`, and the daemon decodes it with Go's `time.Parse(time.RFC3339, …)`,
+  // which refuses a time with no seconds. The field is a `LegionInstant`, which refuses every
+  // string that parse refuses and a few more besides, so the plugin never sends one the daemon
+  // would answer for after a round trip.
+  expect(
+    LegionReleaseRecordsRequest.safeParse({ ...request, since: "2026-11-01T12:00Z" }).success
+  ).toBeFalse();
+  expect(
+    LegionReleaseRecordsRequest.safeParse({ ...request, since: "2026-11-01T12:00:00.5+02:00" })
+      .success
+  ).toBeTrue();
   expect(
     LegionReleaseRecordsRequest.safeParse({ ...request, sessionId: "ses" }).success
   ).toBeFalse();
@@ -1457,6 +1561,59 @@ test("the state golden names the held lifecycle rows, and the list cannot be dro
   expect(LegionStateResponse.safeParse(dropped).success).toBeFalse();
 });
 
+// The wakes the pacing holds (contract 53): the golden names one of each kind the daemon paces,
+// in claim order, and a state outside a wave carries an empty list rather than none. The key is
+// not required: a daemon at this contract leaves it off the state it serves a caller whose pod's
+// plugin is older than 53, and the one it serves a caller whose pod's claims it cannot read at
+// all, which may be a pod at this contract (`api.stateFor`, `withoutWakesWaiting`). So a body
+// without the key parses, and a reader of it learns nothing about which wakes wait rather than
+// losing the whole state; what is refused is a wake with no kind at all.
+test("the state golden names the wakes the pacing holds, and the key may be absent", () => {
+  const state = LegionStateResponse.parse(fixture("state.json"));
+  expect(state.wakesWaiting).toEqual([
+    {
+      claim: "legion-legion-legion-207-implementer",
+      issue: "LEGION-207",
+      role: "implementer",
+      kind: "plugin-task",
+      dueAt: "2026-09-22T09:17:56Z",
+    },
+    {
+      claim: "legion-legion-legion-208-architect",
+      issue: "LEGION-208",
+      role: "architect",
+      kind: "catch-up",
+      dueAt: "2026-09-22T09:18:03Z",
+    },
+    {
+      claim: "legion-legion-legion-208-planner",
+      issue: "LEGION-208",
+      role: "planner",
+      kind: "launch",
+      dueAt: "2026-09-22T09:18:11Z",
+    },
+  ]);
+  expect(LegionStateResponse.parse(fixture("state-stage3.json")).wakesWaiting).toEqual([]);
+
+  const stripped = fixture("state.json") as Record<string, unknown>;
+  delete stripped.wakesWaiting;
+  const served = LegionStateResponse.safeParse(stripped);
+  expect(served.success).toBeTrue();
+  expect(served.data?.wakesWaiting).toBeUndefined();
+
+  const unnamed = fixture("state.json") as { wakesWaiting: unknown[] };
+  unnamed.wakesWaiting = [
+    {
+      claim: "legion-legion-legion-207-implementer",
+      issue: "LEGION-207",
+      role: "implementer",
+      kind: "",
+      dueAt: "2026-09-22T09:17:56Z",
+    },
+  ];
+  expect(LegionStateResponse.safeParse(unnamed).success).toBeFalse();
+});
+
 // The daemon's resolved legion.yaml (contract 35): the golden carries the file's `max_fix_attempts`
 // and `worker_boot_timeout_seconds` and its GitHub Apps' ids and installations with no key, a
 // Stage 3 state carries the defaults, the two typed keys are positive integers, the rest rides
@@ -1507,21 +1664,21 @@ test("the state golden carries each durable consumer's lag, and the list cannot 
       stalled: false,
     },
     {
-      name: "legion-go-LEGION-dispatch-server",
-      waiting: 0,
-      oldestAt: null,
-      oldestAgeSeconds: null,
-      lastHandledAt: null,
-      stalled: false,
-      unavailable: "read the consumer's info: context deadline exceeded",
-    },
-    {
       name: "legion-go-LEGION-github",
       waiting: 412,
       oldestAt: "2026-09-22T09:05:34Z",
       oldestAgeSeconds: 754,
       lastHandledAt: "2026-09-22T09:16:41Z",
       stalled: true,
+    },
+    {
+      name: "legion-go-LEGION-wake",
+      waiting: 0,
+      oldestAt: null,
+      oldestAgeSeconds: null,
+      lastHandledAt: null,
+      stalled: false,
+      unavailable: "read the consumer's info: context deadline exceeded",
     },
   ]);
   expect(LegionStateResponse.parse(fixture("state-stage3.json")).consumers).toEqual([]);

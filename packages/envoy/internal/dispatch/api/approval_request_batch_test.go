@@ -153,24 +153,28 @@ func countedApprovalRequest(t *testing.T, handler http.Handler, artifactID strin
 //  18. the ask row (openApprovalAsk);
 //  19. the author's follow (asks.FollowAuthor);
 //  20. the question's references, none of which it names (replaceReferences);
-//  21. the ask's block-state row, inserted where it has none (refs.IndexAskPartsCounted, through
+//  21. the row the ask owes the grammar's re-index queue, deleted where it has one
+//     (refs.settleOwed): the write holds the source's row and has just read its text with the
+//     whole grammar, so nothing is owed for it any more (INFRA-869);
+//  22. the ask's block-state row, inserted where it has none (refs.IndexAskPartsCounted, through
 //     lockItemState);
-//  22. that state row, read and locked;
-//  23. the part rows of the new ask - its question and each option (writeItemBlocks);
-//  24. the text of each part at the new revision;
-//  25. the state the parts were indexed at (storeItemState);
-//  26. the thread's followers, for the event payload (events.AskEventPayload);
-//  27. the issue's sequence, locked (appendEvent);
-//  28. the ask.opened event row;
-//  29. that event's payload, rewritten with its own id (events.Broker.Append);
-//  30. the issue's last_seq;
+//  23. that state row, read and locked;
+//  24. the part rows of the new ask - its question and each option (writeItemBlocks);
+//  25. the text of each part at the new revision;
+//  26. the state the parts were indexed at (storeItemState);
+//  27. the thread's followers, for the event payload (events.AskEventPayload);
+//  28. the issue's sequence, locked (appendEvent);
+//  29. the ask.opened event row, inserted with its id and time returned in one statement
+//     (events.Broker.AppendAll);
+//  30. a batch of 2: that event's payload, rewritten with its own id, and the issue's last_seq
+//     (events.Broker.AppendAll);
 //  31. the references' source sequence (refs.Stamp);
 //  32. the source sequence of the links the ask's parts hold, none here (refs.Stamp's block arm);
 //  33. a batch of 2: the approval as the request leaves it (attachApproval again);
 //  34. commit.
 //
-// The four batches hold ten statements between them, so a request that sent each statement on
-// its own would send forty round trips.
+// The five batches hold twelve statements between them, so a request that sent each statement on
+// its own would send forty-one round trips.
 func TestApprovalRequestsCostThirtyFourRoundTrips(t *testing.T) {
 	database := storetest.Open(t)
 	counter := &roundTrips{}

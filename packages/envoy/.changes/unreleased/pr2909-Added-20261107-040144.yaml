@@ -1,0 +1,5 @@
+kind: Added
+body: 'The broker setting `BROKER_SERVICE_ACCOUNT_SECRETS` binds each `google-service-account` secret to the one Google service account it may mint a token for: whitespace-separated `<SECRET NAME>=<account email>` entries. The secret''s stored value no longer chooses that account on its own, since the broker holds `roles/iam.serviceAccountTokenCreator` on every bound account; a secret the setting does not name, and a stored value naming any other account, release nothing and are logged `class=binding` before any call reaches Google. Unset, no such secret mints at all. The policy loader reads the same setting to refuse a service in the `requesters` list of a secret bound to a `dev-<name>` account, whose token is one person''s own.'
+time: 2026-11-07T04:01:44.924432928Z
+custom:
+    Issue: pr2909

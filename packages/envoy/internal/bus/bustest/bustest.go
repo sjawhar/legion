@@ -148,9 +148,10 @@ func RequireFirstStartAtOneCopyAndNoSecondWrite(t testing.TB, url string, stream
 // reaches it fails the test. A publish that fails for any other reason fails the test too.
 //
 // internal/webhook's two full-stream tests call it: the one whose delivery is answered 503
-// (TestADeliveryToAFullStreamIsAnswered503) and the one whose delivery is republished without its
-// id (TestAGitHubDeliveryAnsweredNotStoredIsRepublishedWithoutItsID). The bus's own tests keep
-// their copies of this loop, because package bus cannot import this package.
+// (TestADeliveryToAFullStreamIsAnswered503) and the one whose delivery is stored on a redelivery
+// once the stream has room (TestAGitHubDeliveryTheFullStreamRefusedIsStoredOnARedeliveryOnceTheStreamHasRoom).
+// The bus's own tests keep their copies of this loop, because package bus cannot import this
+// package.
 func FillStream(t testing.TB, client *bus.Client, most int) {
 	t.Helper()
 	payload := strings.Repeat("x", 1<<10)

@@ -36,6 +36,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/api"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/config"
+	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/embed"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp/githubapptest"
 	"github.com/sjawhar/envoy/internal/dispatch/routes"
@@ -823,6 +824,12 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			}
 			refusedWith(t, map[string]string{"DISPATCH_PPROF_PORT": "0"}, "DISPATCH_PPROF_PORT")
 		},
+		"DISPATCH_MAX_LIVE_ROOMS": func(t *testing.T) {
+			documentCapReachesTheService(t, "DISPATCH_MAX_LIVE_ROOMS", func(rooms, _ int) int { return rooms })
+		},
+		"DISPATCH_MAX_DOC_CONNECTIONS": func(t *testing.T) {
+			documentCapReachesTheService(t, "DISPATCH_MAX_DOC_CONNECTIONS", func(_, connections int) int { return connections })
+		},
 		"DISPATCH_SERVER_URL": func(t *testing.T) {
 			if cfg, err := envoyJSON(t, map[string]string{"DISPATCH_SERVER_URL": "https://from-the-table.example"}); err != nil || cfg.Dispatch.ServerURL != "https://from-the-table.example" {
 				t.Errorf("set: %+v, %v; want the variable over envoy.json", cfg, err)
@@ -1548,8 +1555,16 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			if boot := resolveWith(t, azureEmbedEnvironment(withOverrides(azureKeyless, map[string]string{"DISPATCH_AZURE_TENANT_ID": " tenant "}))); boot.Embedder.AzureTenantID != "tenant" {
 				t.Errorf("AzureTenantID = %q", boot.Embedder.AzureTenantID)
 			}
+			// The sign-in is shared: a Bedrock embedder beside an Azure answerer resolves, and the
+			// three rows are read by the answerer.
+			boot := resolveWith(t, azureChatEnvironment(map[string]string{"DISPATCH_AZURE_TENANT_ID": " tenant "}))
+			if boot.Embedder.Place != embed.PlaceBedrock || boot.Embedder.AzureTenantID != "" || boot.Answerer.TenantID != "tenant" {
+				t.Errorf("bedrock embedder beside an azure answerer: Embedder.Place = %q, Embedder.AzureTenantID = %q, Answerer.TenantID = %q",
+					boot.Embedder.Place, boot.Embedder.AzureTenantID, boot.Answerer.TenantID)
+			}
 			refusedWith(t, azureEmbedEnvironment(withOverrides(azureKeyless, map[string]string{"DISPATCH_AZURE_TENANT_ID": ""})), "DISPATCH_AZURE_TENANT_ID missing")
-			refusedWith(t, map[string]string{"DISPATCH_AZURE_TENANT_ID": "tenant"}, "DISPATCH_AZURE_TENANT_ID set, but DISPATCH_EMBEDDER is unset")
+			refusedWith(t, azureChatEnvironment(map[string]string{"DISPATCH_AZURE_TENANT_ID": ""}), "DISPATCH_AZURE_TENANT_ID missing")
+			refusedWith(t, map[string]string{"DISPATCH_AZURE_TENANT_ID": "tenant"}, "DISPATCH_AZURE_TENANT_ID set, but neither DISPATCH_EMBEDDER nor DISPATCH_ANSWERER is azure: the shared Azure sign-in is read by whichever of them is azure")
 			if embedder := azureEmbedderFor(t, azureKeyless); embedder.Identity() != "azure:embed.example/embed-v-4-0" {
 				t.Errorf("keyless: Identity() = %q", embedder.Identity())
 			}
@@ -1558,8 +1573,11 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			if boot := resolveWith(t, azureEmbedEnvironment(withOverrides(azureKeyless, map[string]string{"DISPATCH_AZURE_CLIENT_ID": " client "}))); boot.Embedder.AzureClientID != "client" {
 				t.Errorf("AzureClientID = %q", boot.Embedder.AzureClientID)
 			}
+			if boot := resolveWith(t, azureChatEnvironment(map[string]string{"DISPATCH_AZURE_CLIENT_ID": " client "})); boot.Answerer.ClientID != "client" {
+				t.Errorf("the answerer's ClientID = %q", boot.Answerer.ClientID)
+			}
 			refusedWith(t, azureEmbedEnvironment(withOverrides(azureKeyless, map[string]string{"DISPATCH_AZURE_CLIENT_ID": ""})), "DISPATCH_AZURE_CLIENT_ID missing")
-			refusedWith(t, map[string]string{"DISPATCH_AZURE_CLIENT_ID": "client"}, "DISPATCH_AZURE_CLIENT_ID set, but DISPATCH_EMBEDDER is unset")
+			refusedWith(t, map[string]string{"DISPATCH_AZURE_CLIENT_ID": "client"}, "DISPATCH_AZURE_CLIENT_ID set, but neither DISPATCH_EMBEDDER nor DISPATCH_ANSWERER is azure")
 		},
 		"DISPATCH_AZURE_FEDERATED_TOKEN_FILE": func(t *testing.T) {
 			// A path, read at each exchange, not at boot: a file that is not there yet boots.
@@ -1567,8 +1585,91 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			if boot := resolveWith(t, azureEmbedEnvironment(withOverrides(azureKeyless, map[string]string{"DISPATCH_AZURE_FEDERATED_TOKEN_FILE": " " + missing + " "}))); boot.Embedder.AzureTokenFile != missing {
 				t.Errorf("AzureTokenFile = %q, want %q", boot.Embedder.AzureTokenFile, missing)
 			}
+			if boot := resolveWith(t, azureChatEnvironment(map[string]string{"DISPATCH_AZURE_FEDERATED_TOKEN_FILE": " " + missing + " "})); boot.Answerer.FederatedToken != missing {
+				t.Errorf("the answerer's FederatedToken = %q, want %q", boot.Answerer.FederatedToken, missing)
+			}
 			refusedWith(t, azureEmbedEnvironment(withOverrides(azureKeyless, map[string]string{"DISPATCH_AZURE_FEDERATED_TOKEN_FILE": ""})), "DISPATCH_AZURE_FEDERATED_TOKEN_FILE missing")
-			refusedWith(t, map[string]string{"DISPATCH_AZURE_FEDERATED_TOKEN_FILE": missing}, "DISPATCH_AZURE_FEDERATED_TOKEN_FILE set, but DISPATCH_EMBEDDER is unset")
+			refusedWith(t, map[string]string{"DISPATCH_AZURE_FEDERATED_TOKEN_FILE": missing}, "DISPATCH_AZURE_FEDERATED_TOKEN_FILE set, but neither DISPATCH_EMBEDDER nor DISPATCH_ANSWERER is azure")
+		},
+		"DISPATCH_ANSWERER": func(t *testing.T) {
+			if boot := resolveWith(t, nil); boot.Answerer.Place != "" {
+				t.Errorf("unset: Answerer.Place = %q, want no model configured", boot.Answerer.Place)
+			}
+			if boot := resolveWith(t, azureChatEnvironment(nil)); boot.Answerer.Place != "azure" {
+				t.Errorf("azure: Answerer.Place = %q", boot.Answerer.Place)
+			}
+			if boot := resolveWith(t, endpointChatEnvironment(nil)); boot.Answerer.Place != "endpoint" {
+				t.Errorf("endpoint: Answerer.Place = %q", boot.Answerer.Place)
+			}
+			refusedWith(t, map[string]string{"DISPATCH_ANSWERER": "openai"}, `DISPATCH_ANSWERER="openai" (expected azure or endpoint)`)
+			refusedWith(t, azureChatEnvironment(map[string]string{"DISPATCH_ANSWERER": "Azure"}), `DISPATCH_ANSWERER="Azure" (expected azure or endpoint)`)
+		},
+		"DISPATCH_AZURE_CHAT_ENDPOINT": func(t *testing.T) {
+			if boot := resolveWith(t, azureChatEnvironment(map[string]string{"DISPATCH_AZURE_CHAT_ENDPOINT": " https://Chat.Example/models "})); boot.Answerer.Endpoint != "https://Chat.Example/models" {
+				t.Errorf("Endpoint = %q, want the trimmed URL", boot.Answerer.Endpoint)
+			}
+			refusedWith(t, azureChatEnvironment(map[string]string{"DISPATCH_AZURE_CHAT_ENDPOINT": ""}), "DISPATCH_AZURE_CHAT_ENDPOINT is required")
+			refusedWith(t, azureChatEnvironment(map[string]string{"DISPATCH_AZURE_CHAT_ENDPOINT": "http://chat.example/models"}), "DISPATCH_AZURE_CHAT_ENDPOINT=")
+			refusedWith(t, map[string]string{"DISPATCH_AZURE_CHAT_ENDPOINT": "https://chat.example/models"}, "DISPATCH_AZURE_CHAT_ENDPOINT set, but DISPATCH_ANSWERER is unset")
+			refusedWith(t, endpointChatEnvironment(map[string]string{"DISPATCH_AZURE_CHAT_ENDPOINT": "https://chat.example/models"}), "DISPATCH_AZURE_CHAT_ENDPOINT set, but DISPATCH_ANSWERER is endpoint")
+		},
+		"DISPATCH_AZURE_CHAT_DEPLOYMENT": func(t *testing.T) {
+			if boot := resolveWith(t, azureChatEnvironment(map[string]string{"DISPATCH_AZURE_CHAT_DEPLOYMENT": " gpt-5-chat "})); boot.Answerer.Model != "gpt-5-chat" {
+				t.Errorf("Model = %q, want the trimmed deployment", boot.Answerer.Model)
+			}
+			refusedWith(t, azureChatEnvironment(map[string]string{"DISPATCH_AZURE_CHAT_DEPLOYMENT": ""}), "DISPATCH_AZURE_CHAT_DEPLOYMENT is required")
+			refusedWith(t, map[string]string{"DISPATCH_AZURE_CHAT_DEPLOYMENT": "gpt-5-chat"}, "DISPATCH_AZURE_CHAT_DEPLOYMENT set, but DISPATCH_ANSWERER is unset")
+		},
+		"DISPATCH_AZURE_CHAT_API_VERSION": func(t *testing.T) {
+			if boot := resolveWith(t, azureChatEnvironment(map[string]string{"DISPATCH_AZURE_CHAT_API_VERSION": " 2024-05-01-preview "})); boot.Answerer.APIVersion != "2024-05-01-preview" {
+				t.Errorf("APIVersion = %q, want the trimmed value", boot.Answerer.APIVersion)
+			}
+			if boot := resolveWith(t, azureChatEnvironment(nil)); boot.Answerer.APIVersion != "" {
+				t.Errorf("unset: APIVersion = %q, want no api-version sent", boot.Answerer.APIVersion)
+			}
+			refusedWith(t, map[string]string{"DISPATCH_AZURE_CHAT_API_VERSION": "2024-05-01-preview"}, "DISPATCH_AZURE_CHAT_API_VERSION set, but DISPATCH_ANSWERER is unset")
+		},
+		"DISPATCH_AZURE_CHAT_SCOPE": func(t *testing.T) {
+			if boot := resolveWith(t, azureChatEnvironment(nil)); boot.Answerer.Scope != embed.DefaultEntraScope {
+				t.Errorf("unset: Scope = %q, want the embedder's %q", boot.Answerer.Scope, embed.DefaultEntraScope)
+			}
+			if boot := resolveWith(t, azureChatEnvironment(map[string]string{"DISPATCH_AZURE_CHAT_SCOPE": " https://ai.azure.com/.default "})); boot.Answerer.Scope != "https://ai.azure.com/.default" {
+				t.Errorf("Scope = %q, want the trimmed scope", boot.Answerer.Scope)
+			}
+			refusedWith(t, map[string]string{"DISPATCH_AZURE_CHAT_SCOPE": "https://ai.azure.com/.default"}, "DISPATCH_AZURE_CHAT_SCOPE set, but DISPATCH_ANSWERER is unset")
+		},
+		"DISPATCH_AZURE_CHAT_TOKENS_PER_MINUTE": func(t *testing.T) {
+			if boot := resolveWith(t, azureChatEnvironment(map[string]string{"DISPATCH_AZURE_CHAT_TOKENS_PER_MINUTE": " 90000 "})); boot.Answerer.TokensPerMinute != 90_000 {
+				t.Errorf("TokensPerMinute = %d, want 90,000", boot.Answerer.TokensPerMinute)
+			}
+			refusedWith(t, azureChatEnvironment(map[string]string{"DISPATCH_AZURE_CHAT_TOKENS_PER_MINUTE": ""}), "DISPATCH_AZURE_CHAT_TOKENS_PER_MINUTE is required")
+			refusedWith(t, azureChatEnvironment(map[string]string{"DISPATCH_AZURE_CHAT_TOKENS_PER_MINUTE": "0"}), `DISPATCH_AZURE_CHAT_TOKENS_PER_MINUTE="0"`)
+			refusedWith(t, map[string]string{"DISPATCH_AZURE_CHAT_TOKENS_PER_MINUTE": "90000"}, "DISPATCH_AZURE_CHAT_TOKENS_PER_MINUTE set, but DISPATCH_ANSWERER is unset")
+		},
+		"DISPATCH_CHAT_ENDPOINT": func(t *testing.T) {
+			if boot := resolveWith(t, endpointChatEnvironment(map[string]string{"DISPATCH_CHAT_ENDPOINT": " https://Chat.Example/v1 "})); boot.Answerer.Endpoint != "https://Chat.Example/v1" {
+				t.Errorf("Endpoint = %q, want the trimmed URL", boot.Answerer.Endpoint)
+			}
+			refusedWith(t, endpointChatEnvironment(map[string]string{"DISPATCH_CHAT_ENDPOINT": ""}), "DISPATCH_CHAT_ENDPOINT is required")
+			refusedWith(t, endpointChatEnvironment(map[string]string{"DISPATCH_CHAT_ENDPOINT": "http://chat.example/v1"}), "DISPATCH_CHAT_ENDPOINT=")
+			refusedWith(t, map[string]string{"DISPATCH_CHAT_ENDPOINT": "https://chat.example/v1"}, "DISPATCH_CHAT_ENDPOINT set, but DISPATCH_ANSWERER is unset")
+			refusedWith(t, azureChatEnvironment(map[string]string{"DISPATCH_CHAT_ENDPOINT": "https://chat.example/v1"}), "DISPATCH_CHAT_ENDPOINT set, but DISPATCH_ANSWERER is azure")
+		},
+		"DISPATCH_CHAT_TOKEN_FILE": func(t *testing.T) {
+			// A path, read on each call, not at boot: a file that is not there yet boots.
+			missing := filepath.Join(t.TempDir(), "chat-token")
+			if boot := resolveWith(t, endpointChatEnvironment(map[string]string{"DISPATCH_CHAT_TOKEN_FILE": " " + missing + " "})); boot.Answerer.TokenFile != missing {
+				t.Errorf("TokenFile = %q, want %q", boot.Answerer.TokenFile, missing)
+			}
+			refusedWith(t, endpointChatEnvironment(map[string]string{"DISPATCH_CHAT_TOKEN_FILE": ""}), "DISPATCH_CHAT_TOKEN_FILE is required")
+			refusedWith(t, map[string]string{"DISPATCH_CHAT_TOKEN_FILE": missing}, "DISPATCH_CHAT_TOKEN_FILE set, but DISPATCH_ANSWERER is unset")
+		},
+		"DISPATCH_CHAT_MODEL": func(t *testing.T) {
+			if boot := resolveWith(t, endpointChatEnvironment(map[string]string{"DISPATCH_CHAT_MODEL": " llama-3-70b "})); boot.Answerer.Model != "llama-3-70b" {
+				t.Errorf("Model = %q, want the trimmed model", boot.Answerer.Model)
+			}
+			refusedWith(t, endpointChatEnvironment(map[string]string{"DISPATCH_CHAT_MODEL": ""}), "DISPATCH_CHAT_MODEL is required")
+			refusedWith(t, map[string]string{"DISPATCH_CHAT_MODEL": "llama-3-70b"}, "DISPATCH_CHAT_MODEL set, but DISPATCH_ANSWERER is unset")
 		},
 		"DISPATCH_WEB_DIST": func(t *testing.T) {
 			if dir, err := defaultWebDistDir(resolveWith(t, map[string]string{"DISPATCH_WEB_DIST": "/srv/dispatch/dist"}).WebDist); err != nil || dir != "/srv/dispatch/dist" {
@@ -1830,6 +1931,60 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			}
 			refusedWith(t, map[string]string{"DISPATCH_TEST_CI_RECONCILE_INTERVAL": "1s"}, "DISPATCH_TEST_HOOKS=1 required")
 		},
+		"DISPATCH_TEST_DELIVERY_RECONCILE_INTERVAL": func(t *testing.T) {
+			if boot := resolveWith(t, map[string]string{}); boot.DeliveryReconcileInterval != 0 {
+				t.Errorf("DISPATCH_TEST_DELIVERY_RECONCILE_INTERVAL unset: DeliveryReconcileInterval = %v, want 0 (delivery.ReconcileInterval's five minutes)", boot.DeliveryReconcileInterval)
+			}
+			const quick = 2 * time.Second
+			boot := resolveWith(t, map[string]string{
+				"DISPATCH_TEST_HOOKS":                       "1",
+				"DISPATCH_TEST_DELIVERY_RECONCILE_INTERVAL": quick.String(),
+			})
+			if boot.DeliveryReconcileInterval != quick {
+				t.Errorf("DISPATCH_TEST_DELIVERY_RECONCILE_INTERVAL: DeliveryReconcileInterval = %v, want %v", boot.DeliveryReconcileInterval, quick)
+			}
+			for _, invalid := range []string{"not-a-duration", "-1s", "0s"} {
+				refusedWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "1", "DISPATCH_TEST_DELIVERY_RECONCILE_INTERVAL": invalid},
+					fmt.Sprintf("DISPATCH_TEST_DELIVERY_RECONCILE_INTERVAL=%q (expected a positive Go duration)", invalid))
+			}
+			refusedWith(t, map[string]string{"DISPATCH_TEST_DELIVERY_RECONCILE_INTERVAL": "1s"}, "DISPATCH_TEST_HOOKS=1 required")
+		},
+		"DISPATCH_TEST_MAINTENANCE_SWEEP_INTERVAL": func(t *testing.T) {
+			if boot := resolveWith(t, map[string]string{}); boot.MaintenanceSweepInterval != 0 {
+				t.Errorf("DISPATCH_TEST_MAINTENANCE_SWEEP_INTERVAL unset: MaintenanceSweepInterval = %v, want 0 (api.MaintenanceSweepInterval's minute)", boot.MaintenanceSweepInterval)
+			}
+			const quick = 2 * time.Second
+			boot := resolveWith(t, map[string]string{
+				"DISPATCH_TEST_HOOKS":                      "1",
+				"DISPATCH_TEST_MAINTENANCE_SWEEP_INTERVAL": quick.String(),
+			})
+			if boot.MaintenanceSweepInterval != quick {
+				t.Errorf("DISPATCH_TEST_MAINTENANCE_SWEEP_INTERVAL: MaintenanceSweepInterval = %v, want %v", boot.MaintenanceSweepInterval, quick)
+			}
+			for _, invalid := range []string{"not-a-duration", "-1s", "0s"} {
+				refusedWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "1", "DISPATCH_TEST_MAINTENANCE_SWEEP_INTERVAL": invalid},
+					fmt.Sprintf("DISPATCH_TEST_MAINTENANCE_SWEEP_INTERVAL=%q (expected a positive Go duration)", invalid))
+			}
+			refusedWith(t, map[string]string{"DISPATCH_TEST_MAINTENANCE_SWEEP_INTERVAL": "1s"}, "DISPATCH_TEST_HOOKS=1 required")
+		},
+		"DISPATCH_TEST_PROCESS_HEARTBEAT": func(t *testing.T) {
+			if boot := resolveWith(t, map[string]string{}); boot.ProcessHeartbeat != 0 {
+				t.Errorf("DISPATCH_TEST_PROCESS_HEARTBEAT unset: ProcessHeartbeat = %v, want 0 (processes.HeartbeatInterval's five seconds)", boot.ProcessHeartbeat)
+			}
+			const quick = 500 * time.Millisecond
+			boot := resolveWith(t, map[string]string{
+				"DISPATCH_TEST_HOOKS":             "1",
+				"DISPATCH_TEST_PROCESS_HEARTBEAT": quick.String(),
+			})
+			if boot.ProcessHeartbeat != quick {
+				t.Errorf("DISPATCH_TEST_PROCESS_HEARTBEAT: ProcessHeartbeat = %v, want %v", boot.ProcessHeartbeat, quick)
+			}
+			for _, invalid := range []string{"not-a-duration", "-1s", "0s"} {
+				refusedWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "1", "DISPATCH_TEST_PROCESS_HEARTBEAT": invalid},
+					fmt.Sprintf("DISPATCH_TEST_PROCESS_HEARTBEAT=%q (expected a positive Go duration)", invalid))
+			}
+			refusedWith(t, map[string]string{"DISPATCH_TEST_PROCESS_HEARTBEAT": "500ms"}, "DISPATCH_TEST_HOOKS=1 required")
+		},
 		"DISPATCH_TEST_ROSTER_UNCACHED": func(t *testing.T) {
 			if boot := resolveWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "1", "DISPATCH_TEST_ROSTER_UNCACHED": "1"}); !boot.ListenerRosterUncached {
 				t.Error("DISPATCH_TEST_ROSTER_UNCACHED=1: ListenerRosterUncached false")
@@ -1895,6 +2050,55 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 	}
 	for name := range cases {
 		t.Errorf("a case for %s, which the settings table does not list", name)
+	}
+}
+
+// Every setting the document service takes from boot reaches the service main builds
+// (newDocumentService, through documentDeps): boot's seven values, each one distinct, are each
+// found on the dependencies the service is built from.
+func TestDocumentDepsCarryEveryBootSetting(t *testing.T) {
+	boot := bootConfig{
+		SettleDelay:       11 * time.Second,
+		MarkWait:          12 * time.Second,
+		UnrecordedMarkTTL: 13 * time.Second,
+		EditNoticeQuiet:   14 * time.Second,
+		MaxLiveRooms:      15,
+		MaxDocConnections: 16,
+		TestHooksEnabled:  true,
+	}
+	got := documentDeps(boot, docs.Deps{})
+	for _, field := range []struct {
+		name      string
+		got, want any
+	}{
+		{"Settle", got.Settle, boot.SettleDelay},
+		{"MarkWait", got.MarkWait, boot.MarkWait},
+		{"UnrecordedMarkTTL", got.UnrecordedMarkTTL, boot.UnrecordedMarkTTL},
+		{"EditNoticeQuiet", got.EditNoticeQuiet, boot.EditNoticeQuiet},
+		{"MaxLiveRooms", got.MaxLiveRooms, boot.MaxLiveRooms},
+		{"MaxDocConnections", got.MaxDocConnections, boot.MaxDocConnections},
+		{"TestHooks", got.TestHooks, boot.TestHooksEnabled},
+	} {
+		if field.got != field.want {
+			t.Errorf("docs.Deps.%s = %v, want boot's %v: documentDeps drops the setting", field.name, field.got, field.want)
+		}
+	}
+}
+
+// documentCapReachesTheService hands name, one of the document service's caps, to the service
+// main builds (newDocumentService) through the settings read alone, and reads back the cap it
+// sets (capOf of docs.Service.RoomCapsForTest): unset, the service's own default of 1,000; set,
+// its value; and a value that is not a positive integer refuses startup naming it.
+func documentCapReachesTheService(t *testing.T, name string, capOf func(rooms, connections int) int) {
+	t.Helper()
+	for value, want := range map[string]int{"": 1000, " 25 ": 25} {
+		boot := resolveWith(t, map[string]string{name: value})
+		if got := capOf(newDocumentService(boot, docs.Deps{}).RoomCapsForTest()); got != want {
+			t.Errorf("%s=%q: the document service's cap is %d, want %d", name, value, got, want)
+		}
+	}
+	for _, invalid := range []string{"0", "-5", "+3", "1.5", "lots"} {
+		refusedWith(t, map[string]string{name: invalid}, fmt.Sprintf("%s=%q (expected a positive integer)", name, invalid))
 	}
 }
 

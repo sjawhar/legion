@@ -44,6 +44,8 @@ legion start --config legion.yaml --check-config
 | `projects.<KEY>.memory.config_files names <file>, which a memory-group role's Oh My Pi could not read: …` | Under tmux the file must exist on the host and be readable by the daemon's user, as every pane is. |
 | `projects.<KEY>.memory.config_files …` or `projects.<KEY>.memory.instructions …` (another refusal) | The message names the entry: an empty list, a relative or unclean path, a path holding `:`, which separates the overlays `PI_CONFIG_FILES` names, or a path named twice. |
 | `memory instructions file <path> could not be read: …` or `memory instructions file <path> is empty` | Boot reads that file from the daemon's own disk and puts its text in every memory-group role's prompt, so give it a readable file with text in it, or take `instructions` out, which appends nothing. Boot reads it whatever the mode is, since a tree already drawn into the memory group is given it. |
+| `projects.<KEY>.commit_issue_trailer_repos[<n>] must be "owner/name" (got "…")` or `projects.<KEY>.commit_issue_trailer_repos names <owner>/<name> twice` | Each entry is one repository, written `owner/name`, and one repository is named once: names are compared as GitHub compares them, without case, so a second spelling of one name is the file saying the same thing twice. |
+| `projects.<KEY>.commit_issue_trailer_repos[<n>] (<owner>/<name>) and projects.<KEY>.commit_issue_trailer_repos[<m>] (<owner>/<name>) name one repository: repository_renames makes … one repository, so the list names it twice; name it once` | A configured rename makes the two entries select the same repository. Keep the one the project uses now and delete the other. |
 | `<PROJECT> is already running (pid <n>)` (from `legion start` itself) | A daemon for this project is already registered on the machine: `legion status <PROJECT>`, `legion legions`. |
 | `capability <name> is open: <detail>; to record a decision, add to legion.yaml: capabilities.decided.<name>: "<reason>"` (after the `Config OK` line, exit 0) | A report, not a refusal: the deployment leaves a worker capability open. The check names the rows the file alone decides — `resource-limits` while a role lacks CPU and memory in both requests and limits, `secrets` while no broker is configured — and the daemon logs the same line at boot for every open row, `model-fallback` included when the probe read `retry.modelFallback` false under your overlay or could not read it at all (the probe's OK line marks that `model-fallback=unread`, the probe pod's log says why), and `pool-capacity` when the image probe pod was Unschedulable before it scheduled (the detail counts the attempts that waited and quotes the scheduler's reason). Close the gap, or add the `capabilities.decided.<name>: "<reason>"` line it prints to record your decision. `legion state --json` lists every row under `capabilities`, each deployment row carrying `source` (`configuration` or `boot`), and the controller's daily report names each open one. In the daemon's log alone (the check prints no such row), a line without the `; to record a decision` tail — `capability <name> is open: pod <sandbox>/<container> (<role>, <issue>): <fact>`, or `pane <window>:<pane>` under tmux — is a live row (`subagents`, `web-search`, `mcp`, `repository-extensions`, `dispatch-envoy-tools`, `github`) that a running session's own check at its start failed: the daemon logs the fact alone, with the claim, role, issue and locator as the line's attributes, as the session reports ready, then this pod-naming form at boot and at the first controller tick after the set of open rows changed, and `legion state` shows the row `open` with that detail, naming each failing session. The fact is what the session measured inside its Oh My Pi (`web_search is not a registered tool`, `not connected: <server> (<error>)`, `agents the prompts dispatch that the task tool does not resolve: <names>`, `not discovered: <paths>`, `Envoy tools missing: <names>`, `dispatch read failed: <stderr>`, `gh viewer login failed: <stderr>`, or `did not finish within 8 s`). No `capabilities.decided` line applies: fix what the fact names in the session's environment, and the row heals when that process is relaunched with the gap closed or reports anew at its next boot — a session that booted during a Dispatch, GitHub or search-provider outage reads open until then. The session's own report is under `issues.<KEY>.architect.capabilities` or `issues.<KEY>.workers.<role>.claim.capabilities` in `legion state --json`. |
 
@@ -64,6 +66,13 @@ cluster and the image:
   recovers it from Dispatch's listing once GitHub answers, with nothing to move. A
   `child-release-stalled` notice that names such a repository says which parent to release first:
   the recovery records no child under a parent that is not `todo`.
+- **A stamped repository the project does not serve.** `workflow: commit_issue_trailer_repos names
+  a repository this project does not serve, so no pane stamps a commit with the issue key for it`,
+  with the repository and the project: `projects.<KEY>.commit_issue_trailer_repos` only selects
+  among the repositories Dispatch maps to the project, so this name selects nothing. It is a
+  warning, not a refusal — the boot's check reads no Dispatch, and a repository mapped the day
+  after the file is written is no fault of the file. Map the repository to the project in
+  Dispatch, or take the name out.
 - **Records with no repository.** `<n> issue records have no repository and Dispatch resolves none
   for them (<KEY>, …): set the project's default repository in Dispatch …`: the first boot of this
   release records each issue it already runs on the repository Dispatch resolves for it, and these
@@ -260,7 +269,10 @@ Check, in order:
    legion state --config legion.yaml --json | jq .admission
    ```
 
-   `active` lists the running roots, `waiting` the ones in line, `cap` the slots (`admission_cap`).
+   `active` lists the issues holding a slot, roots and children alike, `waiting` the issues in
+   line, `trees` the roots of the trees that run, and `cap` the slots (`admission_cap`, which
+   counts issues at work, not trees). A parent whose own first phase waits for its open children
+   is in `blocked`, with each child it waits for.
 5. **GitHub refuses its branch.** Before the architect starts, the daemon creates the issue's
    branch, `legion/<KEY>`, on GitHub in the issue's recorded repository at its recorded default
    branch, as the implement App, and again before each tree member's planner starts, so no agent's
@@ -289,7 +301,7 @@ read the person's comments and replies. Read the wait:
 
 ```sh
 legion state --config legion.yaml --json |
-  jq '.issues["<KEY>"] | {phase, waitingOn, designGate}'
+  jq '.issues["<KEY>"] | {phase, waitingOn, designGate, gatedSteps}'
 ```
 
 `waitingOn.kind` is `ask` for a wait on a question, with `waitingOn.ask` the question, or `gate`
@@ -300,8 +312,11 @@ names how — not always by a person: `ask` or `reply` (a person's act on an ask
 the approval request is on the architect's turn), `closed` (a session or anyone else who is not a
 person closed the question), `turn` (a session handed it back to the agent's turn), `retracted`
 (Dispatch's settlement), and `approved` also when the spec's gate stands open with nobody's
-approval under `gates.design: off`, or when the gate was switched off while the root waited on it. The root is
-at the front of `admission.waiting` and resumes itself at the next free slot. Do not park it or
+approval on a deployment that gates no step, or when the last gated step was taken out of
+`gates.design` while the root waited on it. The root is
+at the front of `admission.waiting` and resumes itself there: at once, holding no slot, once its
+design gate has opened at every gated step, and at the next free slot while its architect is
+still writing the first design. Do not park it or
 start it by hand. Without `answeredAt`, check, in order:
 
 1. **The question is still with the person.** `dispatch read <KEY>` shows the root's asks. A
@@ -332,7 +347,7 @@ start it by hand. Without `answeredAt`, check, in order:
    turn with the agent: that new act wakes the root on its own event.
 
 A root whose architect registered its spec while the approval request waits on the person is in
-`awaiting_person` with `waitingOn.kind` `gate`, once nothing else holds its slot; one still
+`awaiting_person` with `waitingOn.kind` `gate`, once nothing else of its tree is at work; one still
 `admitted` waiting on its design gate keeps its slot for one of the reasons above, or because
 Dispatch shows the request on the architect's turn (a reply or a newer version since the request),
 when the architect has nothing handed to the person. A root waiting on its gate at a daemon's deploy
@@ -340,6 +355,10 @@ gives its slot back at that daemon's first boot. The gate stays closed until a p
 spec at its current version; `designGate.approvedVersion` is `null`, or lower than `currentVersion`,
 until someone approves the latest version from the document's header or the Inbox. An approval of an
 earlier version does not count: the spec changed since. The merger's `READY` waits on the same approval.
+Where `gates.design` lists more than one step, `gatedSteps` carries one entry per step, each with
+its own `artifactId`, `currentVersion`, `approvedVersion` and `status` (`unregistered`, `waiting`,
+`approved` or `changes_requested`): the tree waits until every entry reads `approved`, and
+`designGate` beside it is the `spec` step's record alone.
 
 ## A parked tree did not come back after a decision
 
@@ -351,8 +370,8 @@ the root on each of these lines:
 
 - `outbox parked decision sent to the controller` or `workflow: a person's decision on a parked
   tree goes to the controller`: the controller received the decision.
-- `outbox parked decision not relayed: it names no person`: the gate opened under
-  `gates.design: off`, so no person made the decision.
+- `outbox parked decision not relayed: it names no person`: the gate opened on a deployment that
+  gates no step, so no person made the decision.
 - `outbox parked decision not relayed: its root is not parked` or `workflow: a decision on a
   lingering root someone moved back into the workflow is not relayed`: someone moved the
   lingering root back to a status of the workflow (`in_progress` and the like), so it is nobody's
@@ -426,7 +445,7 @@ architect that failed (`architect.state` is `failed`) leaves its tree with nobod
 and the controller is woken to re-admit the tree. What brings the architect back depends on where
 its tree stands:
 
-- **Its root holds its admission slot and does not linger:** `legion state`'s `claims nothing will
+- **Its tree runs and does not linger:** `legion state`'s `claims nothing will
   wake` line names the architect under `failed, retry`. Retry it, as
   [A tree does not move after a restart](#a-tree-does-not-move-after-a-restart) shows: the daemon
   relaunches it on the session it kept, with fresh budgets, and the tree carries on at the
@@ -474,6 +493,28 @@ kubectl -n legion describe pod <pod>     # scheduling, image pulls, mounts
 ```
 
 ## A tree does not move after a restart
+
+A restart's wakes go out at the pace the operator set (`worker_wakes_per_minute`, 8 a minute by
+default, with `worker_wake_burst` 1), so a tree whose process has not come back yet may simply be
+waiting its turn. One wake has its session read its whole context again, which the provider charges
+as uncached input — a mean of 576,083 tokens, a median of 493,636 and a ninetieth percentile of
+1,327,888 — and the pacing is what spreads that over the minutes after a restart. A wave sustains
+about two thirds of the rate, about 5 a minute at the default, so a hundred claims take about
+twenty minutes. Read what the pacing still holds before you act on anything below:
+
+```sh
+legion state --config legion.yaml --json | jq '.wakesWaiting'
+```
+
+`legion state` prints the same as a `wakes waiting:` line, and prints no such line when nothing
+waits. Each entry names the `claim`, its `issue` and `role`, the `kind` of wake (`launch`, a role
+process about to start; `plugin-task`, the update task a stale-plugin round queues to a session
+that already runs; `catch-up`, the notice a start writes to an architect that is already running)
+and `dueAt`, the moment the pacing gave it, which is when it runs. An empty array says the wave has
+gone out; the last `dueAt` in it says when the last of the wave goes. A claim on that list needs
+nothing from you: its wake is reserved and it runs at the moment named. Your own requests are what
+drop it — a resume, a retry or a task you send that claim is run at once, taking the reserved wake
+back, so nothing you ask for waits for a turn.
 
 A restart re-adopts every process still running, but a claim with no process runs again only when
 something starts it. A worker is started by the workflow when its phase begins, and a tree's
@@ -563,10 +604,11 @@ is `legion-<project>-<issue, lowercased>-<role>`, as `legion claims list` shows.
   it to the controller; `legion claims retry` applies the same retry when the architect cannot. A
   failed claim ignores `legion claims resume` and `legion claims deliver`.
 
-The list names only claims of trees that hold an admission slot, and leaves out claims that
+The list names only claims of trees that run — the trees `admission.trees` names, whether or not
+an issue of them holds a slot — and leaves out claims that
 something will still start: a worker whose phase is not its own is started again when its phase
-comes, a parked tree's claims wait for its re-admission, and the architect of a tree re-admitted
-while every slot was taken waits for admission to start it once one frees. A root in
+comes, a parked tree's claims wait for its re-admission, and an issue whose start waits for a free
+slot has that start queued already. A root in
 `awaiting_person` is different: its architect stays live while it waits for the person's answer,
 and the answer's task is delivered once the root takes a slot. Never resume or retry by hand a
 claim of a lingering tree or of an issue parked out of the workflow; re-admission or the issue's
@@ -581,7 +623,8 @@ is queued for it, since the next phase start or re-admission resumes it as befor
   an issue pod at the defaults) and lands wherever the pool has room, so a pool at its limits leaves
   the next pod unscheduled until the daemon reads it dead past `worker_boot_timeout_seconds` and,
   once its launch failures run out, fails the claim. `kubectl -n legion describe pod <pod>` names the
-  reason. Keep `admission_cap`, and the children a tree runs at once, within what the pool's limits
+  reason. `admission_cap` counts the issues at work, and an issue that only waits keeps its pod,
+  so keep the pods a deployment's open trees run within what the pool's limits
   can place ([The cluster](/legion/legion/running-legion/#the-cluster)). A pod replaced on another
   node waits for no volume to detach: an issue's disk is its own pod's, created with it and
   deleted with it, so a replacement brings a disk of its own. The image probe pod,
@@ -709,9 +752,9 @@ These arrive as messages on the Dispatch issue, and the architect is told:
   round.
 - **`READY` refused.** The merger's `READY` is refused while the pull request's head carries
   anything above the reviewer's approved head but a commit under `docs/solutions/`, which retro
-  no longer writes, and the
-  removal of files under `.legion/` that `legion handoffs import` commits
-  (`READY_UNREVIEWED_CHANGE`, naming the paths; also when the head
+  no longer writes, and a change whose every path is under `.legion/`, where handoffs were
+  committed before they moved to the Dispatch issue and which nothing writes or reads now, so that
+  nobody reviews one (`READY_UNREVIEWED_CHANGE`, naming the paths; also when the head
   is not built on the approved one, GitHub does not know the approved head, or GitHub's compare
   gives no file list or lists 300 files, the most it lists), or
   the review round recorded no approval (`READY_NOT_APPROVED`): either way the issue goes back to
@@ -845,7 +888,7 @@ it, then look at what the row `waitsOn` names is doing.
 
 A pull request's opened, push, review or CI settlement, or a Dispatch status change, reaches the
 daemon as a message on the `ENVOY_NOTIFICATIONS` stream and waits there until the daemon's durable
-consumer for it gets to it. `legion state` shows how far behind each of the three consumers is on
+consumer for it gets to it. `legion state` shows how far behind each consumer is on
 its `consumer` lines ([Running Legion](/legion/legion/running-legion/#observe)), and `--json`
 under `consumers`:
 
@@ -869,10 +912,14 @@ legion state --config legion.yaml --json | jq '.consumers[] | {name, waiting, ol
   The daemon is handling none of them: each delivery fails and is put back to retry (the database
   out of reach, say), or the message in hand does not finish. Search the daemon's log for
   `retryable intake processing failure` and the other warnings naming a `subject` of that
-  consumer, whose `error` says what fails. A consumer that stops is not a stall: it stops the
-  daemon (`workflow intake stopped: …`).
+  consumer, whose `error` says what fails. A handler that does not finish writes none of those
+  while it holds: intake reports its message in progress, and the stall is all that shows until
+  the handler passes its ten-minute limit and the daemon writes `an intake handler outran its
+  limit and was cut`, so search for that line too
+  ([GitHub, NATS and the Secrets Broker](#github-nats-and-the-secrets-broker)). A consumer that
+  stops is not a stall: it stops the daemon (`workflow intake stopped: …`).
 - **`unavailable`** names what NATS did not answer in time, or refused; the rest of the state is
-  served all the same. The three consumers are read at the same time, each within two seconds,
+  served all the same. Every consumer is read at the same time, each within two seconds,
   so one consumer's read that does not answer leaves the others' as they are. `read the consumer's
   info: …` leaves `waiting` 0 and `stalled` false, since neither is known: check that the daemon
   reaches NATS and that the consumer exists (`nats consumer info ENVOY_NOTIFICATIONS <name>`).
@@ -929,6 +976,40 @@ notice comes once per handoff commit, from whichever pass finds it first.
   still records each open pull request GitHub lists, applies a lost close, merge or push, settles a
   head's CI from its check runs and tells an architect `pull-request-missing`, so none of those
   waits for the backlog to drain.
+- **`an intake handler outran its limit and was cut`** (a warning with `consumer`, `event_id`,
+  `fact` and `limit`). One message's handling ran past `limit`, ten minutes, which no setting
+  changes, so the daemon cut it and naked the message: nothing of that event was applied, and
+  JetStream delivers it again. While a handler runs, intake reports its message in progress, so a
+  handler that hangs shows neither as the preparation work of a redelivery nor as a rising
+  `delivered` count, and this warning is the one line that names the cut. The warning written
+  right after it with the same `event_id` names the step that was running, with the error
+  `context deadline exceeded`. Each Dispatch or GitHub read is cut on its own at the
+  acknowledgement window, so a handling that reaches ten minutes is most often waiting on the
+  database. One Postgres advisory lock is what it most often waits on,
+  `pg_advisory_xact_lock(hashtext('legion.apply_fact'))`, which every fact takes for the length of
+  its transaction and the daemon's other lifecycle writes take too, so the holder is as often one
+  of those as another fact. Ask the daemon's database who holds it rather than guessing:
+
+  ```sql
+  select a.pid, a.state, a.xact_start, a.query
+    from pg_locks l
+    join pg_stat_activity a on a.pid = l.pid
+   where l.locktype = 'advisory'
+     and l.classid = (hashtext('legion.apply_fact')::bigint >> 32 & 4294967295)::oid
+     and l.objid = (hashtext('legion.apply_fact')::bigint & 4294967295)::oid
+     and l.objsubid = 1
+   order by l.granted desc, a.xact_start;
+  ```
+
+  The first row is the holder, the rest are waiting on it, and `xact_start` says how long it has
+  held. The next delivery of the same event takes the same path and is cut the same way.
+- **`an intake fact outlived its acknowledgement window and was held in progress while it ran`**
+  (an info line with `consumer`, `event_id`, `delivered` and `took`). The handling took longer
+  than the consumer's acknowledgement window (`worker_rpc_timeout_seconds`), and intake held the
+  delivery for `took` rather than let JetStream deliver the event a second time. The fact was
+  applied: this is a fact that is slow, not one that failed, and this is the only line that says
+  how long a fact took. One of them asks nothing of an operator; a `took` creeping towards the
+  ten-minute limit, or many at once, names where to look for the slow read behind them.
 - **`webhook App missing on <repo>: <reason>`** in `legion state` (`repositories.withoutWebhookApp`
   in `--json`). Dispatch's GitHub App, the Envoy App whose webhook carries GitHub's events, is not
   known to be installed on a repository the daemon serves. With `Dispatch's GitHub App is not

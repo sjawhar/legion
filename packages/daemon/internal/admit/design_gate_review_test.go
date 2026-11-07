@@ -35,10 +35,11 @@ func storedGate(t *testing.T, pool *pgxpool.Pool, key string) *record.DesignGate
 	t.Helper()
 	var gate *record.DesignGate
 	inTx(t, pool, func(tx pgx.Tx) {
-		var err error
-		if gate, err = record.NewStore().Gate(context.Background(), tx, key); err != nil {
+		gates, err := record.NewStore().GatesOf(context.Background(), tx, key)
+		if err != nil {
 			t.Fatalf("read gate: %v", err)
 		}
+		gate = record.SpecGate(gates)
 	})
 	if gate == nil {
 		t.Fatalf("issue %s has no design gate", key)
@@ -275,24 +276,30 @@ func TestAChangesRequestIsToldOnceWhicheverReadCarriesIt(t *testing.T) {
 // A registration whose read of Dispatch began before a review the daemon has already applied at
 // that version is the older reader: the person acted after it. The gate keeps that review — a
 // told changes request is not told again, an approval is not rolled back — and no wait starts,
-// since only the person's next act could answer one.
+// since only the person's next act could answer one. Where that review is an approval, the
+// registration itself tells the architect nothing, but every required step is open, so the
+// admission pass this fact runs starts the root (workflow.AdvanceOpenTrees): a root whose steps
+// are all open never stays at admitted waiting for a gate fact that has already happened.
 func TestARegistrationDoesNotHideTheReviewTheGateAlreadyHolds(t *testing.T) {
 	reviewed := record.EventMark{Seq: 11, At: reviewedAt.Add(time.Minute)}
 	for _, tc := range []struct {
-		name string
-		gate record.DesignGate
-		open bool
+		name  string
+		gate  record.DesignGate
+		open  bool
+		stops phase.Phase
 	}{
 		{
 			name: "a changes request the architect was told of",
 			gate: record.DesignGate{Issue: "LEGION-100", ArtifactID: "artifact-root", LatestVersion: 4,
 				ToldChangesVersion: new(4), ToldChangesReason: "name the rollback path", ToldChangesMark: reviewed},
+			stops: phase.Admitted,
 		},
 		{
 			name: "an approval that opened the gate",
 			gate: record.DesignGate{Issue: "LEGION-100", ArtifactID: "artifact-root", LatestVersion: 4,
 				ApprovedVersion: new(4), ApprovedMark: reviewed},
-			open: true,
+			open:  true,
+			stops: phase.Planning,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -310,8 +317,11 @@ func TestARegistrationDoesNotHideTheReviewTheGateAlreadyHolds(t *testing.T) {
 				Since:                record.EventMark{Seq: 10},
 			})
 
-			if got := issue(t, pool, "LEGION-100"); got.Phase != phase.Admitted || got.Awaiting != nil {
-				t.Fatalf("root after a registration older than the review the gate holds = %#v, want it admitted with no wait", got)
+			// A root whose gate stands open takes its slot for its own first phase, which the
+			// registration neither causes nor stops; one whose gate is closed stays admitted
+			// with its architect's design still to be approved.
+			if got := issue(t, pool, "LEGION-100"); got.Phase != tc.stops || got.Awaiting != nil {
+				t.Fatalf("root after a registration older than the review the gate holds = %#v, want it at %s with no wait", got, tc.stops)
 			}
 			assertSlots(t, pool, []record.Slot{{Issue: "LEGION-100", Index: 0, AdmittedAt: fixedNow}})
 			if told := gateNotices(t, pool, "LEGION-100", "design-changes-requested"); len(told) != 0 {
@@ -339,13 +349,13 @@ func TestAReviewAnotherSupersededChangesNoGateState(t *testing.T) {
 	}{
 		{
 			name: "an approval older than the changes request the gate records",
-			gate: record.DesignGate{Issue: "LEGION-100", ArtifactID: "artifact-root", LatestVersion: 4,
+			gate: record.DesignGate{Issue: "LEGION-100", Step: record.DesignStepSpec, ArtifactID: "artifact-root", LatestVersion: 4,
 				ToldChangesVersion: new(4), ToldChangesReason: "name the rollback path", ToldChangesMark: newer},
 			late: intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactApproved, Version: 4, Mark: superseded},
 		},
 		{
 			name: "a changes request older than the approval the gate records",
-			gate: record.DesignGate{Issue: "LEGION-100", ArtifactID: "artifact-root", LatestVersion: 4,
+			gate: record.DesignGate{Issue: "LEGION-100", Step: record.DesignStepSpec, ArtifactID: "artifact-root", LatestVersion: 4,
 				ApprovedVersion: new(4), ApprovedMark: newer},
 			late: intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactChangesRequested,
 				Version: 4, Reason: "name the rollback path", Mark: superseded},
@@ -366,8 +376,13 @@ func TestAReviewAnotherSupersededChangesNoGateState(t *testing.T) {
 			if opened := gateNotices(t, pool, "LEGION-100", "design-approved"); len(opened) != 0 {
 				t.Fatalf("design-approved notices = %#v, want none for a superseded review", opened)
 			}
-			if gate := storedGate(t, pool, "LEGION-100"); classify.DesignGateOpen(*gate) != tc.open || !reflect.DeepEqual(*gate, tc.gate) {
-				t.Fatalf("gate after the superseded review = %#v, want it unchanged: %#v", gate, tc.gate)
+			// PutGate records that a person's approval once stood on the gate's current version
+			// (DesignGate.EverOpened), which is how a root at admitted after its gate opened is
+			// told from one whose architect is still writing the spec.
+			want := tc.gate
+			want.EverOpened = classify.DesignGateOpen(tc.gate)
+			if gate := storedGate(t, pool, "LEGION-100"); classify.DesignGateOpen(*gate) != tc.open || !reflect.DeepEqual(*gate, want) {
+				t.Fatalf("gate after the superseded review = %#v, want it unchanged: %#v", gate, want)
 			}
 		})
 		// The same late review on a root waiting on its gate from a later hand-back answers nothing:
@@ -379,9 +394,14 @@ func TestAReviewAnotherSupersededChangesNoGateState(t *testing.T) {
 			awaitingRoot(t, pool, record.Awaiting{GateVersion: 4, Since: record.EventMark{Seq: 20, At: reviewedAt.Add(time.Minute)}})
 			seedGate(t, pool, tc.gate)
 			applyFact(t, pool, admission, "superseded-review", tc.late)
-			got := issue(t, pool, "LEGION-100")
-			if got.Answered() != tc.open || tc.open && got.Awaiting.AnsweredBy != record.AnsweredByApproval {
-				t.Fatalf("root after a review the person had already followed with another = %#v, want answered %t, and by the open gate's approval if so", got, tc.open)
+			if tc.open {
+				// The gate stands open, so it answers the wait and the root resumes in that
+				// same pass: its architect's turns need no slot once the gate has opened.
+				assertResumed(t, pool)
+				return
+			}
+			if got := issue(t, pool, "LEGION-100"); got.Answered() {
+				t.Fatalf("root after a review the person had already followed with another = %#v, want it still waiting", got)
 			}
 		})
 	}

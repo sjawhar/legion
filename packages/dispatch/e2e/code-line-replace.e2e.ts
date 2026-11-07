@@ -5,8 +5,8 @@ import { connectedDot, selectEditorText } from "./editor";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
-// Runs in Firefox as well as Chromium (playwright.config.ts): Firefox's own editing mishandles
-// text typed over whatever follows a block's last line break.
+// Both rows carry `@firefox`, the tag the `firefox` project selects by (`playwright.config.ts`):
+// Firefox's own editing mishandles text typed over whatever follows a block's last line break.
 // The typed text reaches the server inside the live write, so the markdown below is true within a
 // round trip of the keystroke; the default ladder would not look again until 350 ms.
 const PROBE = { intervals: [50, 50, 100, 200, 500] };
@@ -15,7 +15,10 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("typing over the whole last line of a code block replaces that line", async ({ browser }) => {
+// @firefox: native editing over what follows a block's last line break.
+test("typing over the whole last line of a code block replaces that line @firefox", async ({
+  browser,
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({
     project: "CORE",
@@ -42,7 +45,10 @@ test("typing over the whole last line of a code block replaces that line", async
   }
 });
 
-test("typing over the text after a paragraph's hard break keeps the break", async ({ browser }) => {
+// @firefox: native editing over what follows a block's last line break, here a hard break.
+test("typing over the text after a paragraph's hard break keeps the break @firefox", async ({
+  browser,
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({
     project: "CORE",

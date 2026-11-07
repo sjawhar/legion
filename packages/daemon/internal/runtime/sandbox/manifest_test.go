@@ -727,6 +727,7 @@ func TestEveryRolesGitStartsNoPlantedFsmonitorOrHook(t *testing.T) {
 	// The init creates the clone, so it runs in the directory holding it rather than in the one
 	// the test process happens to have; every later command runs in the clone itself.
 	initialise.Dir = dir
+	initialise.Env = fixtureenv.Isolated(home)
 	if output, err := initialise.CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v\n%s", err, output)
 	}
@@ -1016,24 +1017,38 @@ func TestTheManifestCarriesADNSNamedStreamAndDaemonURL(t *testing.T) {
 }
 
 // The provisioning token never shares a process with anything a tree agent can write (Stage 4b
-// Task 4b.6b): the claim's Secret projects it into the pod's token-holding init containers alone —
-// workspace-fetch, and skills-fetch where the deployment names a skills repository — which are the
-// only containers told where it is, and no other container can write a volume one of them mounts.
-// The feed workspace-fetch fills is read-only in workspace-init; the skills volume skills-fetch
-// clones into is read-only in the roles container; and each holder's TMPDIR, where its one-shot
-// credential goes, is an in-memory volume of its own that no other container mounts, the sibling
-// holder included. So neither holder mounts the tree volume or the config home, and neither
-// carries an operator's mount (runtime.kubernetes.pod), which reaches the launcher containers and
-// the image probe's and no init container. Every pod's manifest holds to it, by every route
-// Kubernetes offers into a Secret, the worker's container included; the controller's pod has no
-// workspace-fetch and no skills-fetch, so none of its containers reaches the token at all.
+// Task 4b.6b), and it reaches the containers that hold it as a file, never as an environment
+// value (INFRA-1254). Two rules, counted apart:
+//
+//   - The volume route — the claim's Secret as a Secret volume, or projected — belongs to the
+//     pod's token-holding init containers alone: workspace-fetch, and skills-fetch where the
+//     deployment names a skills repository. It is required for each of them, the only containers
+//     told where the token is, and forbidden for every other container, the worker's included.
+//     Each holder's mount of that volume carries an empty subPath, because the daemon rewrites
+//     the claim's Secret as the lease is renewed and the kubelet rewrites a whole-volume Secret
+//     projection in place, never a subPath copy, which is taken once when the container starts.
+//   - The environment route — an env entry whose secretKeyRef names the claim Secret's
+//     provisioning-token key, or an envFrom of that Secret — is forbidden everywhere, the
+//     holders included: an environment value is fixed for the container's life, so a container
+//     holding one serves the token the pod started with however often the Secret is rewritten.
+//
+// Beside them, no other container can write a volume a holder mounts. The feed workspace-fetch
+// fills is read-only in workspace-init; the skills volume skills-fetch clones into is read-only
+// in the roles container; and each holder's TMPDIR, where its one-shot credential goes, is an
+// in-memory volume of its own that no other container mounts, the sibling holder included. So
+// neither holder mounts the tree volume or the config home, and neither carries an operator's
+// mount (runtime.kubernetes.pod), which reaches the launcher containers and the image probe's
+// and no init container. Every pod's manifest holds to it, by every route Kubernetes offers into
+// a Secret, the worker's container included; the controller's pod has no workspace-fetch and no
+// skills-fetch, so none of its containers reaches the token at all.
 //
 // What the boundary protects is identity, not a repository-write token kept off the tree volume:
-// an implement role now holds the implement App's token — the same lease as the
-// provisioning token — read-only in its own gh directory (GHConfigDir), and a review role the
-// review App's. What the fetch container's boundary still keeps is that no review role ever holds
-// the implement App's token, which is what lets the daemon's fix-attempt counting read a push's App
-// from the App that made it.
+// an implement role now holds the implement App's token — for the issue's owner the App's own
+// installation token, which writes, where the provisioning token is that same App narrowed to
+// reading, so the two are no longer one lease (INFRA-1254) — read-only in its own gh directory
+// (GHConfigDir), and a review role the review App's. What the fetch container's boundary still
+// keeps is that no review role ever holds the implement App's token, which is what lets the
+// daemon's fix-attempt counting read a push's App from the App that made it.
 func TestTheProvisionTokenSharesNoContainerWithAnythingTheTreeCanWrite(t *testing.T) {
 	for options, skills := range map[string]bool{"no skills repository": false, "a skills repository": true} {
 		t.Run(options, func(t *testing.T) {
@@ -1066,21 +1081,35 @@ func TestTheProvisionTokenSharesNoContainerWithAnythingTheTreeCanWrite(t *testin
 					maps := func(items []corev1.KeyToPath) bool {
 						return len(items) == 0 || slices.ContainsFunc(items, func(item corev1.KeyToPath) bool { return item.Key == provisionTokenKey })
 					}
-					reaches := func(c corev1.Container) []string {
-						var routes []string
+					// The volume route is the token as a file the kubelet rewrites in place when
+					// the Secret changes. Each one carries the mount it came by, since a mount
+					// with a subPath is a copy taken when the container starts that no rewrite
+					// reaches.
+					type route struct {
+						mount corev1.VolumeMount
+						named string
+					}
+					volumeRoutes := func(c corev1.Container) []route {
+						var routes []route
 						for _, mount := range c.VolumeMounts {
 							volume := volumes[mount.Name]
 							if secret := volume.Secret; secret != nil && secret.SecretName == claimSecret && maps(secret.Items) {
-								routes = append(routes, "secret volume "+mount.Name)
+								routes = append(routes, route{mount, "secret volume " + mount.Name})
 							}
 							if projected := volume.Projected; projected != nil {
 								for _, source := range projected.Sources {
 									if secret := source.Secret; secret != nil && secret.Name == claimSecret && maps(secret.Items) {
-										routes = append(routes, "projected volume "+mount.Name)
+										routes = append(routes, route{mount, "projected volume " + mount.Name})
 									}
 								}
 							}
 						}
+						return routes
+					}
+					// The environment route is a copy fixed for the container's life, which no
+					// container may hold, the token holders included.
+					envRoutes := func(c corev1.Container) []string {
+						var routes []string
 						for _, v := range c.Env {
 							if from := v.ValueFrom; from != nil && from.SecretKeyRef != nil && from.SecretKeyRef.Name == claimSecret && from.SecretKeyRef.Key == provisionTokenKey {
 								routes = append(routes, "env "+v.Name)
@@ -1088,7 +1117,7 @@ func TestTheProvisionTokenSharesNoContainerWithAnythingTheTreeCanWrite(t *testin
 						}
 						for _, from := range c.EnvFrom {
 							if from.SecretRef != nil && from.SecretRef.Name == claimSecret {
-								routes = append(routes, "envFrom")
+								routes = append(routes, "envFrom "+from.SecretRef.Name)
 							}
 						}
 						return routes
@@ -1097,9 +1126,24 @@ func TestTheProvisionTokenSharesNoContainerWithAnythingTheTreeCanWrite(t *testin
 					holderNames := []string{fetchContainer, skillsContainer}
 					for _, c := range containers {
 						_, pointed := envOf(c)["LEGION_PROVISION_TOKEN_FILE"]
-						routes := reaches(c)
-						if holds := slices.Contains(holderNames, c.Name); (len(routes) > 0) != holds || pointed != holds {
-							t.Errorf("%s reaches the provisioning token by %v, pointed at %t; want %t for both", c.Name, routes, pointed, holds)
+						holds := slices.Contains(holderNames, c.Name)
+						mounted := volumeRoutes(c)
+						var named []string
+						for _, r := range mounted {
+							named = append(named, r.named)
+						}
+						if (len(mounted) > 0) != holds || pointed != holds {
+							t.Errorf("%s reaches the provisioning token's file by %v, pointed at %t; want %t for both", c.Name, named, pointed, holds)
+						}
+						for _, r := range mounted {
+							if r.mount.SubPath != "" {
+								t.Errorf("%s takes the provisioning token from %s with subPath %q, want the whole volume: the kubelet rewrites a whole-volume Secret projection in place when the Secret changes and never a subPath copy, so a renewed token would not reach the file",
+									c.Name, r.named, r.mount.SubPath)
+							}
+						}
+						if routes := envRoutes(c); len(routes) > 0 {
+							t.Errorf("%s reaches the provisioning token through the environment by %v, which no container may, %v included: an environment value is fixed for the container's life, so a renewed token never reaches it",
+								c.Name, routes, holderNames)
 						}
 					}
 					kind, err := podKindOf(template.Metadata.Labels)
@@ -1287,7 +1331,7 @@ func TestNewRefusesOptionsNoPodCouldRun(t *testing.T) {
 		"the pool restated":         {func(o *Options) { o.Scheduling.NodeSelector = map[string]string{poolKey: poolValue} }, "legion.dev/pool is the runtime's"},
 		"no tokens":                 {func(o *Options) { o.Tokens = nil }, "no provisioning token source"},
 		"no gh credential":          {func(o *Options) { o.GitHubCredential = nil }, "no github credential function"},
-		"no gh owners":              {func(o *Options) { o.GitHubOwners = nil }, "no github owners function"},
+		"no gh dirs":                {func(o *Options) { o.GitHubDirs = nil }, "no github directories function"},
 		"no repository mapping":     {func(o *Options) { o.Mapped = nil }, "no repository mapping for the repository caches"},
 		"no cache volume":           {func(o *Options) { o.RepositoryCache.Volume = resource.Quantity{} }, "repository cache volume 0 is not a positive quantity"},
 		"no cache retention":        {func(o *Options) { o.RepositoryCache.Retain = 0 }, "repository cache retention 0s is not positive"},
@@ -1350,9 +1394,10 @@ func TestNewRefusesOptionsNoPodCouldRun(t *testing.T) {
 
 // runtimeOwned is exactly what the worker container is told by the runtime itself, a tree agent's,
 // a Claude Code worker's and the controller's together: every name mainEnvironment sets with Env
-// empty and no secret of the spec's, every optional value configured. A name added to the
-// environment and not to runtimeOwned is one a spec could override; a name left in runtimeOwned
-// that the environment no longer sets is one a spec is refused for nothing.
+// empty and no secret of the spec's, every optional value configured — the tree agent works a
+// repository the project names, so it is told the issue key it stamps its commits with. A name
+// added to the environment and not to runtimeOwned is one a spec could override; a name left in
+// runtimeOwned that the environment no longer sets is one a spec is refused for nothing.
 func TestRuntimeOwnedIsWhatTheWorkerContainerIsToldByTheRuntime(t *testing.T) {
 	opts := testOptions()
 	opts.DispatchURL, opts.DispatchToken = "https://dispatch.internal", "dispatch-bearer"
@@ -1362,8 +1407,10 @@ func TestRuntimeOwnedIsWhatTheWorkerContainerIsToldByTheRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	stamping := workerSpec(t)
+	stamping.IssueTrailer = stamping.Issue
 	told := map[string]bool{}
-	for _, spec := range []runtime.SpawnSpec{workerSpec(t), claudeWorkerSpec(t), controllerSpec(t)} {
+	for _, spec := range []runtime.SpawnSpec{stamping, claudeWorkerSpec(t), controllerSpec(t)} {
 		spec.Env, spec.Secrets = nil, nil
 		for name := range envOf(workerOf(t, r, spec)) {
 			told[name] = true
@@ -1372,6 +1419,52 @@ func TestRuntimeOwnedIsWhatTheWorkerContainerIsToldByTheRuntime(t *testing.T) {
 	if !maps.Equal(told, runtimeOwned) {
 		t.Errorf("the worker container is told %v by the runtime, and runtimeOwned is %v",
 			slices.Sorted(maps.Keys(told)), slices.Sorted(maps.Keys(runtimeOwned)))
+	}
+}
+
+// A pane stamps `Dispatch: <KEY>` into its commits where the project names its repository
+// (projects.<KEY>.commit_issue_trailer_repos, which internal/daemon's specs reads into
+// runtime.SpawnSpec.IssueTrailer), and the key reaches its jj overlay as LEGION_ISSUE_TRAILER.
+// The runtime sets it itself, from the spec's own field and never from its Env, beside the issue
+// every pane is told: a launch of any harness is told it by the one environment the pod's kind
+// builds for every role (issuePod.agentEnv under mainEnvironment), so a Claude Code worker
+// carries it as an Oh My Pi one does. A launch that stamps nothing carries no such variable
+// rather than an empty one, and the controller's pod, which works no repository and no issue,
+// carries none under any spec (validateControllerShape refuses one that asks).
+func TestAPodIsToldTheIssueKeyItStampsItsCommitsWith(t *testing.T) {
+	r, err := configure(goldenOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	stamping := workerSpec(t)
+	stamping.IssueTrailer = stamping.Issue
+	env := envOf(workerOf(t, r, stamping))
+	for name, expect := range map[string]struct {
+		want  string
+		owned bool
+	}{
+		"LEGION_ISSUE":         {want: stamping.Issue, owned: true},
+		"LEGION_ISSUE_TRAILER": {want: stamping.Issue, owned: true},
+	} {
+		if env[name] != expect.want {
+			t.Errorf("a pane whose repository the project names is told %s=%q, want %q", name, env[name], expect.want)
+		}
+		if owned := runtimeOwned[name]; owned != expect.owned {
+			t.Errorf("runtimeOwned[%s] = %t, want %t: the runtime owns the names it sets and no other", name, owned, expect.owned)
+		}
+	}
+	claude := stamping
+	claude.Backend = runtime.BackendClaude
+	if got := envOf(workerOf(t, r, claude))["LEGION_ISSUE_TRAILER"]; got != stamping.Issue {
+		t.Errorf("a Claude Code worker of the same claim is told LEGION_ISSUE_TRAILER=%q, want %q", got, stamping.Issue)
+	}
+	for name, spec := range map[string]runtime.SpawnSpec{
+		"a worker whose repository the project does not name": workerSpec(t),
+		"the controller": controllerSpec(t),
+	} {
+		if value, set := envOf(workerOf(t, r, spec))["LEGION_ISSUE_TRAILER"]; set {
+			t.Errorf("%s is told LEGION_ISSUE_TRAILER=%q, want no such variable", name, value)
+		}
 	}
 }
 
@@ -1894,9 +1987,10 @@ func TestNewRefusesAProvidersSecretThatIsNoLaunchSecret(t *testing.T) {
 // the image probe runs, and every mount and variable of the containers the operator's pieces join
 // (the agent's and the probe's), with every optional piece the runtime adds configured and nothing
 // of a spec's or the operator's. Among the goldens' cases is a Claude Code worker, which alone is
-// told three of the variables. A piece added to a pod and not to its list is one an
-// operator could collide with unrefused; one left in a list that no pod carries is refused for
-// nothing.
+// told three of the variables; none of them works a repository the project names, so the worker
+// below, which does, is built here for the one variable such a pod alone carries. A piece added
+// to a pod and not to its list is one an operator could collide with unrefused; one left in a
+// list that no pod carries is refused for nothing.
 func TestLegionsOwnNamesAreWhatItsPodsCarry(t *testing.T) {
 	opts := goldenOptions()
 	opts.DispatchURL, opts.DispatchToken = "https://dispatch.internal", "dispatch-bearer"
@@ -1939,6 +2033,12 @@ func TestLegionsOwnNamesAreWhatItsPodsCarry(t *testing.T) {
 		pod := podOf(t, r, spec)
 		carry(pod, workerOf(t, r, spec))
 	}
+	// A pane whose repository the project names is told the issue key it stamps its commits with
+	// (LEGION_ISSUE_TRAILER), and no golden case works such a repository.
+	stamping := workerSpec(t)
+	stamping.Env, stamping.Secrets = nil, nil
+	stamping.IssueTrailer = stamping.Issue
+	carry(podOf(t, r, stamping), workerOf(t, r, stamping))
 	probe := r.probeManifest("legion-probe", ImageProbe{Contract: 5}, time.Time{}).Spec.PodTemplate.Spec
 	carry(probe, containerNamed(t, probe, probeContainer))
 	for _, list := range []struct {

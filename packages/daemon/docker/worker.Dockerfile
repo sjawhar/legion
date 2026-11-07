@@ -32,7 +32,8 @@
 # cannot (claudeCodeBlock, packages/daemon/internal/runtime/sandbox/plugins.go) — the pin is in
 # every image, whatever a deployment's worker_backends names; jj; git at /usr/bin/git (>= 2.42, from the debian:trixie-slim runtime base — jj's
 # git backend requires it); gh; trixie's socat, which carries a connection over `kubectl exec` to a
-# loopback port inside the pod (the runtime-base stage says why); what the capability check
+# loopback port inside the pod, and trixie's unzip, which model-gateway/apply_test.sh of
+# theorem-labs/agent-infra calls (the runtime-base stage says why for both); what the capability check
 # (packages/daemon/internal/capabilities, which `legion probe-image` runs) requires of the image: the Go
 # toolchain at go.work's version (go and gofmt, /opt/go) with trixie's gcc and libc6-dev, the C
 # compiler and headers Go's cgo and race detector need (cgo stays off by default), gopls,
@@ -44,7 +45,7 @@
 # database on a pod-lifetime emptyDir (the runtime-base stage says why);
 # and a generic toolchain for the
 # repositories the workers work, specific to none of them: uv and uvx, Node LTS with npm and
-# corepack's pnpm and yarn, the AWS CLI v2 and kubectl —
+# corepack's pnpm and yarn, the AWS CLI v2, kubectl and mikefarah's yq —
 # each of these on PATH at /usr/local/bin or /usr/bin; the warm Go module cache of the two modules
 # go.work binds, at /home/legion/go/pkg/mod/cache/download, which /opt/go/go.env names first in
 # GOPROXY, and which carries no version list, so a version query falls through to the public
@@ -94,8 +95,8 @@ ARG GO_SHA256=65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40
 # gopls, which the go stage builds static from golang.org/x/tools/gopls at this tag (gopls/v<version>).
 ARG GOPLS_VERSION=0.23.0
 # The toolchain stage's pins: each is a release version and the SHA-256 of the linux/amd64 download the
-# stage fetches for it (an archive, or kubectl's single binary), which the build checks before unpacking
-# or installing anything.
+# stage fetches for it (an archive, or a single binary as kubectl's and yq's are), which the build
+# checks before unpacking or installing anything.
 ARG UV_VERSION=0.13.5
 ARG UV_SHA256=f68d291c75783122dad58ab77def0e13f3233f358731db5d6d7e8715603b928f
 # Node 24 LTS.
@@ -122,6 +123,25 @@ ARG AWS_CLI_SHA256=10ab32a95b27138d7cc1c1ac4ebb4d3acab60cd0a0df2fc37c4e2c440ed40
 # bump repeats both checks.
 ARG KUBECTL_VERSION=1.35.9
 ARG KUBECTL_SHA256=3cfeaf80be482b435b0aa214aff6e0b2c312ee23c0ff20810c75517b6004c6eb
+# mikefarah's yq, the YAML processor: model-gateway/apply_test.sh of theorem-labs/agent-infra, and
+# the `apply` program it tests, call the bare name `yq` on PATH. A package runner does reach yq —
+# `go run github.com/mikefarah/yq/v4@v4.54.1` works with this image's Go — but it could supply that
+# bare name only through a file called `yq` on the role's own PATH, which
+# skills/legion-worker/references/tools.md forbids, and `go run` costs seconds per call: one passing
+# run of that test calls yq 228 times (counted 2026-11-06 at agent-infra main ec59a17a; the count
+# moves with that repository). Debian's `yq` is a different program — kislyuk's Python
+# wrapper over jq, 3.4.3 in trixie, whose command language is another one — so this is a pinned
+# fetch, and an apt package must never take its place. The pin is the SHA-256 of yq_linux_amd64 as
+# the release's own signed `checksums` file gives it: field 19 of that file's yq_linux_amd64 row,
+# because line 18 of the `checksums_hashes_order` published beside it reads SHA-256. That file was
+# taken only once its signature verified. The command, run on 2026-11-05, was
+# `go run github.com/sigstore/cosign/v2/cmd/cosign@v2.6.0 verify-blob --bundle checksums.bundle
+# --certificate-identity 'https://github.com/mikefarah/yq/.github/workflows/release.yml@refs/tags/v4.54.1'
+# --certificate-oidc-issuer https://token.actions.githubusercontent.com checksums`, and it printed
+# `Verified OK`; that identity is a release workflow of that repository at the v4.54.1 tag. A
+# version bump repeats that check.
+ARG YQ_VERSION=4.54.1
+ARG YQ_SHA256=8e34fc298390875de416e6a4afcb8cabeceb25d9aa8506c1a2f9353cf702ea5f
 # The language servers Oh My Pi's LSP tools start for TypeScript and Python install from the
 # committed lockfile at packages/daemon/docker/language-servers (COPY'd into the toolchain stage),
 # with scripts off (`npm ci --ignore-scripts`): a reproducible install off that lockfile, no ARG
@@ -133,7 +153,7 @@ ARG KUBECTL_SHA256=3cfeaf80be482b435b0aa214aff6e0b2c312ee23c0ff20810c75517b6004c
 # the suite's next update. The base image's suite is the pin.
 # The PostgreSQL server and pgvector come from apt.postgresql.org, not trixie: trixie's own archive
 # stops at PostgreSQL 17, and the pod's cluster has to be the major the deployment's databases and CI
-# run, 18 (packages/daemon/internal/testpg/testpg.go). That suite is no pin either, and a version pin
+# run, 18 (packages/daemon/internal/testpg/testdb/testdb.go). That suite is no pin either, and a version pin
 # is no answer there: read on 2026-10-30, the trixie-pgdg index carries the last three point releases
 # of a major and no more (postgresql-18 at 18.6, 18.4 and 18.3; postgresql-17 at 17.11, 17.10 and
 # 17.9, with 17.0 through 17.8 gone), so `postgresql-18=18.6-1.pgdg13+2` would stop resolving at the
@@ -246,11 +266,12 @@ RUN jq --arg v "$PI_LEGION_VERSION" '(if $v != "" then .version = $v else . end)
     && mkdir -p /out/pi-legion \
     && tar xzf ./*.tgz -C /out/pi-legion --strip-components=1
 
-# claude-envoy ships as a build of this checkout's source rather than a pack: no workflow releases
-# it, its skills/ are relative symlinks into the repository's skills/ that its package.json `files`
-# does not list, and a Claude Code marketplace install takes the git tree itself. That tree's dist/
-# and legion/ are no input here: a pull request never commits them, and main's Rebuild Claude Envoy
-# plugin workflow commits them only after each merge, so they lag the source they were built from.
+# claude-envoy is built from this checkout's source rather than installed from npm: the image
+# runs the tree it was built from, as it does for the rest of the repository. Nothing here packs
+# it, unlike the two plugins above, so the prepack that resolves its skills/ links for a pack
+# never runs.
+# That tree's dist/ and legion/ are no input here: nothing commits them, and the release that
+# publishes the plugin builds them in its own build job.
 # `scripts/build.ts --out` writes /out/claude-envoy from the source instead: the plugin's own files
 # with its skills symlinks resolved, since the image carries no repository root for them to point
 # into, and a fresh dist/ and legion/. It refuses any Bun but the one .bun-version pins, which this
@@ -380,10 +401,10 @@ RUN test -n "$LEGION_REVISION" \
 # toolchain: what a worker needs to work a repository that is not Legion's, specific to none: uv (which
 # installs each project's own Python from its `.python-version` or `requires-python`; the image's own
 # python3 is trixie's, installed by the runtime-base stage for Oh My Pi's Python eval), Node with npm and
-# corepack, the AWS CLI v2, kubectl, the Go toolchain at go.work's version (the release the go stage
-# builds `legion` with, so a worker builds the daemon as CI does), and the TypeScript and Python language
-# servers Oh My Pi's LSP tools start. All five downloads are checked against their pinned SHA-256
-# before any is unpacked or installed. uv, uvx and kubectl are single binaries, copied to /usr/local/bin
+# corepack, the AWS CLI v2, kubectl, mikefarah's yq, the Go toolchain at go.work's version (the release
+# the go stage builds `legion` with, so a worker builds the daemon as CI does), and the TypeScript and
+# Python language servers Oh My Pi's LSP tools start. Every download is checked against its pinned SHA-256
+# before any is unpacked or installed. uv, uvx, kubectl and yq are single binaries, copied to /usr/local/bin
 # as gh and jj are; Node, Go and the AWS CLI keep their own trees under /opt, and /out/bin holds the
 # symlinks into them that the runtime stage copies to /usr/local/bin (the AWS installer's `--bin-dir`
 # writes its two). The pnpm, pnpx, yarn and yarnpkg links are the ones `corepack enable` would write
@@ -438,6 +459,8 @@ ARG CHROMIUM_VERSION
 ARG CHROMIUM_SHA256
 ARG KUBECTL_VERSION
 ARG KUBECTL_SHA256
+ARG YQ_VERSION
+ARG YQ_SHA256
 ARG GO_VERSION
 ARG GO_SHA256
 # hadolint ignore=DL3008
@@ -452,15 +475,19 @@ RUN set -eu; \
     curl -fsSLo "$t/awscli.zip" "https://awscli.amazonaws.com/awscli-exe-linux-x86_64-${AWS_CLI_VERSION}.zip"; \
     curl -fsSLo "$t/go.tar.gz" "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz"; \
     curl -fsSLo "$t/kubectl" "https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/linux/amd64/kubectl"; \
+    curl -fsSLo "$t/yq" \
+      "https://github.com/mikefarah/yq/releases/download/v${YQ_VERSION}/yq_linux_amd64"; \
     curl -fsSLo "$t/chromium.zip" \
       "https://storage.googleapis.com/chrome-for-testing-public/${CHROMIUM_VERSION}/linux64/chrome-linux64.zip"; \
     printf '%s  %s\n' "$UV_SHA256" "$t/uv.tar.gz" "$NODE_SHA256" "$t/node.tar.xz" \
       "$AWS_CLI_SHA256" "$t/awscli.zip" "$GO_SHA256" "$t/go.tar.gz" \
-      "$KUBECTL_SHA256" "$t/kubectl" "$CHROMIUM_SHA256" "$t/chromium.zip" > "$t/SHA256SUMS"; \
+      "$KUBECTL_SHA256" "$t/kubectl" "$YQ_SHA256" "$t/yq" \
+      "$CHROMIUM_SHA256" "$t/chromium.zip" > "$t/SHA256SUMS"; \
     sha256sum --check --strict "$t/SHA256SUMS"; \
     tar -xzf "$t/uv.tar.gz" -C /out/bin --strip-components=1 --no-same-owner \
       uv-x86_64-unknown-linux-gnu/uv uv-x86_64-unknown-linux-gnu/uvx; \
     install -m 0755 "$t/kubectl" /out/bin/kubectl; \
+    install -m 0755 "$t/yq" /out/bin/yq; \
     tar -xJf "$t/node.tar.xz" -C /opt/node --strip-components=1 --no-same-owner; \
     for tool in node npm npx corepack; do ln -s "/opt/node/bin/$tool" "/out/bin/$tool"; done; \
     for shim in pnpm pnpx yarn yarnpkg; do \
@@ -545,7 +572,7 @@ FROM ghcr.io/cybermonklabs/legion/ci@sha256:f6b08b09a05725f9431502d3b5714f5c4576
 # Without a server in the image, a role that needs Postgres either unpacks debs onto the issue volume
 # for twenty minutes or points its test at the deployment's sessions database, whose login drops
 # databases on the instance the whole fleet's sessions live in. 18 is the major the deployment's
-# databases and CI run (packages/daemon/internal/testpg/testpg.go), so both come from
+# databases and CI run (packages/daemon/internal/testpg/testdb/testdb.go), so both come from
 # apt.postgresql.org: trixie serves 17 alone, and a cluster of another major is a different planner,
 # a different catalog and a different dump format from the one a test meets everywhere else. The ARG
 # note above says what is pinned there and why a version pin is not. The source list and the key go
@@ -573,6 +600,9 @@ FROM ghcr.io/cybermonklabs/legion/ci@sha256:f6b08b09a05725f9431502d3b5714f5c4576
 # virtual `dnsutils`, which trixie has no candidate for: apt resolves it to this single provider
 # today, and a second provider the day one appears would fail the build on a name that was never
 # the package.
+# unzip: model-gateway/apply_test.sh of theorem-labs/agent-infra calls `unzip`, and no package
+# runner in the image reaches it. A role cannot install it in the pod either: its /usr/local/bin and
+# /opt are read-only, and apt-get cannot take dpkg's lock.
 # gcc and libc6-dev: the C compiler and the libc headers and startup files Go's cgo builds with. Go
 # refuses -race without cgo, so these are what lets a role run the race detector — the
 # `go test -race …` of CI's envoy-go-race lane — as `CGO_ENABLED=1 go test -race …`, with no CC or
@@ -624,7 +654,7 @@ RUN install -d -m 0755 /etc/apt/keyrings \
       'Package: postgresql* libpq5' 'Pin: origin apt.postgresql.org' 'Pin-Priority: 600' \
       > /etc/apt/preferences.d/pgdg \
     && apt-get update \
-    && apt-get install -y --no-install-recommends bind9-dnsutils ca-certificates chromium curl gcc git jq libc6-dev netcat-openbsd openssh-client postgresql-18 postgresql-18-pgvector postgresql-client python3 python3-yaml redis-tools socat sqlite3 util-linux wget \
+    && apt-get install -y --no-install-recommends bind9-dnsutils ca-certificates chromium curl gcc git jq libc6-dev netcat-openbsd openssh-client postgresql-18 postgresql-18-pgvector postgresql-client python3 python3-yaml redis-tools socat sqlite3 unzip util-linux wget \
     && rm -rf /var/lib/apt/lists/* /var/lib/postgresql /etc/postgresql \
       /etc/ssl/private/ssl-cert-snakeoil.key /etc/ssl/certs/ssl-cert-snakeoil.pem \
     && find /etc/ssl/certs -xtype l -delete \
@@ -664,10 +694,11 @@ RUN dpkg-query -W -f '${db:Status-Status} ${Package}\n' > /tmp/dpkg-packages \
 # the same way. The k8s.io modules that go.mod replaces with ./staging/src, kubectl itself among them,
 # are that release's own source, each with its license file under staging/src/k8s.io at the release's
 # tag; the repository keeps the license text of every other module it links under LICENSES/vendor
-# there. The language servers' own LICENSE files come from their installed trees in the toolchain
-# stage; TypeScript's ThirdPartyNoticeText.txt and the typeshed LICENSE pyright bundles come with
-# them. A missing or empty file fails the build. The fetches depend only on the pins, so they come
-# first, in a layer a source change reuses; the assembly reads the other stages' outputs after them.
+# there. yq's section names its own go.mod the same way. The language servers' own LICENSE files come
+# from their installed trees in the toolchain stage; TypeScript's ThirdPartyNoticeText.txt and the
+# typeshed LICENSE pyright bundles come with them. A missing or empty file fails the build. The
+# fetches depend only on the pins, so they come first, in a layer a source change reuses; the
+# assembly reads the other stages' outputs after them.
 FROM tools AS notices
 ARG BUN_VERSION
 ARG JJ_TOOL
@@ -675,12 +706,13 @@ ARG GH_TOOL
 ARG UV_VERSION
 ARG AWS_CLI_VERSION
 ARG KUBECTL_VERSION
+ARG YQ_VERSION
 ARG GO_VERSION
 ARG GOPLS_VERSION
 COPY --from=plugin /out/codegraph-node-version /in/codegraph-node-version
 COPY packages/daemon/docker/language-servers/package.json /in/language-servers/package.json
 COPY packages/daemon/docker/codegraph/package.json /in/codegraph/package.json
-# The eighteen reads below (fourteen LICENSE/NOTICE fetches, four HEAD checks) are independent
+# The twenty reads below (fifteen LICENSE/NOTICE fetches, five HEAD checks) are independent
 # of each other and left sequential rather than backgrounded: this whole RUN is the cached layer
 # the stage comment above describes (a source change, not a pin bump, reuses it, so it rebuilds
 # rarely), and running unauthenticated GitHub raw-content requests in parallel risks tripping its
@@ -710,6 +742,7 @@ RUN set -eu; \
     fetch astral-sh/uv "$UV_VERSION" LICENSE-MIT uv-LICENSE-MIT; \
     fetch aws/aws-cli "$AWS_CLI_VERSION" LICENSE.txt aws-cli-LICENSE.txt; \
     fetch kubernetes/kubernetes "v${KUBECTL_VERSION}" LICENSE kubectl-LICENSE; \
+    fetch mikefarah/yq "v${YQ_VERSION}" LICENSE yq-LICENSE; \
     fetch colbymchenry/codegraph "v${codegraph_version}" LICENSE codegraph-LICENSE; \
     fetch nodejs/node "$codegraph_node_tag" LICENSE codegraph-node-LICENSE; \
     fetch golang/go "go${GO_VERSION}" LICENSE go-LICENSE; \
@@ -723,7 +756,9 @@ RUN set -eu; \
     curl -fsSIo /dev/null "$(gh_raw_url golang/tools "gopls/v${GOPLS_VERSION}" gopls/go.mod)"; \
     printf 'gopls links Go modules whose license texts its binary does not carry. They are the modules listed in\nhttps://github.com/golang/tools/blob/gopls/v%s/gopls/go.mod, the module file of the release this image builds; the\nlicense of each is published with its source and shown on pkg.go.dev.\n' "$GOPLS_VERSION" > /in/gopls-modules; \
     curl -fsSIo /dev/null "$(gh_raw_url kubernetes/kubernetes "v${KUBECTL_VERSION}" go.mod)"; \
-    printf 'kubectl links Go modules whose license texts its binary does not carry. They are the modules listed in\nhttps://github.com/kubernetes/kubernetes/blob/v%s/go.mod, the module file of the release this image installs.\nThe k8s.io modules that file replaces with ./staging/src (kubectl itself, client-go, apimachinery, cli-runtime\nand component-base among them) are source of the Kubernetes release itself, each with its license file under\nhttps://github.com/kubernetes/kubernetes/tree/v%s/staging/src/k8s.io; the license of every other module is in\nhttps://github.com/kubernetes/kubernetes/tree/v%s/LICENSES/vendor.\n' "$KUBECTL_VERSION" "$KUBECTL_VERSION" "$KUBECTL_VERSION" > /in/kubectl-modules
+    printf 'kubectl links Go modules whose license texts its binary does not carry. They are the modules listed in\nhttps://github.com/kubernetes/kubernetes/blob/v%s/go.mod, the module file of the release this image installs.\nThe k8s.io modules that file replaces with ./staging/src (kubectl itself, client-go, apimachinery, cli-runtime\nand component-base among them) are source of the Kubernetes release itself, each with its license file under\nhttps://github.com/kubernetes/kubernetes/tree/v%s/staging/src/k8s.io; the license of every other module is in\nhttps://github.com/kubernetes/kubernetes/tree/v%s/LICENSES/vendor.\n' "$KUBECTL_VERSION" "$KUBECTL_VERSION" "$KUBECTL_VERSION" > /in/kubectl-modules; \
+    curl -fsSIo /dev/null "$(gh_raw_url mikefarah/yq "v${YQ_VERSION}" go.mod)"; \
+    printf 'yq links Go modules whose license texts its binary does not carry. They are the modules listed in\nhttps://github.com/mikefarah/yq/blob/v%s/go.mod, the module file of the release this image installs; the\nlicense of each is published with its source and shown on pkg.go.dev.\n' "$YQ_VERSION" > /in/yq-modules
 COPY scripts/assemble-third-party-notices.sh /usr/local/bin/
 COPY --from=debian-packages /debian-packages /in/debian-packages
 COPY --from=go /out/go-notices /in/go-notices
@@ -761,6 +796,8 @@ RUN set -eu; mkdir -p /out; . /in/tags.env; \
       "AWS CLI v2: the THIRD_PARTY_LICENSES its installer archive ships" /in/aws-cli-THIRD_PARTY_LICENSES \
       "kubectl v${KUBECTL_VERSION}, /usr/local/bin/kubectl: LICENSE of github.com/kubernetes/kubernetes at v${KUBECTL_VERSION}" /in/kubectl-LICENSE \
       "kubectl: the Go modules it links" /in/kubectl-modules \
+      "yq v${YQ_VERSION}, /usr/local/bin/yq: LICENSE of github.com/mikefarah/yq at v${YQ_VERSION}" /in/yq-LICENSE \
+      "yq: the Go modules it links" /in/yq-modules \
       "CodeGraph CLI, /opt/codegraph: LICENSE of github.com/colbymchenry/codegraph at v${codegraph_version}" /in/codegraph-LICENSE \
       "Go ${GO_VERSION}, /opt/go (go and gofmt at /usr/local/bin): LICENSE of github.com/golang/go at go${GO_VERSION}" /in/go-LICENSE \
       "gopls v${GOPLS_VERSION}, /usr/local/bin/gopls: LICENSE of github.com/golang/tools at gopls/v${GOPLS_VERSION}" /in/gopls-LICENSE \
@@ -956,20 +993,23 @@ ENV AWS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt COREPACK_DEFAULT_TO_LATEST=
 # it is checked under `nc`, the name the alternatives system installs, never nc.openbsd; and dig -v
 # prints its version on stdout, measured in a pod of this image (`dig -v 2>/dev/null` prints
 # `DiG 9.20.30-1~deb13u1-Debian`, `dig -v 2>&1 >/dev/null` prints nothing), so the step takes it as
-# it comes.
+# it comes. `unzip -v` prints its banner and exits 0, while yq is checked with `--version`, not
+# `-v`, which is mikefarah's verbose flag: it emits `level=DEBUG` lines and reads stdin rather than
+# printing a version.
 # legion-testpg runs here for real, not as a version print: it initdbs a cluster in the scratch
 # directory as the runtime user, starts it, makes a database from template1 and reads pgvector back
 # out of it, then stops it with `legion-testpg stop`, a fast shutdown it waits for — a postmaster
 # killed instead would leave its shutdown checkpoint running and the `rm -rf` below would race it.
 # An issue pod's launcher runs the same command, so a build whose server package, extension or
 # script no longer works fails here rather than at every role's start in every pod. The DSN is the
-# one the runtime sets for every role: a loopback host, no password, and legion_test, the
-# non-superuser role `ensure` creates, not the cluster's own superuser.
+# one this image's own launcher serves to every role of an issue pod: a loopback host, no password,
+# and legion_test for both the login and the database — the non-superuser role `ensure` creates,
+# not the cluster's own superuser, and the database `ensure` creates with that role as its owner.
 RUN set -eu; \
     scratch="$(mktemp -d)"; \
     export TMPDIR="$scratch" COREPACK_HOME="$scratch/corepack" XDG_CONFIG_HOME="$scratch/config"; \
     uv --version; uvx --version; node --version; npm --version; npx --version; corepack --version; \
-    aws --version; kubectl version --client; \
+    aws --version; kubectl version --client; yq --version; \
     for shim in pnpm yarn yarnpkg; do "$shim" --version; done; \
     pnpx --help > "$scratch/pnpx-help"; sed -n 1p "$scratch/pnpx-help"; \
     go version; goroot="$(go env GOROOT)"; echo "GOROOT: $goroot"; test "$goroot" = /opt/go; gcc --version; \
@@ -985,9 +1025,9 @@ RUN set -eu; \
     socat -V > "$scratch/socat-V"; sed -n '/^socat version/p' "$scratch/socat-V"; \
     ssh-keygen -q -t ed25519 -N '' -f "$scratch/probe-key"; ssh-keygen -l -f "$scratch/probe-key.pub"; \
     flock --version; \
-    psql --version; redis-cli --version; sqlite3 --version; nc -h; dig -v; \
+    psql --version; redis-cli --version; sqlite3 --version; nc -h; dig -v; unzip -v; \
     legion-testpg check; \
-    probe_dsn='postgres://legion_test@127.0.0.1:5433/postgres?sslmode=disable'; \
+    probe_dsn='postgres://legion_test@127.0.0.1:5433/legion_test?sslmode=disable'; \
     LEGION_TESTPG_DIR="$scratch/testpg" LEGION_TEST_PG_DSN="$probe_dsn" legion-testpg ensure; \
     psql -X -q "$probe_dsn" -c 'create database probe'; \
     psql -X -tAq 'postgres://legion_test@127.0.0.1:5433/probe?sslmode=disable' -c "select extname from pg_extension where extname = 'vector'" | grep -qx vector; \
@@ -1019,8 +1059,9 @@ COPY --from=go /out/legion /opt/legion/bin/legion
 COPY --from=go /out/agent-secrets /opt/legion/bin/agent-secrets
 # gh in a pod is `legion gh`, first on the image PATH, which runs the real gh at /usr/local/bin/gh
 # (LEGION_GH_PATH, which every agent container is told) with GH_CONFIG_DIR at the gh directory of
-# the owner the command names: packages/daemon/docker/gh, the same script a tmux pane's launcher
-# directory holds (packages/daemon/internal/runtime/workerbin).
+# the repository the command names, or of its owner where the bundle holds the repository none:
+# packages/daemon/docker/gh, the same script a tmux pane's launcher directory holds
+# (packages/daemon/internal/runtime/workerbin).
 COPY --chmod=0755 packages/daemon/docker/gh /opt/legion/bin/gh
 # The final step: /opt/legion and /opt/legion/bin are root's with mode 0755, so the runtime user can
 # neither rename nor replace what they hold; everything under /opt/legion/pi-envoy,

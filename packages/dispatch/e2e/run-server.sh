@@ -188,6 +188,22 @@ if [ -n "${DISPATCH_E2E_FILE_STORE_ENDPOINT:-}" ]; then
   )
 fi
 
+# The server binary, read before the sweep below: DISPATCH_E2E_SERVER_BIN names a prebuilt
+# envoy-dispatch this run executes instead of building one from this checkout
+# (scripts/e2e/dispatch-claimant-delivery.sh's DISPATCH_BIN is the precedent), which
+# scripts/e2e/dispatch-two-builds.sh gives the build of an older commit so a base build and this
+# one run against one database. Unset, the build below is this checkout's, as it always was. The
+# path is made absolute here, against the caller's directory, since this script changes to
+# packages/envoy before it runs it.
+server_bin="${DISPATCH_E2E_SERVER_BIN:-}"
+if [ -n "$server_bin" ]; then
+  [[ "$server_bin" == /* ]] || server_bin="$PWD/$server_bin"
+  if [ ! -x "$server_bin" ]; then
+    echo "run-server.sh: DISPATCH_E2E_SERVER_BIN=$DISPATCH_E2E_SERVER_BIN is not an executable file" >&2
+    exit 2
+  fi
+fi
+
 # How long a document room waits after its last live update before it settles, read before the
 # sweep below: a settlement is when an `:::ask` block becomes an ask row and when live typing is
 # written as a version, so it is what every row that waits for one waits for. 250ms in place of
@@ -222,6 +238,16 @@ unrecorded_mark_ttl="${DISPATCH_TEST_UNRECORDED_MARK_TTL:-4s}"
 # A caller that set the variable itself keeps its own value, as it does for the settle delay
 # above.
 listener_takeover_window="${DISPATCH_TEST_LISTENER_TAKEOVER_WINDOW:-500ms}"
+
+# How often the delivery reconcile pass runs, read before the sweep below and passed under the
+# same DISPATCH_TEST_HOOKS=1. Unset is the server's own five minutes
+# (delivery.ReconcileInterval), which is longer than any row's window, so nothing changes for a
+# caller that does not ask. A caller that sets it (a run proving a row survives a pass landing
+# inside its window) gets passes at that interval instead.
+delivery_reconcile_env=()
+if [ -n "${DISPATCH_TEST_DELIVERY_RECONCILE_INTERVAL:-}" ]; then
+  delivery_reconcile_env=(DISPATCH_TEST_DELIVERY_RECONCILE_INTERVAL="$DISPATCH_TEST_DELIVERY_RECONCILE_INTERVAL")
+fi
 
 # Meaning search's embedder, read before the sweep below. The file-store block above gives this
 # process the AWS SDK's own variables so it can reach the lane's S3 server, and Bedrock - the
@@ -300,7 +326,8 @@ done
 app_pem="$(openssl genrsa 2048 2>/dev/null)"
 
 cd "$(dirname "$0")/../../envoy"
-# Build first, in the caller's toolchain environment, and exec the binary itself. A server
+# Build first, in the caller's toolchain environment, and exec the binary itself - or exec the
+# one DISPATCH_E2E_SERVER_BIN named, which is already built and is not this checkout's. A server
 # started as `go run` is the go command's child; the go command ignores only SIGINT and SIGQUIT,
 # so a SIGTERM to it ends the go command and leaves the server listening. Playwright kills the
 # whole process group and the skill-scenarios rig the whole process tree, but a caller that
@@ -309,7 +336,10 @@ cd "$(dirname "$0")/../../envoy"
 # once serialise: Go rewrites it only when the source changed, and a running server keeps the
 # inode it started from. The port is chosen only after the build, and held-port.py execs `env`,
 # which execs the server, so the pid a caller started is still the server's.
-flock ./.dispatch-e2e.lock go build -o ./dispatch-e2e ./cmd/dispatch
+if [ -z "$server_bin" ]; then
+  flock ./.dispatch-e2e.lock go build -o ./dispatch-e2e ./cmd/dispatch
+  server_bin=./dispatch-e2e
+fi
 exec "${listen[@]}" env \
   "${broker_env[@]}" \
   "${file_store_env[@]}" \
@@ -324,6 +354,7 @@ exec "${listen[@]}" env \
   DISPATCH_LISTEN_HOST=127.0.0.1 \
   DISPATCH_NATS_DISABLED=1 \
   "${port_env[@]}" \
+  "${delivery_reconcile_env[@]}" \
   DISPATCH_TEST_EMBEDDER_OFF="$embedder_off" \
   DISPATCH_TEST_HOOKS=1 \
   DISPATCH_TEST_LISTENER_TAKEOVER_WINDOW="$listener_takeover_window" \
@@ -338,4 +369,4 @@ exec "${listen[@]}" env \
   XDG_CACHE_HOME=/nonexistent \
   XDG_CONFIG_HOME=/nonexistent \
   XDG_DATA_HOME=/nonexistent \
-  ./dispatch-e2e
+  "$server_bin"

@@ -61,6 +61,37 @@ const (
 	ReasonGitHubOwnersMalformed = "github-owners-malformed"
 	// ReasonDefaultGrantMalformed: default-grant is set to anything but "session".
 	ReasonDefaultGrantMalformed = "default-grant-malformed"
+	// ReasonRequestersMalformed: the requesters tag holds a comma, names nobody, names a person
+	// by anything but their lowercase sign-in email, or names a service the deployment does not
+	// register (ParseRequesters).
+	ReasonRequestersMalformed = "requesters-malformed"
+	// ReasonMaxGrantRequired: an admin secret, or a google-service-account one, sets no max-grant,
+	// or one longer than an hour (TagRules). Both release a credential whose grant is reviewed
+	// while it is live, so it lasts an hour at most.
+	ReasonMaxGrantRequired = "max-grant-required"
+	// ReasonRequestersNotOwner: a google-service-account secret whose requesters are not its one
+	// person owner, once — no list, no entry naming the owner, more than one person, or a person
+	// who is not the owner — or which lists a service at agent tier, where no person approves the
+	// pod that asks (TagRules). A human-tier secret may list registered services beside its owner,
+	// unless the deployment binds it to a dev-<name> account, whose token is that one person's.
+	ReasonRequestersNotOwner = "requesters-not-owner"
+	// ReasonAdminMalformed: the admin tag is set to anything but "true" (TagAdmin), the empty
+	// string included. A tag whose value says nothing is a mistake, not a secret that is no
+	// administrator's.
+	ReasonAdminMalformed = "admin-malformed"
+	// ReasonAdminTier: an admin secret is agent tier (TagRules). An administrator's credential is
+	// released only by a person's approval, which agent tier never asks for.
+	ReasonAdminTier = "admin-tier"
+	// ReasonAdminRequesters: an admin secret carries no requesters tag (TagRules). Who may ask for
+	// an administrator's credential is named, never left to owner and tier alone.
+	ReasonAdminRequesters = "admin-requesters"
+	// ReasonScopesMalformed: the scopes tag holds a comma, names no scope, names one twice, or
+	// holds an entry that is no scope name — a whole https://www.googleapis.com/auth/… URL
+	// included (ParseScopes).
+	ReasonScopesMalformed = "scopes-malformed"
+	// ReasonScopesKind: a secret that is not a google-service-account one carries a scopes tag
+	// (TagRules). No other minter reads it, so the tag would narrow nothing while saying it had.
+	ReasonScopesKind = "scopes-kind"
 )
 
 // slugPattern is a secret's name under the prefix: the lowercase form of an environment-variable
@@ -92,6 +123,14 @@ type Loader struct {
 	// Services are the registered services a secret's owner tag may name: the broker's
 	// BROKER_SERVICES. An owner tag naming any other service is refused as malformed.
 	Services []string
+	// ServiceAccounts is the deployment's BROKER_SERVICE_ACCOUNT_SECRETS: each google-service-account
+	// secret's Name to the one account email the deployment binds to it. The loader reads it for
+	// one rule alone — a secret bound to a dev-<name> account, which is one person's own, may list
+	// no service among its requesters (TagRules) — and the minter is what refuses a mint for any
+	// account but the bound one, so a stored value rewritten to name another account releases no
+	// token. An empty or nil map binds nothing, and every such secret then stands on its tags
+	// alone.
+	ServiceAccounts map[string]string
 }
 
 // Load reads the namespace into a Set, logging one RefusedMessage line for each secret it refuses.
@@ -236,6 +275,39 @@ func (l Loader) secret(ctx context.Context, slug string, ls secrets.Listing) (Se
 			return Secret{}, ReasonGitHubOwnersMalformed, nil
 		}
 		s.Source = KindSource(kind, ls.Source)
+	}
+	// Read after max-grant and kind, both of which the tag rules weigh: Secret.Kind reads the kind
+	// back off the Source the branch above froze it into. The admin and scopes tags are read here
+	// too, since the rules weigh them against the kind, the tier and the requesters alike. A kind
+	// whose own rules demand a list is refused for a missing one, so TagRules runs whether the
+	// tags are there or not.
+	if raw, tagged := ls.Tags[TagRequesters]; tagged {
+		if s.Requesters, err = ParseRequesters(raw, l.Services); err != nil {
+			return Secret{}, ReasonRequestersMalformed, nil
+		}
+	}
+	if raw, tagged := ls.Tags[TagAdmin]; tagged {
+		if raw != AdminTrue {
+			return Secret{}, ReasonAdminMalformed, nil
+		}
+		s.Admin = true
+	}
+	if raw, tagged := ls.Tags[TagScopes]; tagged {
+		if s.Scopes, err = ParseScopes(raw); err != nil {
+			return Secret{}, ReasonScopesMalformed, nil
+		}
+	}
+	if reason := TagRules(TagSet{
+		Kind:         s.Kind(),
+		Owner:        s.Owner,
+		Tier:         s.Tier,
+		Requesters:   s.Requesters,
+		Scopes:       s.Scopes,
+		Admin:        s.Admin,
+		MaxGrant:     s.MaxGrant,
+		BoundAccount: l.ServiceAccounts[s.Name],
+	}); reason != "" {
+		return Secret{}, reason, nil
 	}
 	if !ls.HasCurrentValue {
 		return Secret{}, ReasonNoCurrentValue, nil

@@ -7,6 +7,7 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -19,6 +20,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 )
 
 // secretUpdates are the Secret updates among writes, by name.
@@ -30,6 +32,17 @@ func secretUpdates(writes []action) []string {
 		}
 	}
 	return names
+}
+
+// linesHolding are the lines of logged that hold text.
+func linesHolding(logged, text string) []string {
+	var held []string
+	for _, line := range strings.Split(logged, "\n") {
+		if strings.Contains(line, text) {
+			held = append(held, line)
+		}
+	}
+	return held
 }
 
 // The refresher brings a live pod's role Secrets to the current render of each role's credential
@@ -106,7 +119,7 @@ func TestTheRefresherRewritesOnlyTheOwnersWhoseGhFilesAreStale(t *testing.T) {
 	if len(refreshed) != 1 {
 		t.Fatalf("the runtime logged %d refreshed credentials %q, want the tester's alone", len(refreshed), refreshed)
 	}
-	for _, want := range []string{"sandbox=" + issue, "role=" + string(claim.RoleTester), "app=" + string(appauth.Review), "expiresAt=2026-10-08T13:00:00", "owners=[acme]"} {
+	for _, want := range []string{"sandbox=" + issue, "role=" + string(claim.RoleTester), "app=" + string(appauth.Review), "expiresAt=2026-10-08T13:00:00", "dirs=[acme]"} {
 		if !strings.Contains(refreshed[0], want) {
 			t.Errorf("the runtime logged %q, want %q in it", refreshed[0], want)
 		}
@@ -128,7 +141,8 @@ func TestTheRefresherFollowsAReMintedLeaseIntoEveryRolesSecret(t *testing.T) {
 	logs := &lockedLog{}
 	g := newRig(t, nil, withOptions(func(o *Options) {
 		o.Log = slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelInfo}))
-		o.GitHubCredential = func(_ context.Context, role claim.Role, owner string) (ghconfig.Bundle, error) {
+		o.GitHubCredential = func(_ context.Context, role claim.Role, repo ghrepo.Repository) (ghconfig.Bundle, error) {
+			owner := strings.ToLower(repo.Owner())
 			if refuse.Load() {
 				switch role {
 				case claim.RoleMerger:
@@ -141,10 +155,20 @@ func TestTheRefresherFollowsAReMintedLeaseIntoEveryRolesSecret(t *testing.T) {
 				owner = "sjawhar"
 			}
 			app := string(appauth.AppRoleFor(role))
-			return ghconfig.Bundle{Default: owner, Owners: map[string]ghconfig.Rendered{
+			return ghconfig.Bundle{Default: owner, Dirs: map[string]ghconfig.Rendered{
 				"acme": ghconfig.Render("ghs_"+app+"_"+*lease.Load()+"_read", app, staticCredentialExpiry),
 				owner:  ghconfig.Render("ghs_"+app+"_"+*lease.Load(), app, staticCredentialExpiry),
 			}}, nil
+		}
+		// The controller's bundle comes from the one function that answers by owner, over the same
+		// lease: its launch asks for no owner and its refresh for the one its Secret records.
+		o.ControllerCredential = func(ctx context.Context, defaultOwner string) (ghconfig.Bundle, error) {
+			bundle, err := o.GitHubCredential(ctx, claim.RoleController, ghrepo.Repository{})
+			if err != nil || defaultOwner == "" {
+				return bundle, err
+			}
+			bundle.Default = defaultOwner
+			return bundle, nil
 		}
 	}))
 	g.spawn(rootSpec(t))
@@ -193,6 +217,77 @@ func TestTheRefresherFollowsAReMintedLeaseIntoEveryRolesSecret(t *testing.T) {
 	}
 	if !strings.Contains(logged, "default owner acme is not the Secret's sjawhar") {
 		t.Errorf("the runtime logged %q, want the planner's render refused for its default", logged)
+	}
+}
+
+// A controller's bundle is asked for by owner at its launch and at every refresh
+// (Options.ControllerCredential), so a project that gains an owner sorting before the one its
+// Secret records still refreshes it: the controller works no repository, and a bundle asked for
+// by repository takes its default from the first owner the project serves, which would be
+// another owner than the one the pod's GH_CONFIG_DIR was fixed at and so refused at every tick
+// until something replaced the pod, its tokens expiring within the hour.
+func TestAControllerIsRefreshedForTheOwnerItsSecretRecords(t *testing.T) {
+	var gained atomic.Bool
+	logs := &lockedLog{}
+	app := string(appauth.AppRoleFor(claim.RoleController))
+	// The project served sjawhar alone when the controller's pod was launched, and has since
+	// gained acme, which sorts before it.
+	bundle := func(dflt string) ghconfig.Bundle {
+		rendered := ghconfig.Bundle{Default: dflt, Dirs: map[string]ghconfig.Rendered{
+			"sjawhar": ghconfig.Render("ghs_review_read_sjawhar", app, staticCredentialExpiry),
+		}}
+		if gained.Load() {
+			rendered.Dirs["acme"] = ghconfig.Render("ghs_review_read_acme", app, staticCredentialExpiry)
+		}
+		return rendered
+	}
+	first := func() string {
+		if gained.Load() {
+			return "acme"
+		}
+		return "sjawhar"
+	}
+	g := newRig(t, nil, withOptions(func(o *Options) {
+		o.Log = slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelInfo}))
+		o.GitHubCredential = func(_ context.Context, _ claim.Role, repo ghrepo.Repository) (ghconfig.Bundle, error) {
+			owner := strings.ToLower(repo.Owner())
+			if owner == "" {
+				owner = first()
+			}
+			return bundle(owner), nil
+		}
+		o.ControllerCredential = func(_ context.Context, defaultOwner string) (ghconfig.Bundle, error) {
+			if defaultOwner == "" {
+				defaultOwner = first()
+			}
+			return bundle(defaultOwner), nil
+		}
+	}))
+	g.spawn(controllerSpec(t))
+	name := roleSecretName(SandboxName(controllerToken), claim.RoleController)
+	if recorded := string(g.secret(name).Data[GitHubDefaultKey]); recorded != "sjawhar" {
+		t.Fatalf("the controller's Secret records the default %q, want the one owner its launch served, sjawhar", recorded)
+	}
+	gained.Store(true)
+	if asked, _ := g.r.gitHubCredential(g.ctx, claim.RoleController, ghrepo.Repository{}); asked.Default != "acme" {
+		t.Fatalf("a bundle asked for by repository defaults to %q, want the project's new first owner acme, which the Secret does not record", asked.Default)
+	}
+	g.clearActions()
+
+	g.r.refreshGitHubCredentials(g.ctx)
+
+	if updated := secretUpdates(g.writes()); !slices.Equal(updated, []string{name}) {
+		t.Fatalf("the refresher updated %v, want the controller's Secret %s", updated, name)
+	}
+	secret := g.secret(name)
+	if string(secret.Data[GitHubDefaultKey]) != "sjawhar" {
+		t.Errorf("the refresher wrote the default %q, want the recorded sjawhar untouched", secret.Data[GitHubDefaultKey])
+	}
+	if token, err := ghconfig.TokenFromHosts(secret.Data[GitHubHostsKey("acme")]); err != nil || token != "ghs_review_read_acme" {
+		t.Errorf("the controller's acme hosts.yml holds %q (%v), want the new owner's read token", token, err)
+	}
+	if logged := logs.String(); strings.Contains(logged, "github credential refresh failed") {
+		t.Errorf("the runtime logged %q, want the controller refreshed rather than refused", logged)
 	}
 }
 
@@ -261,65 +356,353 @@ func TestTheRefresherLeavesAPodThatIsNotLiveAlone(t *testing.T) {
 }
 
 // leaseTokens is a provisioning token source whose lease the test re-mints: each token is the
-// lease's name and the owner's.
-type leaseTokens struct{ lease atomic.Pointer[string] }
-
-func (l *leaseTokens) Token(_ context.Context, owner string) (string, error) {
-	return "ghs_" + *l.lease.Load() + "_" + owner, nil
+// lease's name and the owner's. Every mint is counted under the lower-cased repository the
+// walk's own memo keys by, so a test reads what a tick cost, and the repository refuse names is
+// refused, so a test reads what a tick does when GitHub mints nothing.
+type leaseTokens struct {
+	lease  atomic.Pointer[string]
+	refuse atomic.Pointer[string]
+	mu     sync.Mutex
+	mints  map[string]int
 }
 
-// A re-minted lease reaches the provisioning Secret of every issue pod whose workspace-fetch has yet
-// to finish, on the same tick as the role Secrets: the fetch reads the token's file anew before
-// every transfer from GitHub, so one that waits long on its repository's cache presents the
-// current lease. Only the token is rewritten; the cache's bearer token beside it stays. A pod whose
-// fetch has finished keeps its Secret as it is: nothing in it reads the token again.
-func TestTheRefresherKeepsAFetchingPodsProvisioningTokenFresh(t *testing.T) {
-	tokens := &leaseTokens{}
-	first, second := "first", "second"
-	tokens.lease.Store(&first)
-	g := newRig(t, nil, withOptions(func(o *Options) { o.Tokens = tokens }))
-	other, err := claim.NewToken(testProject, "LEGION-210", claim.RoleArchitect)
+func (l *leaseTokens) Token(_ context.Context, repo ghrepo.Repository) (string, error) {
+	l.mu.Lock()
+	if l.mints == nil {
+		l.mints = map[string]int{}
+	}
+	l.mints[strings.ToLower(repo.String())]++
+	l.mu.Unlock()
+	if refused := l.refuse.Load(); refused != nil && strings.EqualFold(*refused, repo.String()) {
+		return "", errors.New("the implement App's installation does not reach " + repo.String())
+	}
+	return "ghs_" + *l.lease.Load() + "_" + repo.Owner(), nil
+}
+
+// minted is how often repo's token has been asked for.
+func (l *leaseTokens) minted(repo ghrepo.Repository) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.mints[strings.ToLower(repo.String())]
+}
+
+// fetched is a pod's status once workspace-fetch has exited successfully: Pending still, with
+// workspace-init running, which is a pod past its fetch.
+func fetched(p *corev1.Pod) {
+	p.Status = corev1.PodStatus{Phase: corev1.PodPending, InitContainerStatuses: []corev1.ContainerStatus{
+		{Name: fetchContainer, State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0, Reason: "Completed"}}},
+		{Name: initContainer, State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
+	}}
+}
+
+// spawnIssue launches the architect of the issue named key on g — an issue of the test tree with a
+// pod of its own — and returns that pod's name.
+func spawnIssue(t *testing.T, g *rig, key string) string {
+	t.Helper()
+	token, err := claim.NewToken(testProject, key, claim.RoleArchitect)
 	if err != nil {
 		t.Fatal(err)
 	}
-	g.spawn(rootSpec(t))
-	g.spawn(testSpec(t, other, claim.RoleArchitect, "LEGION-210"))
-	inFetch, pastFetch := SandboxName(rootToken), SandboxName(other)
-	owner := rootSpec(t).Repository.Owner()
-	for _, name := range []string{inFetch, pastFetch} {
-		if got := string(g.secret(secretName(name)).Data[provisionTokenKey]); got != "ghs_first_"+owner {
-			t.Fatalf("%s's provisioning Secret holds %q at launch, want the first lease's", name, got)
-		}
+	g.spawn(testSpec(t, token, claim.RoleArchitect, key))
+	return SandboxName(token)
+}
+
+// provisioned is the token the provisioning Secret of the pod named name holds.
+func provisioned(g *rig, name string) string {
+	g.t.Helper()
+	secret := g.secret(secretName(name))
+	if secret == nil {
+		g.t.Fatalf("no provisioning Secret %s", secretName(name))
 	}
-	bearer := string(g.secret(secretName(inFetch)).Data[cacheTokenKey])
-	g.update(g.pod(inFetch), fetching)
-	g.update(g.pod(pastFetch), func(p *corev1.Pod) {
-		p.Status = corev1.PodStatus{Phase: corev1.PodPending, InitContainerStatuses: []corev1.ContainerStatus{
-			{Name: fetchContainer, State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0, Reason: "Completed"}}},
-			{Name: initContainer, State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
-		}}
-	})
-	g.eventually("the store to hold both pods Pending", func() bool {
-		for _, name := range []string{inFetch, pastFetch} {
-			if pod := g.r.storedPod(name); pod == nil || pod.Status.Phase != corev1.PodPending {
-				return false
+	return string(secret.Data[provisionTokenKey])
+}
+
+// refreshTick is the refresher's tick over the Secrets: the walk of the pod store and then the
+// repository caches, the pair refreshGitHubCredentialsEvery runs, since a cache's Secret is the
+// second call's.
+func refreshTick(g *rig) {
+	g.r.refreshGitHubCredentials(g.ctx)
+	g.r.refreshCacheTokens(g.ctx)
+}
+
+// A re-minted lease reaches the provisioning Secret of every live issue pod on one tick, whatever
+// its workspace-fetch has already done — a pod's init containers can run again at any point in its
+// life, and the fetch reads the token's file anew before every transfer from GitHub, so a boot
+// token aged past the hour GitHub gives one would leave the pod unable to fetch its repository
+// again — and the repository cache's Secret follows on the same tick. Only the token is rewritten;
+// the cache's bearer token beside it stays. A pod no launcher runs in any more, one the walk can
+// judge nothing by, and a Secret another Sandbox owns are left as they are. The lease is minted
+// once for a repository however many of its pods the walk holds, and a repository whose mint
+// fails is logged once and left to the next tick.
+func TestTheRefresherKeepsEveryLivePodsProvisioningTokenFresh(t *testing.T) {
+	t.Run("every live pod and the repository cache follow the lease", func(t *testing.T) {
+		tokens := &leaseTokens{}
+		first, second := "first", "second"
+		tokens.lease.Store(&first)
+		logs := &logBuffer{}
+		g := newRig(t, nil, withLog(logs), withOptions(func(o *Options) { o.Tokens = tokens }))
+		repo := rootSpec(t).Repository
+		owner, cache := repo.Owner(), CacheSandboxName(testProject, repo)
+		running := spawnIssue(t, g, "LEGION-301")
+		pastFetch := spawnIssue(t, g, "LEGION-302")
+		inFetch := spawnIssue(t, g, "LEGION-303")
+		deleting := spawnIssue(t, g, "LEGION-304")
+		succeeded := spawnIssue(t, g, "LEGION-305")
+		failed := spawnIssue(t, g, "LEGION-306")
+		unlabelled := spawnIssue(t, g, "LEGION-307")
+		unowned := spawnIssue(t, g, "LEGION-308")
+		unparsed := spawnIssue(t, g, "LEGION-309")
+		foreign := spawnIssue(t, g, "LEGION-310")
+		live := []string{running, pastFetch, inFetch}
+		// skipped are the pods whose provisioning Secret the walk never reads; left is every pod
+		// whose Secret stays as it was, which is those and the one another Sandbox owns; minting
+		// is every pod whose Secret the walk reads.
+		skipped := []string{deleting, succeeded, failed, unlabelled, unowned, unparsed}
+		left := append(slices.Clone(skipped), foreign)
+		minting := append(slices.Clone(live), foreign)
+		for _, name := range append(slices.Clone(live), left...) {
+			if got := provisioned(g, name); got != "ghs_first_"+owner {
+				t.Fatalf("%s's provisioning Secret holds %q at launch, want the first lease's", name, got)
 			}
 		}
-		return true
+		bearer := string(g.secret(secretName(inFetch)).Data[cacheTokenKey])
+		g.update(g.pod(pastFetch), fetched)
+		g.update(g.pod(inFetch), fetching)
+		g.update(g.pod(deleting), func(p *corev1.Pod) { now := metav1.Now(); p.DeletionTimestamp = &now })
+		g.update(g.pod(succeeded), func(p *corev1.Pod) { p.Status.Phase = corev1.PodSucceeded })
+		g.update(g.pod(failed), func(p *corev1.Pod) { p.Status.Phase = corev1.PodFailed })
+		g.update(g.pod(unlabelled), func(p *corev1.Pod) { delete(p.Labels, labelIssue) })
+		g.update(g.pod(unowned), func(p *corev1.Pod) { p.OwnerReferences = nil })
+		g.update(g.pod(unparsed), func(p *corev1.Pod) {
+			for i, c := range p.Spec.InitContainers {
+				if at := slices.Index(c.Command, "--repo"); c.Name == fetchContainer && at >= 0 {
+					p.Spec.InitContainers[i].Command[at+1] = repo.Name()
+				}
+			}
+		})
+		editSecret(g, secretName(foreign), func(s *corev1.Secret) { s.OwnerReferences[0].UID = "uid-another-sandbox" })
+		g.eventually("the store to hold every pod as the test left it", func() bool {
+			for name, held := range map[string]func(*corev1.Pod) bool{
+				pastFetch:  func(p *corev1.Pod) bool { return p.Status.Phase == corev1.PodPending },
+				inFetch:    func(p *corev1.Pod) bool { return p.Status.Phase == corev1.PodPending },
+				deleting:   func(p *corev1.Pod) bool { return p.DeletionTimestamp != nil },
+				succeeded:  func(p *corev1.Pod) bool { return p.Status.Phase == corev1.PodSucceeded },
+				failed:     func(p *corev1.Pod) bool { return p.Status.Phase == corev1.PodFailed },
+				unlabelled: func(p *corev1.Pod) bool { _, err := podKindOf(p.Labels); return err != nil },
+				unowned:    func(p *corev1.Pod) bool { return metav1.GetControllerOf(p) == nil },
+				unparsed:   func(p *corev1.Pod) bool { _, named := fetchRepository(p); return !named },
+			} {
+				if pod := g.r.storedPod(name); pod == nil || !held(pod) {
+					return false
+				}
+			}
+			return true
+		})
+		tokens.lease.Store(&second)
+		g.clearActions()
+
+		refreshTick(g)
+
+		want := []string{secretName(running), secretName(pastFetch), secretName(inFetch), cacheSecretName(cache)}
+		if updated := secretUpdates(g.writes()); !slices.Equal(slices.Sorted(slices.Values(updated)), slices.Sorted(slices.Values(want))) {
+			t.Fatalf("the tick updated %v, want every live pod's provisioning Secret and the repository cache's: %v", updated, want)
+		}
+		for _, name := range live {
+			secret := g.secret(secretName(name))
+			if got := string(secret.Data[provisionTokenKey]); got != "ghs_second_"+owner || string(secret.Data[cacheTokenKey]) != bearer || len(secret.Data) != 2 {
+				t.Errorf("%s's provisioning Secret holds %q beside the cache token %q, want the second lease's and the bearer token %q kept",
+					name, got, secret.Data[cacheTokenKey], bearer)
+			}
+		}
+		if got := string(g.secret(cacheSecretName(cache)).Data[provisionTokenKey]); got != "ghs_second_"+owner {
+			t.Errorf("the repository cache's Secret holds %q, want the second lease's", got)
+		}
+		for _, name := range left {
+			if got := provisioned(g, name); got != "ghs_first_"+owner {
+				t.Errorf("%s's provisioning Secret holds %q, want it left as it was", name, got)
+			}
+		}
+		logged := logs.String()
+		if n := strings.Count(logged, "sandbox runtime: provisioning token refreshed"); n != len(live) {
+			t.Errorf("the tick logged %d provisioning refreshes, want one for each of %v: %s", n, live, logged)
+		}
+		for _, quiet := range []string{"sandbox runtime: provisioning token mint failed", "sandbox runtime: provisioning token refresh failed"} {
+			if strings.Contains(logged, quiet) {
+				t.Errorf("the tick logged %q, want none: %s", quiet, logged)
+			}
+		}
+		for _, line := range strings.Split(logged, "\n") {
+			if !strings.Contains(line, "provisioning token") {
+				continue
+			}
+			for _, quiet := range []string{unparsed, foreign} {
+				if strings.Contains(line, quiet) {
+					t.Errorf("the tick logged %q of %s, want it passed over in silence", line, quiet)
+				}
+			}
+		}
+
+		// The same tick again with the lease where it is: the walk mints once for the repository
+		// however many of its pods it holds — the mint refreshCacheTokens makes is the repository
+		// cache's own (writeCacheSecret) — reads each live pod's provisioning Secret once, and
+		// writes nothing at all.
+		g.clearActions()
+		minted := tokens.minted(repo)
+		g.r.refreshGitHubCredentials(g.ctx)
+		if got := tokens.minted(repo) - minted; got != 1 {
+			t.Errorf("the walk minted %s's token %d times over the %d pods whose Secret it reads, want once", repo, got, len(minting))
+		}
+		g.r.refreshCacheTokens(g.ctx)
+		if updated := secretUpdates(g.writes()); len(updated) != 0 {
+			t.Errorf("the tick updated %v while every Secret held the lease", updated)
+		}
+		reads := map[string]int{}
+		for _, request := range g.requests() {
+			if request.verb == "get" && request.resource == "secrets" {
+				reads[request.name]++
+			}
+		}
+		for _, name := range minting {
+			if reads[secretName(name)] != 1 {
+				t.Errorf("the tick read %s's provisioning Secret %d times, want once", name, reads[secretName(name)])
+			}
+		}
+		for _, name := range skipped {
+			if reads[secretName(name)] != 0 {
+				t.Errorf("the tick read %s's provisioning Secret %d times, want none", name, reads[secretName(name)])
+			}
+		}
 	})
-	tokens.lease.Store(&second)
-	g.clearActions()
 
-	g.r.refreshGitHubCredentials(g.ctx)
+	t.Run("a repository whose mint fails is logged once and tried again", func(t *testing.T) {
+		tokens := &leaseTokens{}
+		first, second := "first", "second"
+		tokens.lease.Store(&first)
+		logs := &logBuffer{}
+		g := newRig(t, nil, withLog(logs), withOptions(func(o *Options) { o.Tokens = tokens }))
+		repo := rootSpec(t).Repository
+		owner, cache := repo.Owner(), CacheSandboxName(testProject, repo)
+		one, two := spawnIssue(t, g, "LEGION-311"), spawnIssue(t, g, "LEGION-312")
+		refused := repo.String()
+		tokens.lease.Store(&second)
+		tokens.refuse.Store(&refused)
+		g.clearActions()
+		minted := tokens.minted(repo)
 
-	if updated := secretUpdates(g.writes()); !slices.Equal(updated, []string{secretName(inFetch)}) {
-		t.Fatalf("the refresher updated %v, want %s alone", updated, secretName(inFetch))
-	}
-	refreshed := g.secret(secretName(inFetch))
-	if got := string(refreshed.Data[provisionTokenKey]); got != "ghs_second_"+owner || string(refreshed.Data[cacheTokenKey]) != bearer || len(refreshed.Data) != 2 {
-		t.Errorf("the fetching pod's provisioning Secret holds %q and the cache token %t, want the second lease's and the cache's token kept", got, string(refreshed.Data[cacheTokenKey]) == bearer)
-	}
-	if got := string(g.secret(secretName(pastFetch)).Data[provisionTokenKey]); got != "ghs_first_"+owner {
-		t.Errorf("the pod past its fetch holds %q, want its Secret left as it was", got)
-	}
+		g.r.refreshGitHubCredentials(g.ctx)
+
+		if got := tokens.minted(repo) - minted; got != 1 {
+			t.Errorf("the walk minted %s's token %d times over its two pods, want once", repo, got)
+		}
+		if updated := secretUpdates(g.writes()); len(updated) != 0 {
+			t.Fatalf("the walk updated %v after the mint failed", updated)
+		}
+		for _, name := range []string{one, two} {
+			if got := provisioned(g, name); got != "ghs_first_"+owner {
+				t.Errorf("%s's provisioning Secret holds %q, want it left as it was", name, got)
+			}
+		}
+		failures := linesHolding(logs.String(), "sandbox runtime: provisioning token mint failed")
+		if len(failures) != 1 || !strings.Contains(failures[0], "repo="+repo.String()) || !strings.Contains(failures[0], "err=") || !strings.Contains(failures[0], "level=WARN") {
+			t.Errorf("the walk logged %q, want one warning naming %s and the error", failures, repo)
+		}
+
+		tokens.refuse.Store(nil)
+		g.clearActions()
+
+		refreshTick(g)
+
+		want := []string{secretName(one), secretName(two), cacheSecretName(cache)}
+		if updated := secretUpdates(g.writes()); !slices.Equal(slices.Sorted(slices.Values(updated)), slices.Sorted(slices.Values(want))) {
+			t.Fatalf("the next tick updated %v, want both pods' provisioning Secrets and the cache's %v", updated, want)
+		}
+		for _, name := range []string{one, two} {
+			if got := provisioned(g, name); got != "ghs_second_"+owner {
+				t.Errorf("%s's provisioning Secret holds %q after the mint worked again, want the second lease's", name, got)
+			}
+		}
+	})
+
+	t.Run("a Secret the API refuses leaves the tick's other pods written", func(t *testing.T) {
+		tokens := &leaseTokens{}
+		first, second := "first", "second"
+		tokens.lease.Store(&first)
+		logs := &logBuffer{}
+		g := newRig(t, nil, withLog(logs), withOptions(func(o *Options) { o.Tokens = tokens }))
+		owner := rootSpec(t).Repository.Owner()
+		unreadable := spawnIssue(t, g, "LEGION-313")
+		unwritable := spawnIssue(t, g, "LEGION-314")
+		written := spawnIssue(t, g, "LEGION-315")
+		g.kube.PrependReactor("get", "secrets", func(a k8stesting.Action) (bool, k8sruntime.Object, error) {
+			if a.(k8stesting.GetAction).GetName() == secretName(unreadable) {
+				return true, nil, errors.New("the API server is unreachable")
+			}
+			return false, nil, nil
+		})
+		g.kube.PrependReactor("update", "secrets", func(a k8stesting.Action) (bool, k8sruntime.Object, error) {
+			if a.(k8stesting.UpdateAction).GetObject().(*corev1.Secret).Name == secretName(unwritable) {
+				return true, nil, errors.New("the API server is busy")
+			}
+			return false, nil, nil
+		})
+		tokens.lease.Store(&second)
+		g.clearActions()
+
+		refreshTick(g)
+
+		if got := provisioned(g, written); got != "ghs_second_"+owner {
+			t.Errorf("the pod beside the two refused Secrets holds %q, want the second lease's", got)
+		}
+		for _, name := range []string{unreadable, unwritable} {
+			if got := provisioned(g, name); got != "ghs_first_"+owner {
+				t.Errorf("%s's provisioning Secret holds %q, want the refused write left it as it was", name, got)
+			}
+		}
+		failures := linesHolding(logs.String(), "sandbox runtime: provisioning token refresh failed")
+		if len(failures) != 2 {
+			t.Fatalf("the tick logged %q, want one failure for each refused Secret", failures)
+		}
+		for _, name := range []string{unreadable, unwritable} {
+			if !slices.ContainsFunc(failures, func(line string) bool { return strings.Contains(line, "sandbox="+name) }) {
+				t.Errorf("the tick logged %q, want %s's refusal named", failures, name)
+			}
+		}
+	})
+
+	t.Run("a write that conflicts is retried once on a fresh read", func(t *testing.T) {
+		tokens := &leaseTokens{}
+		first, second := "first", "second"
+		tokens.lease.Store(&first)
+		g := newRig(t, nil, withOptions(func(o *Options) { o.Tokens = tokens }))
+		repo := rootSpec(t).Repository
+		owner, cache := repo.Owner(), CacheSandboxName(testProject, repo)
+		pod := spawnIssue(t, g, "LEGION-316")
+		var conflicted atomic.Bool
+		g.kube.PrependReactor("update", "secrets", func(a k8stesting.Action) (bool, k8sruntime.Object, error) {
+			secret := a.(k8stesting.UpdateAction).GetObject().(*corev1.Secret)
+			if secret.Name == secretName(pod) && conflicted.CompareAndSwap(false, true) {
+				editSecret(g, secretName(pod), func(s *corev1.Secret) { s.Data[cacheTokenKey] = []byte("written-between") })
+				return true, nil, apierrors.NewConflict(corev1.Resource("secrets"), secretName(pod), errors.New("the object has been modified"))
+			}
+			return false, nil, nil
+		})
+		tokens.lease.Store(&second)
+		g.clearActions()
+
+		refreshTick(g)
+
+		// The rig records a request once the conflict reactor has let it through, so the refused
+		// write is the reactor's own evidence and the retry the one recorded update.
+		if updated := secretUpdates(g.writes()); !conflicted.Load() || !slices.Equal(updated, []string{secretName(pod), cacheSecretName(cache)}) {
+			t.Fatalf("the tick's recorded updates were %v after a conflict served: %t; want one retry of %s and the cache's",
+				updated, conflicted.Load(), secretName(pod))
+		}
+		after := g.secret(secretName(pod))
+		if got := string(after.Data[provisionTokenKey]); got != "ghs_second_"+owner {
+			t.Errorf("the retried write left %q, want the second lease's", got)
+		}
+		if string(after.Data[cacheTokenKey]) != "written-between" {
+			t.Errorf("the retry wrote over the cache token written between read and write: %q", after.Data[cacheTokenKey])
+		}
+	})
 }

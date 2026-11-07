@@ -117,7 +117,19 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 	if err != nil {
 		return RebuildReport{}, VersionResult{}, err
 	}
-	if err := validateWrittenAskBlocks(tree); err != nil {
+	// A caller's markdown is markdown written in whole, so an ask written with its options and no
+	// question is refused (validateWrittenAskBlocks), as the markdown of such an ask was before
+	// both parsers read the empty paragraph the schema fills in ahead of its options. The latest
+	// version's own markdown is held to the tree rule instead (validateStoredAskBlocks): a
+	// person's edit can empty an ask's question in the live document, which this package keeps
+	// and repairs through that question (refuseEmptyQuestionEdit), and a document the product
+	// stores must be one a rebuild can restore - refusing it here would leave it with no way
+	// back. Both doors hold every ask to the wording bound it shares.
+	content := validateWrittenAskBlocks
+	if markdown == nil {
+		content = validateStoredAskBlocks
+	}
+	if err := content(tree); err != nil {
 		return RebuildReport{}, VersionResult{}, &ErrInvalidAskBlock{Reason: err}
 	}
 	if err := s.refuseDroppedAskBlocks(ctx, artifactID, tree); err != nil {
@@ -183,12 +195,16 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 		// markdown is nil here: a closed issue refuses supplied markdown above. The seed differs
 		// from the latest version by the close's states, as each of the issue's documents the
 		// close wrote differs from its own, so it owes the settlement those writes leave owed
-		// (markUpdateOwed): none runs while the issue is closed, and the one its reopen runs
+		// (updateOwedStatement): none runs while the issue is closed, and the one its reopen runs
 		// versions the document and indexes, as new open asks, the blocks marked resolved here
 		// with no ask row. RebuildTx holds the document's advisory lock, which the mark is ordered
-		// by. The writes credit no one, as the close's do: no pending author is added, and the
-		// latest edit source the row names is kept.
-		if err := markUpdateOwed(ctx, tx, artifactID); err != nil {
+		// by. The writes credit no one, as the close's do (the zero owedUpdates): no pending author
+		// is added, and the latest edit source the row names is kept.
+		owed, err := updateOwedStatement(artifactID, owedUpdates{})
+		if err != nil {
+			return RebuildReport{}, VersionResult{}, err
+		}
+		if err := owed.exec(ctx, tx); err != nil {
 			return RebuildReport{}, VersionResult{}, err
 		}
 		logUnindexedAskBlocks(*owner.IssueKey, closedStates.marked)

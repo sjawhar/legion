@@ -1,0 +1,5 @@
+kind: Fixed
+body: The ENVOY_NOTIFICATIONS stream carries an explicit consumer cap of 24000, in place of the 1000 nats-server 2.15 and later apply to a stream that sets none. A start and the keeper raise a deployed cap below it and keep one above it, and the keeper names the raise in its line as `max_consumers 1000 -> 24000`. A stream that sets no cap is raised only where the connected server is 2.15 or later, since every older server leaves such a stream unlimited and has nothing to fix; a stream with a cap below 24000 is raised on every server, and a nats-server older than v2.12.5 cannot take that change on a stream it already holds, so a listener of this release needs v2.12.5 or later wherever the stream already exists with a lower cap, and a refused start names the field and the floor; the one-machine compose deployment moves to the nats:2.15.1-alpine image the hub runs.
+time: 2026-11-06T04:23:13.436835142Z
+custom:
+    Issue: pr2852

@@ -27,10 +27,10 @@ type createRequestBody struct {
 }
 
 // createRequestResponse is POST /v1/requests's exact wire shape: request_id, state, secrets,
-// grant_id, record_id, approver, lifetime_seconds, coalesced — nothing else. requests.Request itself
-// carries additional fields (decided_at, decided_by, detail) this route's contract does not define,
-// so the handler below builds this dedicated response rather than marshaling the Request it gets
-// back from Machine.Create directly.
+// grant_id, record_id, approver, lifetime_seconds, coalesced, detail, approve_url — nothing else.
+// requests.Request itself carries additional fields (decided_at, decided_by) this route's contract
+// does not define, so the handler below builds this dedicated response rather than marshaling the
+// Request it gets back from Machine.Create directly.
 type createRequestResponse struct {
 	// The request's id, which GET /v1/requests/{id} and its cancel route take.
 	RequestID string `json:"request_id"`
@@ -56,6 +56,11 @@ type createRequestResponse struct {
 	LifetimeSeconds *int `json:"lifetime_seconds"`
 	// True when the request joined an identical one this session already had pending.
 	Coalesced bool `json:"coalesced,omitempty"`
+	// The broker's one sentence about why it denied the request: the secret that refused it and
+	// the rule that did, as "GCLOUD_SAMI: requester-not-listed", several joined with "; ". Null
+	// when the broker recorded none — every request it did not deny, and a denial whose rule it
+	// cannot name. A session reads it to learn that asking for that secret again will not help.
+	Detail *string `json:"detail"`
 	// While it is pending, its record's page on the broker, <BROKER_PUBLIC_URL>/approve/<record>,
 	// where a person signed in to the broker decides it; absent when the policy decided it at once.
 	ApproveURL string `json:"approve_url,omitempty"`
@@ -109,6 +114,7 @@ func (s *server) createRequest(w http.ResponseWriter, r *http.Request, enrollmen
 		Approver:        req.Approver,
 		LifetimeSeconds: req.LifetimeSeconds,
 		Coalesced:       req.Coalesced,
+		Detail:          req.Detail,
 		ApproveURL:      s.pendingApproveURL(req.State, req.RecordID),
 	})
 }
@@ -124,7 +130,9 @@ type requestDecision struct {
 	At time.Time `json:"at"`
 }
 
-// requestStatusResponse is GET /v1/requests/{id}'s answer.
+// requestStatusResponse is GET /v1/requests/{id}'s answer: state, grant_id, record_id, approver,
+// lifetime_seconds, decided_at, decision, detail and, while it is pending, approve_url — nothing
+// else.
 type requestStatusResponse struct {
 	// "pending", "granted", "denied", "expired" or "cancelled".
 	State string `json:"state"`
@@ -138,7 +146,8 @@ type requestStatusResponse struct {
 	// owner does not move it, and it stays once the request is decided. Null when the policy
 	// decided it at once, so no record names one.
 	Approver *string `json:"approver"`
-	// How many seconds its grant lasts: as the signed request asked, else 12 hours; null for a
+	// How many seconds its grant lasts: as the signed request asked, else 15 minutes when any name
+	// is human tier and 12 hours otherwise; null for a
 	// grant that lasts until the session ends (every name tagged default-grant=session).
 	LifetimeSeconds *int `json:"lifetime_seconds"`
 	// When it left "pending"; null while pending.
@@ -146,6 +155,10 @@ type requestStatusResponse struct {
 	// Who decided it and when; null while pending, when the policy decided it at once, and when it
 	// expired.
 	Decision *requestDecision `json:"decision"`
+	// The broker's one sentence about why it denied the request, as POST /v1/requests answers it:
+	// the secret that refused it and the rule that did, as "GCLOUD_SAMI: requester-not-listed".
+	// Null when the broker recorded none, a request it did not deny among them.
+	Detail *string `json:"detail"`
 	// While it is pending, its record's page on the broker, <BROKER_PUBLIC_URL>/approve/<record>,
 	// where a person signed in to the broker decides it; absent once it is no longer pending, and
 	// when the policy decided it at once.
@@ -220,7 +233,7 @@ func (s *server) readRequest(w http.ResponseWriter, r *http.Request, enrollmentI
 	}
 	resp := requestStatusResponse{
 		State: req.State, GrantID: req.GrantID, RecordID: req.RecordID, Approver: req.Approver, LifetimeSeconds: req.LifetimeSeconds,
-		DecidedAt: req.DecidedAt, ApproveURL: s.pendingApproveURL(req.State, req.RecordID),
+		DecidedAt: req.DecidedAt, Detail: req.Detail, ApproveURL: s.pendingApproveURL(req.State, req.RecordID),
 	}
 	if req.DecidedBy != nil && req.DecidedAt != nil {
 		resp.Decision = &requestDecision{By: *req.DecidedBy, At: *req.DecidedAt}

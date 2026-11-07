@@ -255,6 +255,9 @@ gates:
   design: root-issues
 admission_cap: 3
 review_round_cap: 3
+# The wake pacing off (INFRA-976): this proof starts many roles and waits on bounded times, and at
+# the default of 8 wakes a minute every wake after the first would spend those waits queueing.
+worker_wakes_per_minute: 0
 instructions: $work/instructions.md
 $(<"$work/github-apps.yaml")
 EOF
@@ -433,8 +436,8 @@ gate_send() {
 }
 # gate_finish ISSUE: the root waits on a person at its closed gate without a slot while its
 # architect stays live (await_gate_wait); the proof human approves, the root takes a slot back
-# (await_answered_slot), and only then reaches planning. admission_cap 3 is the run's three roots
-# (the child takes none), so the slots every waiting root gave back stand free and the answered root takes one at once.
+# (await_answered_slot), and only then reaches planning. admission_cap 3 counts issues at work,
+# roots and children alike, so the slots every waiting root gave back stand free and the answered root takes one at once.
 gate_finish() {
   local issue=$1 artifact=${gate_artifacts[$1]}
   until_true 600 "$issue architect to register primary artifact $artifact" sh -c \

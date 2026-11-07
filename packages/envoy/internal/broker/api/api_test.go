@@ -125,7 +125,11 @@ func newTestServerWith(t *testing.T, adjust func(*api.Deps)) *testServer {
 		t.Fatalf("oidc.New: %v", err)
 	}
 	serviceLogins := map[string]string{daemonAccount: "legion-daemon", otherDaemonAccount: "legion-daemon"}
-	enr := &enroll.Service{Store: st, Lease: time.Hour, Pod: enroll.K8sPodVerifier{Verifier: podVerifier}, ServiceLogins: serviceLogins}
+	// BROKER_SERVICES: both accounts the pods these tests enrol run as, bound to the service both
+	// daemon accounts log in as, which is what lets their logins enrol those pods. An account
+	// outside it is a pod no login here launches (POD_NOT_LAUNCHED).
+	servicesByAccount := map[string]string{workerAccount: "legion-daemon", otherAccount: "legion-daemon"}
+	enr := &enroll.Service{Store: st, Lease: time.Hour, Pod: enroll.K8sPodVerifier{Verifier: podVerifier}, ServiceLogins: serviceLogins, ServicesByAccount: servicesByAccount}
 	enr.Chain = enroll.NewChainVerifier(st, srv.URL, time.Minute)
 	// Wired as cmd/broker/main.go wires it, so a session name belongs to one principal on this
 	// server too: the enrollment route refuses a name another principal holds.
@@ -811,8 +815,8 @@ func TestAgentSecretRequestLifecycle(t *testing.T) {
 	if readBack.Enrollment == nil || readBack.Enrollment.Kind != "session" || readBack.Enrollment.Operator != testApprover || readBack.Enrollment.Slot != "" {
 		t.Fatalf("record enrollment = %+v, want kind=session operator=%s and no slot", readBack.Enrollment, testApprover)
 	}
-	if readBack.LifetimeSeconds == nil || *readBack.LifetimeSeconds != 43200 {
-		t.Fatalf("record lifetime_seconds = %v, want 43200, the 12-hour default for a request naming no lifetime", readBack.LifetimeSeconds)
+	if readBack.LifetimeSeconds == nil || *readBack.LifetimeSeconds != 900 {
+		t.Fatalf("record lifetime_seconds = %v, want 900, the 15-minute default for a human-tier request naming no lifetime", readBack.LifetimeSeconds)
 	}
 	if readBack.Session.Request != sessionID || readBack.Session.Enrollment != "" {
 		t.Fatalf("record session = %+v, want request=%s and no enrollment session_id", readBack.Session, sessionID)
@@ -875,8 +879,8 @@ func TestAgentSecretRequestLifecycle(t *testing.T) {
 		listed.RecordID == nil || *listed.RecordID != recordID || listed.Enrollment.Slot != nil {
 		t.Fatalf("listed grant = %+v, want names [DEEL_API_KEY] granted on approval by %s, resting on record %s, on an enrollment with no slot", listed, testApprover, recordID)
 	}
-	if listed.ExpiresAt == nil || listed.ExpiresAt.Sub(time.Now()) < 11*time.Hour || listed.ExpiresAt.Sub(time.Now()) > 13*time.Hour {
-		t.Fatalf("listed grant expires_at = %v, want about 12 hours from now, the default for a request naming no lifetime", listed.ExpiresAt)
+	if listed.ExpiresAt == nil || listed.ExpiresAt.Sub(time.Now()) > 15*time.Minute || listed.ExpiresAt.Sub(time.Now()) < 13*time.Minute {
+		t.Fatalf("listed grant expires_at = %v, want about 15 minutes from now, the default for a human-tier request naming no lifetime", listed.ExpiresAt)
 	}
 
 	// Revoking by approver takes the grant's approver or its enrollment's operator (both

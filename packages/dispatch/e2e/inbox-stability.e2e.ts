@@ -1,5 +1,6 @@
 import { expect, type Locator, type Page, test } from "@playwright/test";
 
+import type { Ask, Issue } from "../web/src/api/types";
 import {
   answerAsk,
   createAsk,
@@ -60,8 +61,14 @@ const TITLES = [
   "Thicket",
 ];
 
+/** One seeded ask and the issue it was asked on. */
+interface SeededAsk {
+  ask: Ask;
+  issue: Issue;
+}
+
 /** `count` open asks, each on its own issue, oldest first; `from` picks the first title. */
-async function seedAsks(prefix: string, count: number, from = 0) {
+async function seedAsks(prefix: string, count: number, from = 0): Promise<SeededAsk[]> {
   // The issues are independent of one another - their titles share no terms - so they are created
   // together; the asks stay serial because their order is what the Inbox lists.
   const issues = await Promise.all(
@@ -71,7 +78,7 @@ async function seedAsks(prefix: string, count: number, from = 0) {
       return createIssue({ project: "CORE", title });
     })
   );
-  const asks = [];
+  const asks: SeededAsk[] = [];
   for (const [index, issue] of issues.entries()) {
     asks.push({
       ask: await createAsk(
@@ -86,6 +93,13 @@ async function seedAsks(prefix: string, count: number, from = 0) {
     });
   }
   return asks;
+}
+
+/** Newest first in the Inbox, so a row's place is counted back from the last ask seeded. */
+function askAtRow(asks: SeededAsk[], fromTop: number): SeededAsk {
+  const ask = asks[asks.length - 1 - fromTop];
+  if (ask === undefined) throw new Error("ask missing");
+  return ask;
 }
 
 async function topOf(locator: Locator): Promise<number> {
@@ -170,14 +184,20 @@ async function leaveRow(page: Page): Promise<void> {
     .toBe(true);
 }
 
-test("a row being typed into keeps its draft when an agent's progress note flips its turn, and holds its place only while the reader's hand is on it @phone", async ({
+/** The address both turn-hold rows below open: the Inbox banded by whose turn it is
+ *  (`?group=waiting-on`), which is the banding a flipped turn moves a row between. The list's
+ *  own default bands by priority, where a progress note moves no row at all, so the hold under
+ *  the reader's hand would have nothing to hold. */
+const WAITING_ON_INBOX = "/?group=waiting-on";
+
+test("a row being typed into keeps its draft when an agent's progress note flips its turn, and holds its place only while the reader's hand is on it", async ({
   browser,
 }) => {
   const target = await seedBothSections();
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
-    await page.goto("/");
+    await page.goto(WAITING_ON_INBOX);
     await expect(page.locator("[data-inbox-row]")).toHaveCount(BOTH_SECTIONS_ROWS);
     const row = inboxRow(page, target.ask.id);
     await expect(row).toHaveAttribute("data-inbox-section", "human");
@@ -227,14 +247,14 @@ test("a row being typed into keeps its draft when an agent's progress note flips
   }
 });
 
-test("the reader's own Ask back leaves the view still and holds the row only where their hand is @phone", async ({
+test("the reader's own Ask back leaves the view still and holds the row only where their hand is", async ({
   browser,
 }) => {
   const target = await seedBothSections();
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
-    await page.goto("/");
+    await page.goto(WAITING_ON_INBOX);
     await expect(page.locator("[data-inbox-row]")).toHaveCount(BOTH_SECTIONS_ROWS);
     const row = inboxRow(page, target.ask.id);
     await expect(row).toHaveAttribute("data-inbox-section", "human");
@@ -287,7 +307,7 @@ test("the reader's own Ask back leaves the view still and holds the row only whe
   }
 });
 
-test("the row at the viewport centre stays put when a P0 ask arrives above it @phone", async ({
+test("the row at the viewport centre stays put when a P0 ask arrives above it", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -321,23 +341,17 @@ test("the row at the viewport centre stays put when a P0 ask arrives above it @p
 
 // SLOW(>=2s): a twenty-row Inbox seeded ask by ask, two answers and two scroll-and-measure
 // cycles.
-test("the row under the pointer stays put when a row above it is answered elsewhere, and is let go once the pointer leaves the list @phone", async ({
+test("the row under the pointer stays put when a row above it is answered elsewhere, and is let go once the pointer leaves the list", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
   // Long enough to scroll in whichever box holds it, with rows above and below each of the four
   // below, so every one of them can be brought to the centre of what is visible.
   const asks = await seedAsks("Queue", 20);
-  /** Newest first in the Inbox, so a row's place is counted back from the last ask seeded. */
-  const atRow = (fromTop: number) => {
-    const ask = asks[asks.length - 1 - fromTop];
-    if (ask === undefined) throw new Error("ask missing");
-    return ask;
-  };
-  const above = atRow(4);
-  const centreAsk = atRow(9);
-  const between = atRow(10);
-  const held = atRow(11);
+  const above = askAtRow(asks, 4);
+  const centreAsk = askAtRow(asks, 9);
+  const between = askAtRow(asks, 10);
+  const held = askAtRow(asks, 11);
 
   const alice = await asUser(browser, "alice");
   try {
@@ -383,23 +397,26 @@ test("the row under the pointer stays put when a row above it is answered elsewh
   }
 });
 
-test("a grouped header stays with its pointer-held row while a P0 ask arrives", async ({
+test("a band's header stays with its pointer-held row while a P0 ask arrives", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
   // Older rows under the pair, so the list runs past the bottom of the viewport and has
-  // somewhere to scroll when the arrival pushes the pair down.
+  // somewhere to scroll when the arrival pushes the pair down. They carry no priority, so the
+  // list's own banding puts them in the band under the P1 pair.
   await seedAsks("Below", 14);
-  const grouped = await createIssue({ project: "CORE", title: "Grouped stability" });
-  await createAsk(grouped.key, { question: "Grouped first" }, session);
-  const held = await createAsk(grouped.key, { question: "Grouped held" }, session);
+  const banded = await createIssue({ project: "CORE", title: "Banded stability" });
+  await patchIssue(banded.key, { priority: 1 });
+  await createAsk(banded.key, { question: "Banded first" }, session);
+  const held = await createAsk(banded.key, { question: "Banded held" }, session);
 
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
     await page.goto("/");
     const row = inboxRow(page, held.id);
-    const header = page.locator(`[data-inbox-group-header="issue:${grouped.key}"]`);
+    // The P1 band's own heading, which the arriving P0 band pushes down with its rows.
+    const header = page.getByRole("button", { name: "P1 (2)" });
     await expect(row).toBeVisible();
     await expect(header).toBeVisible();
     const box = await row.boundingBox();
@@ -422,13 +439,186 @@ test("a grouped header stays with its pointer-held row while a P0 ask arrives", 
   }
 });
 
-async function seedTravellingPointerGroup() {
+async function seedTravellingPointerBand() {
   await createProject({ key: "CORE", name: "Core" });
-  const grouped = await createIssue({ project: "CORE", title: "Grouped travelling pointer asks" });
-  await patchIssue(grouped.key, { priority: 1 });
-  await createAsk(grouped.key, { question: "Travelling pointer grouped first" }, session);
-  await createAsk(grouped.key, { question: "Travelling pointer grouped second" }, session);
+  const banded = await createIssue({ project: "CORE", title: "Banded travelling pointer asks" });
+  await patchIssue(banded.key, { priority: 1 });
+  await createAsk(banded.key, { question: "Travelling pointer banded first" }, session);
+  await createAsk(banded.key, { question: "Travelling pointer banded second" }, session);
   await seedAsks("Travelling pointer", 6);
+}
+
+/**
+ * The reader's hand, travelling across the list in the page's own time.
+ *
+ * `page.mouse.move` moves the pointer only when the test's next round trip reaches the browser,
+ * so between two of them the page sees a pointer standing perfectly still. On a loaded machine
+ * that stillness is long enough to end the travel this row is about in two ways, both measured
+ * here: `useMotionHold`'s own settle (`web/src/features/inbox/motion-hold.ts`, 400 ms with no
+ * `pointermove` on the list root) adopts the arrival mid-journey, and a rest of
+ * `REF_PREVIEW_OPEN_DELAY_MS` (300 ms) over a row opens that row's reference card over the
+ * pointer, whose `pointerleave` on the same root drops the hold outright.
+ *
+ * A hand that is actually travelling does neither, so the travel is driven from inside the
+ * page: a timer walks the pointer along the segment the test is driving it through and
+ * dispatches a real `pointermove` at each step, on the element at that point, so it bubbles to
+ * the same root listener `useMotionHold` binds - counted there, and asserted by the caller, so
+ * a move that stopped short of that root cannot pass for travel. The real pointer still makes
+ * the journey, since it alone hovers rows and answers `elementFromPoint`; both walk one column
+ * no point of which carries a reference trigger (`columnWithoutACard`), so no card is ever
+ * drawn over the line they are on, wherever the hand happens to pause.
+ */
+declare global {
+  interface Window {
+    /** The travel `startTravelling` runs until `stopTravelling` ends it. */
+    __travellingPointer?: {
+      /** The keeper's own moves that reached the list root. */
+      arrived: number;
+      /** The keeper's moves, wherever they landed. */
+      dispatched: number;
+      headFor: (y: number) => void;
+      stop: () => void;
+    };
+    /** One entry per time the held row heard the pointer leave it, true where it left for the
+     *  one hover card (the last row below). */
+    __leftTheHeldRow?: boolean[];
+  }
+}
+
+/** How far the hand travels between two moves, and how often it moves: about a short row every
+ *  half second, which is a hand crossing the list rather than flicking across it. */
+const TRAVEL_STEP_PX = 4;
+const TRAVEL_EVERY_MS = 16;
+
+/** Starts the travel at `from`, heading down the column at `x` for `to`, sweeping that segment
+ *  until it is pointed somewhere else or stopped. */
+async function startTravelling(page: Page, x: number, from: number, to: number): Promise<void> {
+  await page.evaluate(
+    ({ every, from, step, to, x }) => {
+      const root = document.querySelector('[data-testid="inbox-list"]')?.firstElementChild;
+      if (!(root instanceof HTMLElement)) throw new Error("the Inbox list has no motion-hold root");
+      let y = from;
+      let aim = to;
+      let origin = from;
+      const travel = {
+        arrived: 0,
+        dispatched: 0,
+        headFor: (next: number) => {
+          origin = y;
+          aim = next;
+        },
+        stop: () => {
+          window.clearInterval(timer);
+          root.removeEventListener("pointermove", count);
+        },
+      };
+      // Only the keeper's own moves: a real one the test made is the browser's, and trusted.
+      const count = (event: Event) => {
+        if (!event.isTrusted) travel.arrived += 1;
+      };
+      root.addEventListener("pointermove", count);
+      const timer = window.setInterval(() => {
+        const left = aim - y;
+        if (Math.abs(left) <= step) {
+          // The end of this leg: the hand sweeps back along it rather than coming to rest.
+          y = aim;
+          [aim, origin] = [origin, aim];
+        } else {
+          y += Math.sign(left) * step;
+        }
+        const under = document.elementFromPoint(x, y) ?? root;
+        under.dispatchEvent(
+          new PointerEvent("pointermove", {
+            bubbles: true,
+            clientX: x,
+            clientY: y,
+            isPrimary: true,
+            pointerId: 1,
+            pointerType: "mouse",
+            view: window,
+          })
+        );
+        travel.dispatched += 1;
+      }, every);
+      window.__travellingPointer = travel;
+    },
+    { every: TRAVEL_EVERY_MS, from, step: TRAVEL_STEP_PX, to, x }
+  );
+}
+
+/** Points the travel at a new end, so it follows the journey the test is driving. */
+async function travelTowards(page: Page, to: number): Promise<void> {
+  await page.evaluate((y) => {
+    const travel = window.__travellingPointer;
+    if (travel === undefined) throw new Error("no travel to point anywhere");
+    travel.headFor(y);
+  }, to);
+}
+
+/** Ends the travel, and says how many moves it made and how many of them reached the root the
+ *  hold listens on. Ending one that is already over is nothing to do. */
+async function stopTravelling(page: Page): Promise<{ arrived: number; dispatched: number }> {
+  return page.evaluate(() => {
+    const travel = window.__travellingPointer;
+    if (travel === undefined) return { arrived: 0, dispatched: 0 };
+    travel.stop();
+    window.__travellingPointer = undefined;
+    return { arrived: travel.arrived, dispatched: travel.dispatched };
+  });
+}
+
+/** How many answers to `GET /api/v1/inbox` the page has finished reading: the arrival's own
+ *  answer is in the page from the moment this grows, whether or not the list has adopted it. */
+async function inboxAnswersRead(page: Page): Promise<number> {
+  return page.evaluate(
+    () =>
+      performance
+        .getEntriesByType("resource")
+        .filter((entry) => new URL(entry.name).pathname === "/api/v1/inbox").length
+  );
+}
+
+/**
+ * The column the hand travels down, and where on it the journey ends: an `x` at which no point
+ * of the journey carries a reference trigger, inside the list from end to end.
+ *
+ * A row's owner link is a reference trigger (`features/inbox/AskOwnerLink.tsx`), and a hand
+ * that rests on one for `REF_PREVIEW_OPEN_DELAY_MS` has that row's card drawn `fixed` over the
+ * page, outside the list, covering the column the keeper is walking down: from there
+ * `elementFromPoint` hands the keeper's moves to the card, which is no child of the list root,
+ * and they never reach the hold at all - the row would be deciding itself by where the rows
+ * happened to fall rather than by the hold. The whole line is checked, not only the places the
+ * route means to pause, because a `page.mouse.move` of many steps is as still between two of
+ * them as it is at either end, and on a loaded machine one of those steps is a rest like any
+ * other. Scanned outwards from `x`, so the hand still travels down the middle of the rows it
+ * crosses, and the end of the journey must land in the row it set out for.
+ */
+async function columnWithoutACard(
+  page: Page,
+  { from, rowID, to, x }: { from: number; rowID: string; to: number; x: number }
+): Promise<{ x: number; y: number }> {
+  const column = await page.evaluate(
+    ({ from, rowID, to, x }) => {
+      const root = document.querySelector('[data-testid="inbox-list"]')?.firstElementChild;
+      if (!(root instanceof HTMLElement)) throw new Error("the Inbox list has no motion-hold root");
+      const clear = (at: number, y: number, row?: string) => {
+        const under = document.elementFromPoint(at, y);
+        if (under === null || !root.contains(under)) return false;
+        if (under.closest("[data-dispatch-ref],[data-dispatch-href]") !== null) return false;
+        const inRow = under.closest("[data-inbox-row]")?.getAttribute("data-inbox-row");
+        return row === undefined || inRow === row;
+      };
+      const line: number[] = [];
+      for (let y = Math.min(from, to); y <= Math.max(from, to); y += 4) line.push(y);
+      for (let out = 0; out * 12 < window.innerWidth; out += 1)
+        for (const at of out === 0 ? [x] : [x + out * 12, x - out * 12])
+          if (line.every((y) => clear(at, y)) && clear(at, to, rowID)) return at;
+      return null;
+    },
+    { from, rowID, to, x }
+  );
+  if (column === null) throw new Error("the journey has no column free of reference triggers");
+  return { x: column, y: to };
 }
 
 async function travelPointerAcrossIncomingRow(page: Page): Promise<void> {
@@ -444,17 +634,30 @@ async function travelPointerAcrossIncomingRow(page: Page): Promise<void> {
     height: Math.ceil(initialSixthBox.y + initialSixthBox.height + 40),
     width: viewport.width,
   });
+  const third = await rows.nth(2).boundingBox();
   const fourth = await rows.nth(3).boundingBox();
   const fifth = await rows.nth(4).boundingBox();
   const sixthBox = await sixth.boundingBox();
-  if (fourth === null || fifth === null || sixthBox === null)
+  if (third === null || fourth === null || fifth === null || sixthBox === null)
     throw new Error("Inbox row has no box");
   const sixthID = await sixth.getAttribute("data-inbox-row");
   if (sixthID === null) throw new Error("sixth row has no id");
   const destination = page.locator(`[data-inbox-row="${sixthID}"]`);
   const sixthBefore = await topOf(destination);
   const x = sixthBox.x + sixthBox.width / 2;
+  // The journey: from the gap above the arrival's landing place, across the fourth and fifth
+  // rows, to the middle of the destination row. Hand and keeper share one column, and it is a
+  // column no part of which can open a card over them (`columnWithoutACard`), so where the
+  // rows happen to fall decides nothing here.
+  const gapAbove = (third.y + third.height + fourth.y) / 2;
   const gap = (fourth.y + fourth.height + fifth.y) / 2;
+  const rest = await columnWithoutACard(page, {
+    from: gapAbove,
+    rowID: sixthID,
+    to: sixthBox.y + sixthBox.height / 2,
+    x,
+  });
+  const column = rest.x;
   const requested = Promise.withResolvers<void>();
   const release = Promise.withResolvers<void>();
   const delivered = Promise.withResolvers<void>();
@@ -474,33 +677,37 @@ async function travelPointerAcrossIncomingRow(page: Page): Promise<void> {
   });
 
   try {
-    for (const y of [fourth.y - 20, fourth.y + fourth.height / 2, gap]) {
-      await page.mouse.move(x, y);
-      await nextFrame(page);
-    }
+    // The hand sets out above the arrival's landing place and travels across the fourth row,
+    // on its way down to the destination, and it keeps travelling from here to the last
+    // assertion the hold has to survive.
+    await page.mouse.move(column, gapAbove);
+    await startTravelling(page, column, gapAbove, gap);
+    const answersBefore = await inboxAnswersRead(page);
 
     const urgent = await createIssue({ project: "CORE", title: "Travelling pointer P0" });
     await patchIssue(urgent.key, { priority: 0 });
     const p0 = await createAsk(urgent.key, { question: "Travelling pointer arrival" }, session);
     await requested.promise;
-    // Seeding can outlast the hold; this last move puts the refetch inside the pointer's travel.
-    await page.mouse.move(x, gap + 1);
-    await nextFrame(page);
+    // Seeding can outlast a round trip, so the real pointer crosses the fourth row in one
+    // journey of its own, and the refetch lands inside that travel.
+    await page.mouse.move(column, gap, { steps: 16 });
     release.resolve();
     await delivered.promise;
-    // Keep travelling inside the gap while the released response renders. Each move is still
-    // pointer motion, but none rests on a row the viewport anchor could hold; `nextFrame` is the
-    // observable the move is paced by, so a step needs nothing else.
-    for (let step = 0; step < 10; step += 1) {
-      await page.mouse.move(x, gap + (step % 2));
-      await nextFrame(page);
-    }
 
-    const targetY = sixthBox.y + sixthBox.height / 2;
-    for (let step = 1; step <= 5; step += 1) {
-      await page.mouse.move(x, gap + ((targetY - gap) * step) / 5);
-      await nextFrame(page);
-    }
+    // The answer carrying the arrival is in the page, and the list is still showing the eight
+    // rows the reader was travelling across: the hold is holding, which is the whole row.
+    await expect.poll(() => inboxAnswersRead(page)).toBeGreaterThan(answersBefore);
+    await nextFrame(page);
+    expect(await rows.count()).toBe(8);
+
+    // The last leg, down across the fifth row to the destination the hand set out for.
+    await travelTowards(page, rest.y);
+    await page.mouse.move(rest.x, rest.y, { steps: 24 });
+    const travel = await stopTravelling(page);
+    // What the keeper dispatched is what the hold heard: every one of its moves reached the
+    // root `useMotionHold` listens on, and there were moves to hear.
+    expect(travel.dispatched).toBeGreaterThan(0);
+    expect(travel.arrived).toBe(travel.dispatched);
 
     await expect(page.locator(`[data-inbox-row="${p0.id}"]`)).toBeAttached();
     await expect(rows).toHaveCount(9);
@@ -510,20 +717,19 @@ async function travelPointerAcrossIncomingRow(page: Page): Promise<void> {
           .elementFromPoint(x, y)
           ?.closest("[data-inbox-row]")
           ?.getAttribute("data-inbox-row"),
-      { x, y: targetY }
+      rest
     );
     expect(underPointer).toBe(sixthID);
     expect(Math.abs((await topOf(destination)) - sixthBefore)).toBeLessThanOrEqual(2);
   } finally {
+    await stopTravelling(page);
     release.resolve();
     await page.unroute("**/api/v1/inbox");
   }
 }
 
 // SLOW(>=2s): nine seeded writes, a viewport resize and ~19 pointer-to-frame round trips.
-test("a travelling pointer keeps its destination when a P0 row arrives @phone", async ({
-  browser,
-}) => {
+test("a travelling pointer keeps its destination when a P0 row arrives", async ({ browser }) => {
   await createProject({ key: "CORE", name: "Core" });
   await seedAsks("Travelling pointer", 8);
   const alice = await asUser(browser, "alice");
@@ -536,16 +742,237 @@ test("a travelling pointer keeps its destination when a P0 row arrives @phone", 
   }
 });
 
-// SLOW(>=2s): eleven seeded writes, a viewport resize and ~19 pointer-to-frame round trips.
-test("a travelling pointer crosses a grouped owner without losing its destination @phone", async ({
+// SLOW(>=2s): seventeen seeded writes - the project, the banded issue with its priority and two
+// asks, and six more asks on issues of their own - a viewport resize, and a journey the page's
+// own timer walks the pointer along while the hand crosses it.
+test("a travelling pointer crosses a band of its own without losing its destination", async ({
   browser,
 }) => {
-  await seedTravellingPointerGroup();
+  await seedTravellingPointerBand();
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
     await page.goto("/");
     await travelPointerAcrossIncomingRow(page);
+  } finally {
+    await alice.close();
+  }
+});
+
+/**
+ * The hand that stops, which is what the travelling rows above leave out: they travel a column
+ * no card can open on (`columnWithoutACard`), because they measure the hold under travel. A
+ * hand that comes to rest on a row's own reference - its owner link, the one trigger a row
+ * carries (`features/inbox/AskOwnerLink.tsx`) - has that row's card open over the page after
+ * `REF_PREVIEW_OPEN_DELAY_MS`, and its next move lands inside the card, which is `fixed` and
+ * outside the list. The reader has not left the list: the card is the row's own doing. So the
+ * row stays the reader's place, and a refetch landing while they read the card leaves it where
+ * they are looking at it.
+ *
+ * The row under the pointer is below the one at the centre of what is shown, with one row
+ * between them, so the two answers differ: with the pointer counted the row under it stays and
+ * the centre row drops, and with it dropped the centre row stays and the row under the pointer
+ * rises into the answered row's place.
+ */
+test("the row whose reference card the pointer moved onto stays put when a row above it is answered elsewhere", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const asks = await seedAsks("Carded", 20);
+  const centreAsk = askAtRow(asks, 9);
+  const between = askAtRow(asks, 10);
+  const held = askAtRow(asks, 11);
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto("/");
+    await expect(page.locator("[data-inbox-row]")).toHaveCount(20);
+    const centred = inboxRow(page, centreAsk.ask.id);
+    await centreRow(centred);
+    await expect.poll(() => rowAtCentre(page)).toBe(centreAsk.ask.id);
+
+    // The hand comes to rest on the row's owner link and waits for its card.
+    const row = inboxRow(page, held.ask.id);
+    const reference = row.locator("[data-dispatch-ref]").first();
+    await reference.hover();
+    const card = page.getByRole("tooltip");
+    await expect(card).toBeVisible();
+    await expect(reference).toHaveAttribute("aria-describedby", "ref-preview");
+    // The card is open over the pointer, so the next move lands inside it: the list hears
+    // `pointerleave`, and the pointer is now outside every row it draws.
+    await card.hover();
+    const heldBefore = await topOf(row);
+    const centreBefore = await topOf(centred);
+
+    await answerAsk(
+      between.ask.id,
+      { expected_edited_at: null, selected: ["Ship"], text: "" },
+      { login: "bob" }
+    );
+
+    await expect(inboxRow(page, between.ask.id)).toHaveCount(0);
+    expect(Math.abs((await topOf(row)) - heldBefore)).toBeLessThanOrEqual(2);
+    // The list was held to the reader's row rather than to the centre, which dropped by the
+    // answered row's height instead.
+    expect((await topOf(centred)) - centreBefore).toBeGreaterThan(2);
+  } finally {
+    await alice.close();
+  }
+});
+
+/**
+ * The row the Inbox is holding for the hand that is on it, when that hand moves onto the card
+ * the row's own reference opened.
+ *
+ * A held row is one the server has dropped - answered somewhere else - that the Inbox keeps
+ * drawn where the reader last saw it for as long as their hand is on it (`heldRow`). The card
+ * is `fixed` and portaled into `document.body`, outside the list, so a hand resting on the
+ * row's owner link - the one reference trigger a row carries
+ * (`features/inbox/AskOwnerLink.tsx`) - has that card open beside it after
+ * `REF_PREVIEW_OPEN_DELAY_MS`, and its next move onto the card is a `pointerleave` on the row.
+ * The reader has left nothing: the card is the row's own doing. So the held row stays on the
+ * screen rather than being taken away while they read about it.
+ *
+ * The row hears that leave - `InboxRowShell`'s `onPointerLeave` - and what it does with it is
+ * re-render, which has the Inbox choose the held row afresh from `ViewportAnchor.interacted()`.
+ * That is the one place the decision lives, and it does not count the move onto a row's own
+ * card as leaving the row, so `InboxRowShell` needs no card exception of its own: this row
+ * fails the moment the anchor's does not hold.
+ *
+ * Then the real departure, which must still let it go: the hand leaves the card for the page
+ * corner, the card closes behind it, and the next list the page reads is drawn without the row.
+ */
+test("a held row stays drawn when the pointer moves onto the card its own reference opened", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const asks = await seedAsks("Holding", 8);
+  const held = askAtRow(asks, 3);
+  const other = askAtRow(asks, 6);
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto("/");
+    await expect(page.locator("[data-inbox-row]")).toHaveCount(8);
+    // The one number the Inbox entry carries, read off the server's own list rather than the
+    // list the Inbox draws: it says when the page has read the answer below.
+    const inboxCount = page
+      .getByRole("navigation", { name: "Navigation" })
+      .getByRole("link", { name: "Inbox" });
+    await expect(inboxCount).toContainText("8");
+
+    // The hand comes to rest on the row's owner link and waits for its card.
+    const row = inboxRow(page, held.ask.id);
+    const reference = row.locator("[data-dispatch-ref]").first();
+    await reference.hover();
+    const card = page.getByRole("tooltip");
+    await expect(card).toBeVisible();
+    await expect(reference).toHaveAttribute("aria-describedby", "ref-preview");
+    const before = await topOf(row);
+
+    // Bob answers it in his own tab: the server drops it from the list, and the hand on it
+    // holds it where the reader last saw it - seven listed rows drawn as eight.
+    await answerAsk(
+      held.ask.id,
+      { expected_edited_at: null, selected: ["Ship"], text: "" },
+      { login: "bob" }
+    );
+    await expect(inboxCount).toContainText("7");
+    await expect(row).toBeVisible();
+    await expect(page.locator("[data-inbox-row]")).toHaveCount(8);
+
+    // The row must really hear the pointer leave it for the card, or this row would pass
+    // without ever reaching the rule it is about - the same guard the travelling rows keep over
+    // their own moves. `pointerleave` is the event `InboxRowShell` hands the held row on.
+    await page.evaluate((id) => {
+      const node = document.querySelector<HTMLElement>(`[data-inbox-row="${id}"]`);
+      if (node === null) throw new Error("held row missing");
+      const left: boolean[] = [];
+      window.__leftTheHeldRow = left;
+      node.addEventListener("pointerleave", (event) => {
+        const related = event.relatedTarget;
+        left.push(related instanceof Element && related.closest("#ref-preview") !== null);
+      });
+    }, held.ask.id);
+
+    // The move onto the card, which the row hears as the pointer leaving it.
+    await card.hover();
+    await nextFrame(page);
+    expect(await page.evaluate(() => window.__leftTheHeldRow)).toEqual([true]);
+    await expect(reference).toHaveAttribute("aria-describedby", "ref-preview");
+    await expect(row).toBeVisible();
+    expect(Math.abs((await topOf(row)) - before)).toBeLessThanOrEqual(2);
+    await expect(page.locator("[data-inbox-row]")).toHaveCount(8);
+
+    // The hand leaves for the page corner, which is neither the row nor its card.
+    await page.mouse.move(0, 0);
+    await expect(card).toHaveCount(0);
+    await answerAsk(
+      other.ask.id,
+      { expected_edited_at: null, selected: ["Ship"], text: "" },
+      { login: "bob" }
+    );
+    await expect(inboxRow(page, other.ask.id)).toHaveCount(0);
+    await expect(row).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});
+
+/**
+ * The Inbox drawer holds the row the reader's hand is on, as the Inbox page does.
+ *
+ * The drawer mounts the same `Inbox` with `pane={false}` (`InboxDrawer`), and the page passes
+ * `ViewportAnchor` its scroller only while the reading pane is shown
+ * (`scroller={paneShown ? listScroller : undefined}`, `Inbox.tsx`). In the drawer the rows
+ * scroll inside the drawer's own `aside`, which the anchor is never given, so it reads
+ * `window.scrollY` - 0 there - and `snapshot()` returns null: Dispatch's own hold is inert and
+ * the reader is left with whatever the browser's scroll anchoring picks. Measured at 1280x720
+ * with the hand resting on a row and a row above it answered elsewhere, the row under the hand
+ * jumps one card height, 91 px, in five runs of eight; the drawer's `aside` compensates 425 px
+ * where holding the row needs 516. The page, driven identically, never moved in twelve runs.
+ *
+ * The jump is not certain on any one run: the two outcomes are exactly "held" and "one card
+ * out", and in this row's own shape it is "one card out" in three runs of four. Whoever fixes
+ * it runs this row under `--repeat-each=8` rather than once, because one green run of it
+ * proves nothing. Every failure measured fell on the first answer, so one answer is what the
+ * row makes.
+ */
+test("the Inbox drawer holds the row the hand rests on when a row above it is answered", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const asks = await seedAsks("Drawered", 20);
+  const held = askAtRow(asks, 11);
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto("/agents");
+    await expect(page.getByRole("heading", { name: "Agents" })).toBeVisible();
+    await page.locator("body").click({ position: { x: 5, y: 400 } });
+    await page.keyboard.press("i");
+    const drawer = page.getByRole("dialog", { name: "Inbox" });
+    await expect(drawer).toBeVisible();
+    await expect(drawer.locator("[data-inbox-row]")).toHaveCount(20);
+
+    const row = drawer.locator(`[data-inbox-row="${held.ask.id}"]`);
+    await row.scrollIntoViewIfNeeded();
+
+    await row.hover();
+    const before = await topOf(row);
+    const above = askAtRow(asks, 10);
+    await answerAsk(
+      above.ask.id,
+      { expected_edited_at: null, selected: ["Ship"], text: "" },
+      { login: "bob" }
+    );
+    await expect(drawer.locator(`[data-inbox-row="${above.ask.id}"]`)).toHaveCount(0, {
+      timeout: 20_000,
+    });
+    expect(Math.abs((await topOf(row)) - before)).toBeLessThanOrEqual(2);
   } finally {
     await alice.close();
   }

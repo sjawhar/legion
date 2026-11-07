@@ -327,8 +327,7 @@ func TestAnApprovalVoidsAREADYTheGateRefusedWithNoPacketAndTellsTheArchitect(t *
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
-			pending := 4
-			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Merging, Generation: 1, Status: "retro", Rank: "U", ReadyPendingVersion: &pending})
+			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Merging, Generation: 1, Status: "retro", Rank: "U", ReadyPending: &record.ReadyPending{Step: record.DesignStepSpec, Version: 4}})
 			seedGate(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 4})
 			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim"})
 
@@ -672,7 +671,7 @@ func TestNoFactMovesAMemberOfALingeringTree(t *testing.T) {
 			var got phase.Phase
 			var starts, rounds, told int
 			if err := pool.QueryRow(t.Context(), `select phase,
-				(select count(*) from outbox where issue = 'LEGION-209' and kind = 'supervise' and payload->>'op' = 'start'),
+				(select count(*) from outbox where issue = 'LEGION-209' and kind = 'supervise' and payload->>'op' = 'start' and coalesce(payload->>'task', '') <> ''),
 				(select rounds from phases where issue = 'LEGION-209' and role = 'implementer'),
 				(select count(*) from outbox where issue = 'LEGION-209' and kind in ('dispatch_message', 'notice', 'controller_notice'))
 				from issues where key = 'LEGION-209'`).Scan(&got, &starts, &rounds, &told); err != nil || got != tc.at || starts != 0 || rounds != 2 || told != 0 {
@@ -801,7 +800,7 @@ func readyEngine(mergeQueue string) *Engine {
 // readyEngineAt is readyEngine with its clock at now.
 func readyEngineAt(mergeQueue string, now time.Time) *Engine {
 	return New(record.NewStore(), Config{
-		Project: "LEGION", DesignGate: config.DesignGateRootIssues, MergeQueueRole: mergeQueue, Linger: time.Hour, ReviewAppLogin: testReviewApp, Repositories: testRepositories,
+		Project: "LEGION", Steps: config.DesignGateRootIssues.Steps(), MergeQueueRole: mergeQueue, Linger: time.Hour, ProductionCheckRole: claim.RoleTester, ReviewAppLogin: testReviewApp, Repositories: testRepositories,
 		Clock: func() time.Time { return now },
 	}, nil)
 }

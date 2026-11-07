@@ -12,6 +12,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/admit"
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
@@ -263,7 +264,7 @@ func TestANeverOpenedTreesLingerClosesFinishWithoutRetrying(t *testing.T) {
 		PluginContract: 24,
 	}
 	t.Cleanup(sup.stop)
-	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories}, quietLogger())
+	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps()}, quietLogger())
 	admission := admit.New(records, engine, 1, "legion", quietLogger())
 	var logs bytes.Buffer
 	runner := &outbox{

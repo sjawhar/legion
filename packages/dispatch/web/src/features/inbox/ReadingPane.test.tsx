@@ -1,25 +1,36 @@
-import { afterEach, beforeEach, expect, type Mock, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, expect, jest, type Mock, spyOn, test } from "bun:test";
 import type { ChangeDecorations } from "@legion/proof-editor";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { Node as ProseMirrorNode } from "prosemirror-model";
 import { MemoryRouter } from "react-router-dom";
 
 import { fakeDocumentRuntime } from "../../__tests__/document-runtime";
+import { realClock, tick } from "../../__tests__/fake-clock";
 import { ApiError, api } from "../../api/client";
-import type { Artifact, AskSnooze, InboxRow, IssueDetails, Version } from "../../api/types";
+import type {
+  Anchor,
+  Artifact,
+  AskSnooze,
+  InboxRow,
+  IssueDetails,
+  MyReplyRow,
+  MyReplyThreadRow,
+  Version,
+} from "../../api/types";
 import { CHANGED_BLOCK_CLASS, changeMarksAgainst } from "../doc/change-marks";
 import type { CreateEditor, EditorHandle } from "../doc/editor";
 import { DocumentRuntime } from "../doc/runtime";
 import { MarginProvider } from "../margin/margin-context";
 import { loadedEngine, warmMarkdownRenderer } from "../refs/markdown-engine";
-import { installInboxApiMocks, issueAsk } from "./inbox-fixture";
+import { plannerAgentRow } from "../threads/replies-fixture";
+import { installInboxApiMocks, issueAsk, mockAskReads } from "./inbox-fixture";
 import { ReadingPane } from "./ReadingPane";
 
 installInboxApiMocks();
 
 /** The pane waits this long after the last change of the selected question before it opens
- *  another document (`DOCUMENT_SETTLE_MS` in `ReadingPane.tsx`). */
+ *  another document (`DOCUMENT_SETTLE_MS` in `PaneDocument.tsx`). */
 const SETTLE_MS = 200;
 
 let getArtifact: Mock<typeof api.getArtifact>;
@@ -184,9 +195,9 @@ function renderPane({
         <DocumentRuntime.Provider value={runtime}>
           <MarginProvider>
             <ReadingPane
-              ask={row}
               onAnswered={(id) => answered.push(id)}
               onSnoozeLive={(askId, live) => snoozeLiveness.push([askId, live])}
+              row={{ ask: row, kind: "ask" }}
               viewer="alice"
             />
           </MarginProvider>
@@ -630,6 +641,9 @@ test("a document the editor is refused admission to leaves the column on the car
 });
 
 test("a selection changed twice inside the settle opens the second document alone", async () => {
+  // On the fake clock from the first render, so the settle of the first selection is a timer this
+  // test moves the clock past rather than a wait of its own.
+  jest.useFakeTimers();
   const { opened, rerender, runtime, view } = renderPane({
     ask: decisionAsk({ id: "ask-1" }),
     seed: (client) => {
@@ -649,9 +663,204 @@ test("a selection changed twice inside the settle opens the second document alon
     await waitFor(() => expect(opened).toEqual(["artifact-2"]));
     await waitFor(() => expect(runtime.connections).toHaveLength(1));
     // Long past the settle, the first selection has still opened nothing.
-    await Bun.sleep(SETTLE_MS * 2);
+    await tick(SETTLE_MS * 2);
     expect(opened).toEqual(["artifact-2"]);
   } finally {
+    realClock();
     view.unmount();
+  }
+});
+
+// ---------------------------------------------------------------------------------------------
+// The four thread bodies: what the column shows for a Reply or an Agent row.
+// ---------------------------------------------------------------------------------------------
+
+function threadRow(overrides: Partial<MyReplyThreadRow>): MyReplyThreadRow {
+  return {
+    kind: "comment",
+    read_through: "2026-10-12T00:30:00Z",
+    ref: "/issues/CORE-1?comment=comment-1",
+    reply: {
+      author: { id: "bob", kind: "user" },
+      created_at: "2026-10-12T01:00:00Z",
+      first_line: "Agreed.",
+      id: "comment-2",
+      kind: "reply",
+    },
+    subject: "The retry budget",
+    thread_id: "comment-1",
+    unread: true,
+    unread_count: 1,
+    version: 1,
+    ...overrides,
+  };
+}
+
+/** The anchor a comment thread in a project document carries. */
+function anchor(overrides: Partial<Anchor> = {}): Anchor {
+  return {
+    artifact_id: "artifact-1",
+    block_id: "b-1",
+    mark_id: "mark-1",
+    orphaned: false,
+    quote: "three attempts",
+    version: 2,
+    ...overrides,
+  };
+}
+
+function renderThread(thread: MyReplyRow, seed: (client: QueryClient) => void = () => {}) {
+  const fake = fakeDocumentRuntime({ text: "The live document" });
+  const client = createQueryClient();
+  client.setQueryData(["whoami"], { event_head: "0", kind: "user", login: "alice" });
+  seed(client);
+  const view = render(
+    <MemoryRouter>
+      <QueryClientProvider client={client}>
+        <DocumentRuntime.Provider value={fake.runtime}>
+          <MarginProvider>
+            <ReadingPane
+              onAnswered={() => {}}
+              onSnoozeLive={() => {}}
+              row={{ kind: "thread", thread }}
+              viewer="alice"
+            />
+          </MarginProvider>
+        </DocumentRuntime.Provider>
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+  return { client, runtime: fake, view };
+}
+
+/** Which of the column's four thread bodies is drawn. */
+async function paneBody(): Promise<HTMLElement> {
+  const pane = await screen.findByTestId("inbox-pane");
+  const body = pane.querySelector<HTMLElement>("[data-inbox-pane-body]");
+  if (body === null) throw new Error("the column drew no thread body");
+  return body;
+}
+
+test("a comment thread on an issue shows the issue and the thread, with no document", async () => {
+  const listComments = spyOn(api, "listComments").mockResolvedValue([]);
+  const { view } = renderThread(threadRow({ issue: { key: "CORE-1", title: "Fix the thing" } }));
+  try {
+    const body = await paneBody();
+    expect(body.getAttribute("data-inbox-pane-body")).toBe("issue");
+    // The head names the owner and opens the thread's own page.
+    const pane = screen.getByTestId("inbox-pane");
+    expect(within(pane).getByText("CORE-1")).toBeTruthy();
+    expect(within(pane).getByRole("link", { name: "Open page" }).getAttribute("href")).toBe(
+      "/issues/CORE-1?comment=comment-1"
+    );
+    await waitFor(() => expect(listComments).toHaveBeenCalled());
+  } finally {
+    view.unmount();
+    listComments.mockRestore();
+  }
+});
+
+test("an issue message conversation reads the issue's messages", async () => {
+  const listIssueMessages = spyOn(api, "listIssueMessages").mockResolvedValue([]);
+  const { view } = renderThread(
+    threadRow({
+      issue: { key: "CORE-1", title: "Fix the thing" },
+      kind: "message",
+      thread_id: "message-1",
+    })
+  );
+  try {
+    expect((await paneBody()).getAttribute("data-inbox-pane-body")).toBe("issue");
+    await waitFor(() => expect(listIssueMessages).toHaveBeenCalledWith("CORE-1"));
+  } finally {
+    view.unmount();
+    listIssueMessages.mockRestore();
+  }
+});
+
+test("an Agent row shows the session's name and reads that session's messages", async () => {
+  const listAgentMessages = spyOn(api, "listAgentMessages").mockResolvedValue([]);
+  const listAgents = spyOn(api, "listAgents").mockResolvedValue([]);
+  const { view } = renderThread(plannerAgentRow());
+  try {
+    expect((await paneBody()).getAttribute("data-inbox-pane-body")).toBe("agent");
+    const pane = screen.getByTestId("inbox-pane");
+    expect(within(pane).getByText("Planner")).toBeTruthy();
+    // An Agent row has no reference, so the head draws no copy control at all.
+    expect(pane.querySelector("[data-copy-ref]")).toBeNull();
+    expect(within(pane).getByRole("link", { name: "Open page" }).getAttribute("href")).toBe(
+      "/agents/planner/live"
+    );
+    await waitFor(() => expect(listAgentMessages).toHaveBeenCalledWith("planner"));
+  } finally {
+    view.unmount();
+    listAgentMessages.mockRestore();
+    listAgents.mockRestore();
+  }
+});
+
+test("an ask's thread shows the ask's own card", async () => {
+  const row = issueAsk({ id: "ask-a" });
+  const getAsk = mockAskReads([row]);
+  const { view } = renderThread(
+    threadRow({
+      issue: { key: "CORE-1", title: "Fix the thing" },
+      kind: "ask",
+      ref: "/issues/CORE-1/asks/ask-a",
+      thread_id: "ask-a",
+    })
+  );
+  try {
+    expect((await paneBody()).getAttribute("data-inbox-pane-body")).toBe("ask");
+    await waitFor(() => expect(screen.getByTestId("ask-ask-a")).toBeTruthy());
+    expect(getAsk).toHaveBeenCalledWith("ask-a");
+  } finally {
+    view.unmount();
+    getAsk.mockRestore();
+  }
+});
+
+test("a comment thread in a document opens that document at its block", async () => {
+  const listArtifactComments = spyOn(api, "listArtifactComments").mockResolvedValue([]);
+  const thread = threadRow({
+    anchor: anchor(),
+    document: { name: "spec.md", project: "CORE", slug: "spec" },
+    ref: "/projects/CORE/documents/spec?comment=comment-1",
+  });
+  const { runtime, view } = renderThread(thread, (client) => {
+    seedDocument(client, document({ issue_key: null, versions: [version(1)] }));
+  });
+  try {
+    expect((await paneBody()).getAttribute("data-inbox-pane-body")).toBe("document");
+    // The live document is opened, not a card: the column connects a room for it.
+    await waitFor(() => expect(runtime.connections).toHaveLength(1));
+    expect(screen.getByTestId("inbox-pane").querySelector("[data-inbox-pane-fallback]")).toBeNull();
+  } finally {
+    view.unmount();
+    listArtifactComments.mockRestore();
+  }
+});
+
+test("an orphaned anchor falls back to the thread alone, with its quote", async () => {
+  const listArtifactComments = spyOn(api, "listArtifactComments").mockResolvedValue([]);
+  const thread = threadRow({
+    anchor: anchor({ orphaned: true }),
+    document: { name: "spec.md", project: "CORE", slug: "spec" },
+    ref: "/projects/CORE/documents/spec?comment=comment-1",
+  });
+  const { runtime, view } = renderThread(thread, (client) => {
+    seedDocument(client, document({ issue_key: null, versions: [version(1)] }));
+  });
+  try {
+    const body = await paneBody();
+    expect(body.getAttribute("data-inbox-pane-body")).toBe("document");
+    expect(body.hasAttribute("data-inbox-pane-fallback")).toBe(true);
+    expect(body.querySelector("[data-inbox-thread-quote]")?.textContent).toBe("three attempts");
+    // Nothing opened the document: an anchor nothing can be placed at opens no room.
+    await Bun.sleep(SETTLE_MS * 2);
+    expect(runtime.connections).toHaveLength(0);
+  } finally {
+    view.unmount();
+    listArtifactComments.mockRestore();
   }
 });

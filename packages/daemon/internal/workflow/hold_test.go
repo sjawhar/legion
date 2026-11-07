@@ -264,7 +264,7 @@ func TestARetryInALingeringTreeKeepsTheHoldAndItsReason(t *testing.T) {
 	var heldFrom, holdReason *string
 	var starts int
 	if err := pool.QueryRow(ctx, `select phase, held_from, hold_reason,
-		(select count(*) from outbox where kind = 'supervise' and payload->>'op' = 'start')
+		(select count(*) from outbox where kind = 'supervise' and payload->>'op' = 'start' and coalesce(payload->>'task', '') <> '')
 		from issues where key = $1`, "LEGION-209").Scan(&gotPhase, &heldFrom, &holdReason, &starts); err != nil {
 		t.Fatalf("read the child: %v", err)
 	}
@@ -279,7 +279,7 @@ func projectedHold(t *testing.T, pool *pgxpool.Pool, key string) (phase.Phase, s
 	var state api.State
 	if err := pgx.BeginFunc(t.Context(), pool, func(tx pgx.Tx) error {
 		var err error
-		state, err = projection.Project(t.Context(), tx, record.NewStore(), "LEGION", nil, nil, time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC))
+		state, err = projection.Project(t.Context(), tx, record.NewStore(), "LEGION", nil, nil, nil, time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC))
 		return err
 	}); err != nil {
 		t.Fatalf("project the state: %v", err)

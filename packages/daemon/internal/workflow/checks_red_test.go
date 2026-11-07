@@ -32,7 +32,7 @@ import (
 // tester, the reviewer whether or not its round is completed, the merger, and the implementer
 // itself in retro - keeps its turn, its jobs, its process and its session, and is told its phase
 // ended by a message on its own topic. Leaving merging also voids a READY the design
-// gate refused there (ReadyPendingVersion).
+// gate refused there (ReadyPending).
 //
 // The CI rule reads nothing of the review round: a round whose request for changes is already in
 // is sent back by the red all the same, with the red named rather than the reviewer's body. A
@@ -77,8 +77,7 @@ func TestARedVerdictSendsTheTreeBackToImplementing(t *testing.T) {
 			issue := record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
 				Phase: tc.from, Generation: 1, Status: tc.status, Rank: "U"}
 			if tc.readyPending {
-				pending := 4
-				issue.ReadyPendingVersion = &pending
+				issue.ReadyPending = &record.ReadyPending{Step: record.DesignStepSpec, Version: 4}
 			}
 			seedIssue(t, pool, issue)
 			pr := record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
@@ -1014,7 +1013,7 @@ func TestAHeadTheBranchReturnsToIsHeldAndDecidedAgain(t *testing.T) {
 			var logged bytes.Buffer
 			at := func(d time.Duration) *Engine {
 				return New(record.NewStore(), Config{
-					Project: "LEGION", DesignGate: config.DesignGateRootIssues, MergeQueueRole: "merge-queue", Linger: time.Hour, ReviewAppLogin: testReviewApp, Repositories: testRepositories,
+					Project: "LEGION", Steps: config.DesignGateRootIssues.Steps(), MergeQueueRole: "merge-queue", Linger: time.Hour, ProductionCheckRole: claim.RoleTester, ReviewAppLogin: testReviewApp, Repositories: testRepositories,
 					Clock: func() time.Time { return start.Add(d) },
 				}, slog.New(slog.NewTextHandler(&logged, nil)))
 			}
@@ -1403,17 +1402,19 @@ func pushedFromTo(from, to, pusher string) intake.Fact {
 // generation, the phase the start serves and the assignment it hands that role. The list is
 // asserted whole rather than key by key, so a start that grows a field nobody meant it to carry —
 // a role to wait for before it acts, say — fails here.
-const phaseStartKeys = "assignment,generation,op,phase,role,task,tree"
+const phaseStartKeys = "assignment,generation,needsSlot,op,phase,role,task,tree"
 
-// implementerStart is the task of the implementer's start the outbox holds. The start carries
-// phaseStartKeys and nothing else: it runs at once, as every other start does, whatever phase the
-// red took the issue out of, and waits for no turn to end.
+// implementerStart is the task of the implementer's start the outbox holds, the row that carries
+// the task: a start is two rows (workflow.StartOrOwe), and the relaunch row, which carries no
+// task, is the other. The task row carries phaseStartKeys and nothing else; needsSlot is among
+// them, because the delivery of a worker's task is the one part of a transition that waits, for
+// the issue's admission slot.
 func implementerStart(t *testing.T, pool *pgxpool.Pool) string {
 	t.Helper()
 	var task, keys string
 	if err := pool.QueryRow(context.Background(), `select payload->>'task',
 		(select string_agg(key, ',' order by key) from jsonb_object_keys(payload) as key)
-		from outbox where kind = 'supervise' and payload->>'op' = 'start' and payload->>'role' = 'implementer'`).Scan(&task, &keys); err != nil {
+		from outbox where kind = 'supervise' and payload->>'op' = 'start' and coalesce(payload->>'task', '') <> '' and payload->>'role' = 'implementer'`).Scan(&task, &keys); err != nil {
 		t.Fatalf("read the implementer's start: %v", err)
 	}
 	if keys != phaseStartKeys {

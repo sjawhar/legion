@@ -82,6 +82,38 @@ func TestParseMaxGrant(t *testing.T) {
 	}
 }
 
+// TestParseScopes pins the scopes tag's reading at its boundaries: a list of scope names is
+// answered sorted and joined by single spaces, so two spellings of one list are one policy and
+// the value fits an AWS tag; and each way of writing one wrong has an error of its own, whose
+// own words are what the CLI prints behind `--scopes:` (checkScopes wraps them) and what lets
+// this test say which mistake lands where, the loader collapsing all four into
+// ReasonScopesMalformed.
+// A whole https://www.googleapis.com/auth/ URL and an upper-case name are the two mistakes a
+// reader makes here, and both land on ErrScopesEntry rather than being trimmed or lowercased.
+func TestParseScopes(t *testing.T) {
+	for raw, want := range map[string]string{
+		"admin.directory.group apps.groups.settings":        "admin.directory.group apps.groups.settings",
+		" apps.groups.settings\tcloud-platform \n bigquery": "apps.groups.settings bigquery cloud-platform",
+	} {
+		if got, err := policy.ParseScopes(raw); err != nil || got != want {
+			t.Errorf("ParseScopes(%q) = %q, %v; want %q", raw, got, err, want)
+		}
+	}
+	for raw, want := range map[string]error{
+		"":                                 policy.ErrScopesMissing,
+		" \t\n ":                           policy.ErrScopesMissing,
+		"cloud-platform,bigquery":          policy.ErrScopesComma,
+		"cloud-platform bigquery,":         policy.ErrScopesComma,
+		"bigquery cloud-platform bigquery": policy.ErrScopesDuplicate,
+		"https://www.googleapis.com/auth/cloud-platform": policy.ErrScopesEntry,
+		"Cloud-Platform": policy.ErrScopesEntry,
+	} {
+		if got, err := policy.ParseScopes(raw); got != "" || !errors.Is(err, want) {
+			t.Errorf("ParseScopes(%q) = %q, %v; want %v", raw, got, err, want)
+		}
+	}
+}
+
 func TestUnknownKindIsRefused(t *testing.T) {
 	logged := policytest.CaptureLog(t)
 	store := secrets.NewLocal(kindSecret("UNKNOWN_KIND_KEY", "other", "value"))

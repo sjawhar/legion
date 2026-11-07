@@ -1,0 +1,5 @@
+kind: Fixed
+body: '`dispatch results` and the answer `dispatch result` prints when it records each name the whole 40-character commit, so two results at commits sharing their first twelve characters no longer read alike.'
+time: 2026-11-06T02:03:46.117420407Z
+custom:
+    Issue: pr2842

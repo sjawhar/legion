@@ -75,7 +75,7 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("Conversation owns the route, lists one card per message newest first, and resolves live agent names @phone", async ({
+test("Conversation owns the route, lists one card per message newest first, and resolves live agent names", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -162,26 +162,18 @@ test("Conversation owns the route, lists one card per message newest first, and 
 
     // A pinned conversation is the review margin's to show and to unpin: the Pinned tab carries
     // the card's own body, and its Unpin releases the pin the Conversation made.
-    if (testInfo.project.name === "iphone") {
-      await page.getByRole("button", { name: /Open review panel/ }).click();
-    }
     const margin = page.getByTestId("margin-sheet");
     await margin.getByRole("tab", { name: "Pinned" }).click();
     const pinnedCard = margin.getByRole("article").filter({ hasText: "First bold line" });
     await expect(pinnedCard).toHaveCount(1);
     await pinnedCard.getByRole("button", { name: "Unpin" }).click();
     await expect(margin.getByText("No pinned items.")).toBeVisible();
-    if (testInfo.project.name === "iphone") {
-      await page.getByRole("button", { name: /Close review panel/ }).click();
-    }
     await expect(firstTurn.getByRole("button", { name: "Pin" })).toHaveAttribute(
       "aria-pressed",
       "false"
     );
 
-    const screenshot = testInfo.outputPath(
-      `conversation-pinned-turn-${testInfo.project.name === "iphone" ? "390" : "1280"}.png`
-    );
+    const screenshot = testInfo.outputPath("conversation-pinned-turn-1280.png");
     await page.screenshot({ path: screenshot, fullPage: true });
     await testInfo.attach("conversation desktop", { contentType: "image/png", path: screenshot });
   } finally {
@@ -253,17 +245,17 @@ test("Conversation updates an open ask in place after an agent edit and preserve
   }
 });
 
-test("a deep link to an old unanchored comment scrolls its Conversation turn into view @phone", async ({
+test("a deep link to an old unanchored comment scrolls its Conversation turn into view", async ({
   browser,
-}, testInfo) => {
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Old comment target" });
   const comment = await createComment(issue.key, { body: "Deep linked comment" }, agent);
   // Forty newer turns put the linked comment at the foot of a Conversation thousands of pixels
-  // tall - 2,700 px at 1280x720, 6,400 px on the iPhone (measured) - which is the distance the
-  // landing has to cover. More only lengthens the seed: the server appends one event at a time
-  // per issue, so these cannot be sent as a burst (measured: 210 writes cost the same either
-  // way), and each costs the row its own round trip.
+  // tall - 2,700 px at 1280x720, measured - which is the distance the landing has to cover. More
+  // only lengthens the seed: the server appends one event at a time per issue, so these cannot be
+  // sent as a burst (measured: 210 writes cost the same either way), and each costs the row its
+  // own round trip.
   for (let index = 0; index < 40; index += 1) {
     await createMessage(issue.key, { body: `Newer message ${index}` }, agent);
   }
@@ -273,14 +265,6 @@ test("a deep link to an old unanchored comment scrolls its Conversation turn int
     const page = await alice.newPage();
     await page.goto(`/issues/${issue.key}/comments/${comment.id}`);
 
-    // On a phone the link opens the comment's thread full-screen over the Conversation; Back
-    // leaves it on the focused turn.
-    if (testInfo.project.name === "iphone") {
-      const thread = page.getByRole("dialog", { name: "Thread" });
-      await expect(thread.getByText("Deep linked comment")).toBeVisible();
-      await thread.getByRole("button", { name: "Back" }).click();
-      await expect(thread).toHaveCount(0);
-    }
     const target = page
       .getByRole("list", { name: "Conversation turns" })
       .locator('li[aria-current="true"]');
@@ -324,7 +308,7 @@ test("a message reply nests under its parent with the quoted link, and deep link
   }
 });
 
-test("a reply in a session-authored comment thread pre-fills a deletable agent mention @phone", async ({
+test("a reply in a session-authored comment thread pre-fills a deletable agent mention", async ({
   browser,
 }) => {
   await setLiveSessions([planner]);
@@ -376,9 +360,7 @@ test("a reply in a session-authored comment thread pre-fills a deletable agent m
       mentions: [{ target: "session:s1" }],
       reply_to: parent.id,
     });
-    const phoneThread = page.getByRole("dialog", { name: "Thread" });
-    const replyRoot = (await phoneThread.count()) > 0 ? phoneThread : card;
-    await expect(threadReply(page, replyRoot, "@planner It is green now - ship it.")).toBeVisible();
+    await expect(threadReply(page, card, "@planner It is green now - ship it.")).toBeVisible();
     await expect.poll(() => getSentMessages()).toMatchObject([{ target_session: "s1" }]);
   } finally {
     await alice.close();
@@ -476,8 +458,10 @@ test("a compact answered ask's Write a reply opens its composer as the next keyb
 
     await page.keyboard.type("Following up");
     await page.keyboard.press("Control+Enter");
-    await expect(replies.first()).toContainText("Following up");
-    await expect(replies.nth(1)).toContainText("Thanks");
+    // The thread reads oldest first, the order every surface shares (INFRA-450), so the reply
+    // just written stands at the end of it.
+    await expect(replies.first()).toContainText("Thanks");
+    await expect(replies.nth(1)).toContainText("Following up");
   } finally {
     await alice.close();
   }
@@ -580,7 +564,7 @@ test("Conversation answers an ask in place, draws no event row, and keeps its ca
 });
 
 // SLOW(>=2s): 34 seeded turns, real keystrokes through the composer and two live tail messages.
-test("Conversation marks unread conversations, sends with Ctrl+Enter, and jumps to newer ones @phone", async ({
+test("Conversation marks unread conversations, sends with Ctrl+Enter, and jumps to newer ones", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -866,34 +850,6 @@ test("the filter opens on All in a fresh context and ignores the settings an old
     await expectEverythingListed(page);
   } finally {
     await stored.close();
-  }
-});
-
-// An ask answered after a later comment thread was written sits above it: the order is each
-// conversation's own newest activity, not when it started.
-test("an ask answered after a later comment thread sorts above it", async ({ browser }) => {
-  await createProject({ key: "CORE", name: "Core" });
-  const issue = await createIssue({ project: "CORE", title: "Order by newest activity" });
-  const ask = await createAsk(
-    issue.key,
-    { options: [{ label: "Ship" }], question: "Answered last?" },
-    agent
-  );
-  const later = await createComment(issue.key, { body: "Written after the ask." }, agent);
-  await answerAsk(ask.id, { expected_edited_at: null, selected: ["Ship"] }, { login: "bob" });
-
-  const alice = await asUser(browser, "alice");
-  try {
-    const page = await alice.newPage();
-    await page.goto(`/issues/${issue.key}/conversation`);
-    const cards = page
-      .getByRole("list", { name: "Conversation turns" })
-      .locator(":scope > li[data-turn]");
-    await expect(cards).toHaveCount(2);
-    await expect(cards.first()).toHaveAttribute("data-turn", `ask:${ask.id}`);
-    await expect(cards.last()).toHaveAttribute("data-turn", `comment:${later.id}`);
-  } finally {
-    await alice.close();
   }
 });
 

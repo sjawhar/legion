@@ -97,7 +97,10 @@ an approval of a document that is not the root's primary one.
    on the issue where the decision was made, has judged it: do nothing.
 4. **Judge the words, not the kind.** Read the decision (`dispatch read --ref <ref>` for an ask or
    a reply; for a request for changes, the notice's `reason` or the issue's `Spec approval:` line;
-   for an approval, `issues.<root>.designGate`). An approval or a request for changes is two
+   for an approval, `issues.<root>.designGate` and `issues.<root>.gatedSteps` beside it, which
+   carries one entry for each design gate step the deployment gates, with that step's
+   `artifactId`, `currentVersion`, `approvedVersion` and `status`). An approval or a request for
+   changes is two
    events at one time, the approval request's `ask.answered` and `artifact.approved` or
    `artifact.changes_requested`: judge them as one decision, whose `ref` is `dispatch://<KEY>/spec`.
    - It gives the work a next step: an approval of the spec, a request for changes that says what
@@ -105,6 +108,9 @@ an approval of a document that is not the root's primary one.
      the agent to go on. An approval counts when `issues.<root>.designGate.approvedVersion` equals
      `issues.<root>.designGate.currentVersion`, and also when it is lower: then the architect's
      start task names both versions, and the architect requests approval of the current one.
+     Where `gatedSteps` carries more than one entry, read each one the same way: the tree runs
+     again only once every entry is `approved`, and an entry still `waiting`, `unregistered` or
+     `changes_requested` is work the architect holds.
      - It is your own hold (step 2): set the root to `todo` (`set_status`); admission queues it and
        its architect resumes. Post one comment on the issue where the decision was made
        (`dispatch comment --issue <KEY> --body-file -`): `Parked decision read: <ref> by <login>
@@ -125,11 +131,10 @@ an approval of a document that is not the root's primary one.
    - It only questions the work: a question, a doubt about the premise, a request for changes that
      only asks why. Leave it parked and answer the question in one reply:
      - Answer from the record when it holds the answer: the issue and its spec (`dispatch read`,
-       `dispatch doc-read`), its handoffs (`.legion/<KEY>/<phase>.json` on the branch
-       `legion/<KEY>`, read with `gh api` as `skill://legion-architect` reads a child's) and its
-       pull request. Write `Parked decision read: <ref> by <login> asks <the question in a few
-       words>.`, then the answer and where in the record it is, then `The tree stays parked. Set
-       <root> to todo to run it.`
+       `dispatch doc-read`), its handoffs (`dispatch handoff-read --issue <KEY> --phase <word>`)
+       and its pull request. Write `Parked decision read: <ref> by <login> asks <the question in
+       a few words>.`, then the answer and where in the record it is, then `The tree stays parked.
+       Set <root> to todo to run it.`
      - When the record does not answer it, write `Parked decision read: <ref> by <login> asks
        <the question in a few words>. The record does not answer it, and <root> is parked, so
        its architect cannot answer either. Set <root> to todo to bring its architect back to

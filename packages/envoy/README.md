@@ -53,6 +53,11 @@ The secrets broker (`cmd/broker`) supports these kinds for `agent-secrets secret
   Unreadable, malformed or expired tokens refuse the release; token bytes never enter an error or log.
   Mount the token read-only in the broker container alone, with audience `api://AzureADTokenExchange` and a one-hour lifetime.
   Exactly one Entra identity may trust that ServiceAccount subject, since a released token can sign in to every identity that trusts it.
+- `google-service-account`: stores `{"service_account":"<id>@<project>.iam.gserviceaccount.com"}`; releases a bare Google access token for that account, minted by impersonating it with the broker's own credential, good for one hour.
+  Set `BROKER_SERVICE_ACCOUNT_SECRETS` to whitespace-separated `<SECRET NAME>=<account email>` entries, such as `GCP_ADMIN=gcp-admin@example-project.iam.gserviceaccount.com`; it, and not the stored value, chooses the account the broker mints for, and a secret it does not bind releases nothing (`class=binding`).
+  `--scopes "cloud-platform bigquery"` names the OAuth scopes the token carries, each the part of a Google scope after `https://www.googleapis.com/auth/`; without it the token carries `cloud-platform` alone, and the flag is refused on any other kind.
+  `--admin true` marks a secret whose grant is an administrator's: it is human tier, names its `--requesters`, and takes a `--max-grant` of an hour or less, as a `google-service-account` secret does whether or not it is marked.
+  The secret's `--requesters` name its one person owner, and at human tier the registered services that may ask beside them.
 
 Without a kind, the broker releases the stored value unchanged.
 
@@ -113,6 +118,6 @@ driver as the `envoy-e2e-local` job of `.github/workflows/ci.yaml`.
 The authoritative event contract lives in `packages/contracts/`.
 Run `bun run gen:go` in that package before validating or releasing `packages/envoy`.
 
-`.github/workflows/changelog-fold.yaml` folds this package's changelog fragments
-(`.changes/unreleased/`) into `CHANGELOG.md` under the `legion-envoy-v` release that first carried
-each one.
+Each `legion-envoy-v` release publishes the changelog entries its own tag first shipped: this
+package's fragment files (`.changes/unreleased/`) are rendered into that GitHub release's notes.
+`CHANGELOG.md` is the history before that and stops where the fragments begin.

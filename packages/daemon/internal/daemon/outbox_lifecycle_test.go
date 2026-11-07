@@ -15,6 +15,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/admit"
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
@@ -58,7 +59,7 @@ func TestAnEarlierGenerationsSuperviseRowNeverActsOnTheNextGeneration(t *testing
 	if got := machine.Claim().State; got != supervise.StateFailed {
 		t.Fatalf("implementer = %s, want failed", got)
 	}
-	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories}, quietLogger())
+	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps()}, quietLogger())
 	admission := admit.New(records, engine, 2, "LEGION", quietLogger())
 	handlers := []intake.Handler{engine, admission}
 	client := &outboxDispatch{issue: dispatch.Issue{Key: root.Key, Status: "todo"}}
@@ -185,7 +186,7 @@ func TestAPhaseCompletionLeavesTheWorkerResidentUntilItsIssueCloses(t *testing.T
 		t.Fatalf("start the planning turn: %v", err)
 	}
 	// The linger outlasts the test's clock, so the close's suspends are all the close does here.
-	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories, Linger: 24 * time.Hour}, quietLogger())
+	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps(), Linger: 24 * time.Hour}, quietLogger())
 	clock := time.Now()
 	runner := &outbox{
 		dispatchProject: "LEGION",
@@ -354,7 +355,7 @@ func TestAnIssuesCloseWaitsForTheWorkersTurnToEnd(t *testing.T) {
 	if err := machine.Handle(ctx, supervise.StreamTurnStart{Claim: planner}); err != nil {
 		t.Fatalf("start the planning turn: %v", err)
 	}
-	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories, Linger: 24 * time.Hour}, quietLogger())
+	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps(), Linger: 24 * time.Hour}, quietLogger())
 	clock := time.Now()
 	runner := &outbox{
 		dispatchProject: "LEGION",
@@ -409,6 +410,9 @@ func TestACIRedStartsTheImplementerWhileTheTesterIsStillInItsTurn(t *testing.T) 
 	ctx := context.Background()
 	issue := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "U", LastDispatchSeq: 5}
 	putOutboxIssue(t, pool, records, issue)
+	// The issue is at work in testing and at work in implementing after the red, so it holds its
+	// admission slot throughout: the implementer's task is delivered rather than held for one.
+	holdSlot(t, pool, issue.Key)
 	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 		return records.PutPullRequest(ctx, tx, record.PullRequest{State: record.PullRequestOpen, Issue: issue.Key, Repo: "acme/widgets", Number: 86, Branch: "legion/LEGION-208", HeadSHA: "sha-1",
 			HeadUpdatedAt: time.Now(), Failing: []string{}, CheckRuns: []record.AttemptRun{}, Required: []string{"ci"}})
@@ -457,7 +461,7 @@ func TestACIRedStartsTheImplementerWhileTheTesterIsStillInItsTurn(t *testing.T) 
 	implementer, implementerConn := boot(claim.RoleImplementer, "", "")
 	tester, _ := boot(claim.RoleTester, "Continue Workflow. Issue: LEGION-208. Phase: testing.", phase.Testing)
 	before := tester.Claim()
-	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories}, quietLogger())
+	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps()}, quietLogger())
 	clock := time.Now()
 	runner := &outbox{
 		dispatchProject: "LEGION",
@@ -531,7 +535,7 @@ func TestAFinishedWorkerThatDiesIsRelaunchedAndItsFailureHoldsNothing(t *testing
 	}
 	sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
 	sup.deps.PhaseHolds = (&workflowRuntime{pool: pool, records: records}).phaseHolds
-	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories}, quietLogger())
+	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps()}, quietLogger())
 	sup.OnDurableState((&workflowRuntime{pool: pool, records: records, handlers: []intake.Handler{engine}, log: quietLogger()}).claimDurableState)
 	planner, err := claim.NewToken("legion", issue.Key, claim.RolePlanner)
 	if err != nil {
@@ -658,7 +662,7 @@ func TestAReadmittedTreeKeepsItsOpenPullRequest(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories}, quietLogger())
+	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps()}, quietLogger())
 	admission := admit.New(records, engine, 2, "LEGION", quietLogger())
 	for _, step := range []struct {
 		id   string
@@ -702,16 +706,19 @@ func TestAChildAHumanMovesOutOfTheWorkflowStopsAndKeepsTheHumansStatus(t *testin
 	parent := "LEGION-208"
 	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "root", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U", LastDispatchSeq: 1})
 	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-209", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "child", Parent: &parent, Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "V", LastDispatchSeq: 1})
+	// The tree runs: its lifecycle is open (openTree), which is what says so (record.TreeLive),
+	// and each of its two issues holds the admission slot its work holds — the root implementing
+	// and the child testing. Without the lifecycle admission would find a root in the workflow
+	// that no slot can reach and take the whole tree out of it, which is not what this test moves.
+	openTree(t, pool, "LEGION", "LEGION-208")
+	holdSlot(t, pool, "LEGION-208", "LEGION-209")
 	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
-		if err := records.PutSlot(ctx, tx, record.Slot{Issue: "LEGION-208", Index: 0, AdmittedAt: time.Now()}); err != nil {
-			return err
-		}
 		return records.PutPullRequest(ctx, tx, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-209", Repo: "acme/widgets", Number: 90, Branch: "legion/LEGION-209", HeadSHA: "sha",
 			HeadUpdatedAt: time.Now(), Failing: []string{}, CheckRuns: []record.AttemptRun{}})
 	}); err != nil {
 		t.Fatal(err)
 	}
-	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories}, quietLogger())
+	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps()}, quietLogger())
 	admission := admit.New(records, engine, 2, "LEGION", quietLogger())
 
 	if _, err := intake.ApplyFact(ctx, pool, "dispatch", "child-backlog", intake.DispatchIssue{Key: "LEGION-209", ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.updated", Status: "backlog", Title: "child", Parent: parent, Rank: "V"}, engine, admission); err != nil {
@@ -775,6 +782,9 @@ func TestASameRoleBackwardMoveNeverStopsTheWorkerInItsNewPhase(t *testing.T) {
 	ctx := context.Background()
 	issue := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Retro, Generation: 1, Status: "retro", Rank: "U", LastDispatchSeq: 5}
 	putOutboxIssue(t, pool, records, issue)
+	// The issue is at work in retro and at work in implementing after the move, so it holds its
+	// admission slot across it and the new phase's task waits for nothing.
+	holdSlot(t, pool, issue.Key)
 	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 		return records.PutPhase(ctx, tx, record.PhaseRow{Issue: issue.Key, Role: claim.RoleImplementer, Claim: "claim"})
 	}); err != nil {
@@ -783,7 +793,7 @@ func TestASameRoleBackwardMoveNeverStopsTheWorkerInItsNewPhase(t *testing.T) {
 	sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
 	sup.deps.PhaseHolds = (&workflowRuntime{pool: pool, records: records}).phaseHolds // exactly what the daemon wires
 	clock := time.Now()
-	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories}, quietLogger())
+	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps()}, quietLogger())
 	runner := &outbox{
 		dispatchProject: "LEGION",
 		pool:            pool, records: records, supervisor: sup, trees: outboxTreeStore(t, pool, issue.Tree), tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(),
@@ -1008,7 +1018,7 @@ func TestARootLeavingTheWorkflowSuspendsEveryWorkerOfItsTree(t *testing.T) {
 		return machine
 	}
 	rootWorker, childWorker := ready(root.Key), ready(child.Key)
-	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories}, quietLogger())
+	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps()}, quietLogger())
 	runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, trees: outboxTreeStore(t, pool, root.Key), project: "legion", log: quietLogger(), now: time.Now,
 		dispatch: &outboxDispatch{issue: dispatch.Issue{Key: root.Key, Status: "backlog"}}, notices: &outboxPublisher{}, handlers: []intake.Handler{engine}}
 

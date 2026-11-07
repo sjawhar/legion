@@ -38,11 +38,28 @@ const (
 	RelayNotParked
 )
 
-// WaitsForSlot says whether root is a root handed to Legion that waits in `todo` for an admission
-// slot, with no architect running for its tree yet: not lingering, not waiting on a person (whose
-// answer resumes it with a task of its own, workflow's ResumeAwaitedRoot), and holding no slot.
-func WaitsForSlot(ctx context.Context, tx pgx.Tx, store Store, root Issue) (bool, error) {
-	if !root.HandedOver || root.Status != "todo" || root.Lingers() || root.AwaitingPerson() || !claim.IsTreeRoot(root.Key, root.Tree) {
+// WaitsForSlot says whether root is a root handed to Legion that waits in the line for its tree
+// to be opened, with no architect running for it yet: the one queued-root rule (QueuedRoot),
+// read with the root's own design gate, not lingering, and holding no slot of its own. steps
+// are the design-gate steps the deployment gates.
+//
+// It is that rule and no other reading of it. "Status todo and no slot" used to say the same
+// thing and no longer does: a running root holds none while it waits for its merge, in
+// accepting or for its children, so a person's todo on such a root read here as a root with no
+// architect, and every decision a person made on its tree was kept for a start that is never
+// queued instead of reaching the architect that is running (RelayParkedDecision, workflow's
+// CatchUpTheTreesOwed). The slot is still asked, after the rule rather than instead of it: a
+// root at admitted whose gate has never opened is a queued root by its record and holds the
+// slot its architect is writing the design in, and that architect hears a decision itself.
+func WaitsForSlot(ctx context.Context, tx pgx.Tx, store Store, root Issue, steps []DesignStep) (bool, error) {
+	if root.Lingers() || !claim.IsTreeRoot(root.Key, root.Tree) {
+		return false, nil
+	}
+	rows, err := store.GatesOf(ctx, tx, root.Key)
+	if err != nil {
+		return false, err
+	}
+	if !QueuedRoot(root, TreeGate{Steps: steps, Rows: rows}) {
 		return false, nil
 	}
 	slots, err := store.Slots(ctx, tx)
@@ -80,8 +97,8 @@ func WaitsForSlot(ctx context.Context, tx pgx.Tx, store Store, root Issue) (bool
 // Every write is in the caller's transaction, which the caller keys so that a replay writes none of
 // them again.
 func RelayParkedDecision(ctx context.Context, tx pgx.Tx, store Store, issue string, root Issue, nobodyHears bool,
-	decision ParkedDecision, version int, reason string) (RelayOutcome, error) {
-	waiting, err := WaitsForSlot(ctx, tx, store, root)
+	decision ParkedDecision, version int, reason string, steps []DesignStep) (RelayOutcome, error) {
+	waiting, err := WaitsForSlot(ctx, tx, store, root, steps)
 	if err != nil {
 		return RelayNone, err
 	}
@@ -133,19 +150,38 @@ type DecisionMark struct {
 	Actor    string       `json:"actor,omitempty"`
 }
 
+// KeptApproval is the approval a root's re-admission kept for its next architect start
+// (Store.KeepReadmittedApproval): the design-gate step whose document a person approved, the
+// version they approved, and the version that document has reached since. The zero value is no
+// kept approval. The step is what says which document the task names, since a deployment that
+// gates more than one step can keep a pair of any of them. KeptDecisions embeds it, so the pair
+// travels to the architect as it was kept, with nothing copied field by field.
+type KeptApproval struct {
+	Step     DesignStep `json:"step,omitempty"`
+	Approved int        `json:"approved,omitempty"`
+	Latest   int        `json:"latest,omitempty"`
+}
+
 // KeptDecisions is what one architect start task or catch-up named of what its tree is owed
-// (workflow.Engine.ParkedDecisionTask): each decision, and the pair of approved and latest spec
-// versions when it named one. It travels with the task (SuperviseRequest.Kept, CatchUp.Kept) and
-// is persisted with the delivery a claim queues it as, which is what says which rows that
-// delivery holds. A published catch-up tells exactly what it named (Store.ForgetKeptDecisions),
-// and a queued start's task tells it at its delivery's confirmation. A start whose task reached
-// no claim, and a catch-up a newer one supersedes, hand every row over instead
-// (workflow.HandOverKept): a fresh catch-up names them while the tree each is owed to has an
-// architect to tell, and otherwise they wait, KEPT, for the next start or ready to name them.
+// (workflow.Engine.ParkedDecisionTask): each decision, and the step and the pair of approved and
+// latest versions of the document a person approved when it named one. It travels with the task
+// (SuperviseRequest.Kept, CatchUp.Kept) and is persisted with the delivery a claim queues it as,
+// which is what says which rows that delivery holds. A published catch-up tells exactly what it
+// named (Store.ForgetKeptDecisions), and a queued start's task tells it at its delivery's
+// confirmation. A start whose task reached no claim, and a catch-up a newer one supersedes, hand
+// every row over instead (workflow.HandOverKept): a fresh catch-up names them while the tree each
+// is owed to has an architect to tell, and otherwise they wait, KEPT, for the next start or
+// ready to name them.
+//
+// The approval it names is the kept approval itself (KeptApproval), embedded: encoding/json
+// writes an embedded struct's own fields as fields of this one, so the stored shape is the
+// decisions and the three fields of the pair, as it has always been.
+//
+// A record written before a deployment could gate more than one step carries no step, and the
+// task it is written again from reads it as the spec step, the one step that release gated.
 type KeptDecisions struct {
 	Decisions []DecisionMark `json:"decisions,omitempty"`
-	Approved  int            `json:"approved,omitempty"`
-	Latest    int            `json:"latest,omitempty"`
+	KeptApproval
 }
 
 // KeptToldSource is the processed-event source a catch-up marks, under the dedupe key its publish

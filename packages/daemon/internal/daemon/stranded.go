@@ -63,8 +63,8 @@ func strandedReleaseWakes(ctx context.Context, st *store.Store, projectToken str
 // the boot's account of its claims, and no step after it depends on it. A read the daemon's stop
 // cancels is not a failure and logs nothing; one that outlives strandedReportTimeout is. project is
 // the configured project the line names, as `legion daemon started` does; projectToken selects the
-// project's claims (ofProject).
-func reportStranded(ctx context.Context, st *store.Store, records record.Store, project, projectToken string, log *slog.Logger) {
+// project's claims (ofProject); steps are the design-gate steps the deployment gates.
+func reportStranded(ctx context.Context, st *store.Store, records record.Store, project, projectToken string, steps []record.DesignStep, log *slog.Logger) {
 	var stranded []supervise.Claim
 	if err := pgx.BeginTxFunc(ctx, st.Pool(), pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly}, func(tx pgx.Tx) error {
 		claims, err := st.ClaimsTx(ctx, tx)
@@ -77,7 +77,7 @@ func reportStranded(ctx context.Context, st *store.Store, records record.Store, 
 		if err != nil {
 			return err
 		}
-		stranded, err = workflow.Stranded(ctx, tx, records, claims, resumes, now)
+		stranded, err = workflow.Stranded(ctx, tx, records, project, steps, claims, resumes, now)
 		return err
 	}); err != nil {
 		if errors.Is(ctx.Err(), context.Canceled) {

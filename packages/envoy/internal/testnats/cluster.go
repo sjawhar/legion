@@ -135,14 +135,18 @@ func (c *Cluster) URL() string { return strings.Join(c.URLs(), ",") }
 // most muteRestarts times in one call. Each restart starts the listening, and the connectTimeout
 // wait, over for every member, since a restarted member has heard no one yet.
 //
-// nats-server 2.10.29 can start a member whose every Raft message is dropped: its
-// setSystemAccount starts the Raft send queue's goroutine (server/server.go:1710), which registers
-// its client with s.SystemAccount() (server/sendq.go:48) before setSystemAccount stores the account
-// (server/server.go:1717), and a client with no account delivers nothing (server/client.go:3882).
-// Such a member follows the leader but never answers it or votes, so the leader never counts it,
-// for as long as that start runs; a restart is a fresh start. Under -race on two CPUs with four
-// test processes, 29 of 1,920 fresh clusters had such a member. nats-server v2.15.2 hands the
-// queue its account instead (newSendQ(acc)).
+// nats-server 2.10.29, the server these tests linked before v2.15.1, could start a member whose
+// every Raft message is dropped: its setSystemAccount started the Raft send queue's goroutine
+// (server/server.go:1710), which registered its client with s.SystemAccount() (server/sendq.go:48,
+// newSendQ() taking no account) before setSystemAccount stored the account (server/server.go:1717),
+// and a client with no account delivers nothing (server/client.go:3882). Such a member followed the
+// leader but never answered it or voted, so the leader never counted it, for as long as that start
+// ran; a restart is a fresh start. Under -race on two CPUs with four test processes, 29 of 1,920
+// fresh clusters had such a member. nats-server v2.15.1, the server these tests link now, hands the
+// queue its account instead: newSendQ(acc) stores it and the loop registers sq.a
+// (server/sendq.go:35-48), and both callers pass it (server/server.go:1898,
+// server/raft_transport.go:74). The restarts stay as a guard against a member that goes mute for
+// another reason.
 func (c *Cluster) AwaitReady(t testing.TB) {
 	t.Helper()
 	// listening is when AwaitReady began listening for the members: its call, or its last restart.

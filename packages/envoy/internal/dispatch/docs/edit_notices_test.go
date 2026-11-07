@@ -1092,7 +1092,7 @@ func TestEditNoticeARebuildNamesThePersonWhoRebuiltIt(t *testing.T) {
 }
 
 // recordLatestEditSourceTx records actor as the document's latest edit source and, a person, its
-// latest person sender, as a person's own append does (updateOwedArgs). It writes its own
+// latest person sender, as a person's own append does (updateOwedStatement). It writes its own
 // statement because no production writer leaves a document in that state without an edit:
 // persistLastActor, the one writer a test could call here, deliberately leaves the person alone.
 // What an append's own write of that row does is held by

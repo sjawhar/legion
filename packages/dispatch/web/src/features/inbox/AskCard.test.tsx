@@ -11,8 +11,10 @@ import { installIntersectionObserver } from "../../__tests__/intersection-observ
 import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import { answerThreadReads } from "../../__tests__/send-answers";
 import { ApiError, api } from "../../api/client";
+import { myRepliesOwnerQuery } from "../../api/queries";
 import type { AnswerAskInput, Ask, AskAnswer, AskRead, Comment } from "../../api/types";
-import { seedUnread } from "../replies/replies-fixture";
+import { userPreferenceStorageKey } from "../shell/userPreference";
+import { replyRow, seedUnread } from "../threads/replies-fixture";
 import { AskCard } from "./AskCard";
 import { answerDraft } from "./answer-drafts";
 
@@ -612,6 +614,140 @@ test("a question closed under the reader keeps their unsent answer, out of the f
     expect(view.container.querySelector("[data-ask-answer]")).toBeNull();
     expect(card.getByTestId("ask-unsent-answer").textContent).toContain(typed);
   } finally {
+    view.unmount();
+  }
+});
+
+/** The thread's reply bodies, in the order the card draws them. */
+function threadReplyBodies(thread: HTMLElement): (string | null | undefined)[] {
+  return Array.from(
+    thread.querySelectorAll("li"),
+    (item) => item.querySelector(".dispatch-markdown")?.textContent
+  );
+}
+
+/** Whether `first` comes before `second` in the document. */
+function precedes(first: Element, second: Element): boolean {
+  return (first.compareDocumentPosition(second) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
+}
+
+const THREAD_ORDER_KEY = userPreferenceStorageKey("alice", "inbox.thread-order");
+
+// One choice, made in the Inbox's View menu, places every thread: its replies, the fold over the
+// earlier ones, and the box the reader writes in - here the ask's own options and answer box,
+// which sit where a reply box would.
+for (const order of ["oldest", "newest"] as const) {
+  test(`with ${order} first, the thread and the answer box read in that order`, async () => {
+    window.localStorage.setItem(THREAD_ORDER_KEY, order);
+    const open = answeredAsk({ answer: null, state: "open" });
+    const replies = [
+      askReply("reply-1", "2026-10-08T01:00:00Z"),
+      askReply("reply-2", "2026-10-08T02:00:00Z"),
+      askReply("reply-3", "2026-10-08T03:00:00Z"),
+    ];
+    const { view } = renderCard(
+      <AskCard ask={open} initialThread={{ ...thread(open, []), replies }} />
+    );
+    try {
+      // The card draws the thread in the browser's own order, which it reads once the signed-in
+      // identity has landed, so the section it draws first is replaced by the ordered one.
+      await waitFor(() =>
+        expect(threadReplyBodies(view.getByTestId("thread-ask-1"))).toEqual(
+          order === "oldest"
+            ? ["Reply reply-2", "Reply reply-3"]
+            : ["Reply reply-3", "Reply reply-2"]
+        )
+      );
+      // The fold over the earlier reply sits furthest from the newest message, and the ask's
+      // options and answer box beside it.
+      const fold = view.getByRole("button", { name: "Show 1 earlier reply" });
+      const newest = view.getByText("Reply reply-3");
+      const answerBox = view.getByLabelText("Your answer");
+      expect(precedes(fold, newest)).toBe(order === "oldest");
+      expect(precedes(answerBox, view.getByTestId("thread-ask-1"))).toBe(order === "newest");
+    } finally {
+      view.unmount();
+      window.localStorage.removeItem(THREAD_ORDER_KEY);
+    }
+  });
+}
+
+// The fold holds what the reader has already read, never a reply they have not: the unread set
+// the mark reads (`useMarkThreadRead`) says where their reading stopped.
+test("an unread reply is never folded away", async () => {
+  const screen = installIntersectionObserver();
+  const ask = answeredAsk();
+  const replies = [1, 2, 3, 4].map((place) =>
+    askReply(`reply-${place}`, `2026-10-08T0${place}:00:00Z`)
+  );
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      mutations: { retry: false },
+      queries: { retry: false, staleTime: Number.POSITIVE_INFINITY },
+    },
+  });
+  seedUnread(queryClient, { issue: "CORE-1" }, []);
+  // The reader read the thread through its first reply, so replies 2 to 4 are unread.
+  queryClient.setQueryData(myRepliesOwnerQuery({ issue: "CORE-1" }).queryKey, {
+    as_of: "2026-10-12T00:00:00Z",
+    limit: 200,
+    offset: 0,
+    rows: [replyRow(ask.id, { kind: "ask", read_through: "2026-10-08T01:00:00Z" })],
+    total: 1,
+  });
+  const view = render(
+    <MemoryRouter>
+      <QueryClientProvider client={queryClient}>
+        <AskCard ask={ask} initialThread={{ ...thread(ask), replies }} markRead />
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+  try {
+    const threadElement = await view.findByTestId("thread-ask-1");
+    await waitFor(() =>
+      expect(threadReplyBodies(threadElement)).toEqual([
+        "Reply reply-2",
+        "Reply reply-3",
+        "Reply reply-4",
+      ])
+    );
+    expect(view.getByRole("button", { name: "Show 1 earlier reply" })).toBeTruthy();
+  } finally {
+    view.unmount();
+    screen.restore();
+  }
+});
+
+// INFRA-869: a reply that is nothing but a reference shows the reference's card under it, as
+// the margin's comments do.
+test("a reply that is nothing but a reference shows its card", async () => {
+  const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue({
+    documents: [],
+    key: "CORE-2",
+    project: "CORE",
+    status: "in_progress",
+    title: "The other issue",
+  });
+  const ask = answeredAsk();
+  const link = { ...askReply("reply-1", "2026-10-08T03:00:00Z"), body: "dispatch://CORE-2" };
+  const { view } = renderCard(
+    <AskCard ask={ask} initialThread={{ ...thread(ask), replies: [link] }} />
+  );
+
+  try {
+    const reply = await waitFor(() => {
+      const found = view.container.querySelector<HTMLElement>("[data-reply]");
+      if (found === null) throw new Error("the reply has not rendered");
+      return found;
+    });
+    const cards = await within(reply).findByRole("region", { name: "References" });
+    expect(
+      within(cards)
+        .getByRole("link", { name: /The other issue/ })
+        .getAttribute("href")
+    ).toBe("/issues/CORE-2");
+  } finally {
+    getIssueSummary.mockRestore();
     view.unmount();
   }
 });

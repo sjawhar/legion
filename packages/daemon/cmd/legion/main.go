@@ -27,6 +27,7 @@ import (
 	legionclaim "github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/daemon"
+	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/registry"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
@@ -48,13 +49,6 @@ const (
 // (packages/daemon/docker/worker.Dockerfile) and the legion release (.github/workflows/release.yaml)
 // with `-ldflags "-X main.revision=<commit>"`; empty otherwise.
 var revision string
-
-// builtFromRepository is the repository this binary is built from: with revision, what the boot
-// compares the open production checks of that repository against (daemon.Build), and so what a
-// release build's boot wakes — a check whose merge the build carries. A Go constant is never
-// empty, so a non-release build's empty revision is what makes its boot compare nothing, as does
-// a deployment whose configured repository is another (the smoke rig's).
-const builtFromRepository = "cybermonklabs/legion"
 
 // release is the legion-v* version a release binary was built for, linked in by the release
 // workflow with `-ldflags "-X main.release=v<version>"`; empty in every other build.
@@ -91,7 +85,6 @@ var commands = map[string]commandEntry{
 	"model-token":    {runModelToken, "sign a pod in to Cognito with its service-account token and print the access token (a model apiKey command)"},
 	"claims":         {runClaims, "the operator's hand on the daemon's claims"},
 	"sessions":       {runSessions, "copy recorded session files into Oh My Pi's session database (runtime.kubernetes.session_store postgres)"},
-	"handoffs":       {runHandoffs, "copy each in-flight branch's committed .legion/ handoff files onto its Dispatch issue, then remove .legion/ from the branch"},
 	"probe-boot":     {runProbeBoot, "run a Kubernetes daemon's cluster check and worker image probe from legion.yaml, with no workflow, and exit"},
 	"probe-image":    {runProbeImage, "run the worker image's launch probes (the image build and the daemon's probe Sandbox run it)"},
 	"workspace-init": {runWorkspaceInit, "an issue pod's init containers: fetch the repository, clone the skills marketplace, provision the issue's workspace; and a repository cache pod's process"},
@@ -265,11 +258,19 @@ func pluginsLine(cfg config.Config) string {
 // files they name before it writes anything (daemon.CheckStart, the reads boot's own prepare
 // starts with, the daemon's own NATS nkey seed among them), and nothing else: no store, no team, no
 // file written, and no process but `mise where <tool>` when a tmux configuration's omp_invocation
-// names a mise tool. The OK line names each NATS nkey seed's public key when there is one, never
-// the seed. After it, one line per configured repository rename (`repository_renames`), so an
-// operator reads back what the daemon will treat as one repository before a transfer moves the
-// events onto the new name; a file that configures none prints no such line. Then one line per
-// deployment capability the file alone leaves open, in the words boot logs it with
+// names a mise tool. The OK line names the design-gate steps the file resolved to, in the order
+// it named them (`design-gate-steps=`, `none` for a deployment that gates none), and each NATS
+// nkey seed's public key when there is one, never the seed.
+// Right after it comes one line per loader warning (config.Config.Warnings) — a key the file
+// still sets that this daemon no longer reads — so a deprecation is the first thing an operator
+// reads, and the exit stays 0, since such a key is ignored and never refused.
+// Then one line per project, in key order, naming its `production_check` and what the word
+// decides (productionCheckLine), so an operator reads back which projects open a production
+// check at a merge. After them, one line per configured repository rename
+// (`repository_renames`), so an operator reads back what the daemon will treat as one repository
+// before a transfer moves the events onto the new name; a file that configures none prints no
+// such line. Then one line per deployment capability the file alone leaves open, in the words
+// boot logs it with
 // (capabilities.Deployment.OpenFromConfiguration): a report, so the exit stays 0.
 // Under kubernetes, when a pod's reservation requests less cpu or memory than its limit, one plain
 // `resources:` line names those pods as Burstable (capabilities.Deployment.BurstableLine);
@@ -296,7 +297,7 @@ func checkStartConfig(configPath string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "legion start: %v\n", err)
 		return 1
 	}
-	ok := "Config OK: project=" + cfg.Project
+	ok := "Config OK: project=" + cfg.Project + " design-gate-steps=" + designGateSteps(cfg.Gates.Steps())
 	if paneNatsUser != "" {
 		ok += " nats-nkey-user=" + paneNatsUser
 	}
@@ -304,6 +305,12 @@ func checkStartConfig(configPath string, stdout, stderr io.Writer) int {
 		ok += " nats-daemon-nkey-user=" + daemonNatsUser
 	}
 	fmt.Fprintln(stdout, ok)
+	for _, warning := range cfg.Warnings {
+		fmt.Fprintln(stdout, warning)
+	}
+	for _, key := range slices.Sorted(maps.Keys(cfg.Projects)) {
+		fmt.Fprintln(stdout, productionCheckLine(key, cfg.Projects[key]))
+	}
 	for _, rename := range cfg.RepositoryRenames.Pairs() {
 		fmt.Fprintf(stdout, "repository rename: %s and %s are one repository wherever the daemon compares a name; keep the pair configured for as long as any record names %s\n",
 			rename.From, rename.To, rename.From)
@@ -326,6 +333,29 @@ func checkStartConfig(configPath string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, pluginsLine(cfg))
 	}
 	return 0
+}
+
+// designGateSteps is the deployment's design-gate steps as the OK line names them: the step
+// names in the order the file resolved them to, comma-separated, and `none` where the
+// deployment gates no step.
+func designGateSteps(steps []record.DesignStep) string {
+	if len(steps) == 0 {
+		return "none"
+	}
+	return strings.Join(record.StepNames(steps), ",")
+}
+
+// productionCheckLine is `--check-config`'s line for one project's `production_check`: the word
+// the file writes (`tester` or `off`, config.Project.ProductionCheckWord) and what it decides.
+// The role the key names works the check, and `off` opens none; either way the key decides only
+// the checks opened after the load, never one already open, which keeps the role it opened with.
+func productionCheckLine(key string, project config.Project) string {
+	effect := "no production check"
+	if role := project.ProductionCheck; role != "" {
+		effect = fmt.Sprintf("a production check the %s works", role)
+	}
+	return fmt.Sprintf("projects.%s.production_check: %s — a merge that closes one of its issues opens %s",
+		key, project.ProductionCheckWord(), effect)
 }
 
 // reservedUnder is a cpu or memory reservation as --check-config names it: the one quantity when
@@ -362,6 +392,13 @@ func start(ctx context.Context, configPath string, stderr io.Writer) int {
 	if err != nil {
 		fmt.Fprintf(stderr, "legion start: %v\n", err)
 		return 1
+	}
+	// Each warning the loader has (config.Config.Warnings) is logged once, before any other work
+	// this boot does with the configuration, so the lines are the first a reader of the log meets
+	// (docs/solutions/envoy/a-setting-another-repositorys-deployment-sets-is-removed-in-two-releases-pr2674.md).
+	// The boot goes on: a key another deployment still sets is ignored, never refused.
+	for _, warning := range cfg.Warnings {
+		log.Warn(warning)
 	}
 	// legion.yaml always resolves both bind and port, and both must name the inherited socket: the
 	// registry entry, the default daemon_url and `legion state --port` all dial them.
@@ -419,7 +456,7 @@ func start(ctx context.Context, configPath string, stderr io.Writer) int {
 		}
 	}()
 
-	if err := daemon.Run(ctx, cfg, daemon.Build{Revision: revision, Repository: builtFromRepository}, log, inherited); err != nil {
+	if err := daemon.Run(ctx, cfg, log, inherited); err != nil {
 		fmt.Fprintf(stderr, "legion start: %v\n", err)
 		return 1
 	}
@@ -546,8 +583,9 @@ func runState(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	fmt.Fprintf(stdout, "legion %s on %s — schema %d, boot %d started %s (first boot %s)\n",
 		state.Daemon.Project, address, state.Daemon.SchemaVersion, state.Daemon.Boots,
 		state.Daemon.StartedAt.Format(time.RFC3339), state.Daemon.FirstBootAt.Format(time.RFC3339))
-	fmt.Fprintf(stdout, "admission: %d active, %d waiting, cap %d; %d issues\n",
-		len(state.Admission.Active), len(state.Admission.Waiting), state.Admission.Cap, len(state.Issues))
+	fmt.Fprintf(stdout, "admission: %d issues hold a slot, cap %d, %d waiting; %d live trees; %d issues\n",
+		len(state.Admission.Active), state.Admission.Cap, len(state.Admission.Waiting),
+		len(state.Admission.Trees), len(state.Issues))
 	fmt.Fprintln(stdout, blockedSummary(state.Admission.Blocked))
 	fmt.Fprintln(stdout, memorySummary(state.Issues))
 	fmt.Fprintln(stdout, awaitingSummary(state.Issues))
@@ -556,6 +594,9 @@ func runState(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	fmt.Fprintln(stdout, pendingSummary(state.PendingStatusWrites))
 	fmt.Fprintln(stdout, heldSummary(state.HeldOutboxRows))
 	fmt.Fprintln(stdout, strandedSummary(state.StrandedClaims, strandedSuspenders(ctx, op, state.StrandedClaims)))
+	if wakes := wakesWaitingSummary(state.WakesWaiting); wakes != "" {
+		fmt.Fprintln(stdout, wakes)
+	}
 	for _, line := range webhookAppLines(state.Repositories.WithoutWebhookApp) {
 		fmt.Fprintln(stdout, line)
 	}
@@ -633,10 +674,11 @@ func memorySummary(issues map[string]api.Issue) string {
 }
 
 // awaitingSummary is the one line an operator reads for the roots that gave their admission slot
-// up to wait on a person (api.WaitingOnView): an unanswered one is in neither admission list and
-// holds no slot, so without this line the capacity it freed looks idle. It says how many, how many
-// a person answered (each at the front of the waiting line for the next free slot), and each by
-// key with what it waits on and whether, when and by what act it was answered.
+// up to wait on a person (api.WaitingOnView): an unanswered one holds no slot and is in neither
+// `active` nor `waiting`, only among the live trees, so without this line the capacity it freed
+// looks idle. It says how many, how many a person answered (each at the front of the waiting line
+// for the next free slot), and each by key with what it waits on and whether, when and by what act
+// it was answered.
 func awaitingSummary(issues map[string]api.Issue) string {
 	var keys []string
 	answered := 0
@@ -708,8 +750,11 @@ func openChecks(issues map[string]api.Issue) []issueCheck {
 }
 
 // checksSummary is the one line an operator reads for the production checks still open: how many,
-// and the oldest — its issue, pull request and merge commit, which look it is on, what woke that
-// look and when, and when the check is bound.
+// and the oldest — its issue, pull request and merge commit, the role working it, which look it
+// is on, what woke that look and when, and when its next look is due. The role is on the line
+// because a check opened before the release that gave the project `production_check` carries the
+// implementer, and one opened after it the role that setting names, and an operator reading the
+// oldest check cannot tell them apart otherwise.
 func checksSummary(checks []issueCheck) string {
 	if len(checks) == 0 {
 		return "open production checks: none"
@@ -726,8 +771,8 @@ func checksSummary(checks []issueCheck) string {
 	if wake := oldest.check.LastWake; wake != nil {
 		look += fmt.Sprintf(" woken by %s at %s", wake.Kind, wake.At.UTC().Format(time.RFC3339))
 	}
-	return fmt.Sprintf("open production checks: %d; the oldest, %s #%d at %s, %s, bound %s",
-		len(checks), oldest.issue, oldest.check.PullRequest, merge, look, oldest.check.NextWakeAt.UTC().Format(time.RFC3339))
+	return fmt.Sprintf("open production checks: %d; the oldest, %s #%d at %s, worked by the %s, %s, next look %s",
+		len(checks), oldest.issue, oldest.check.PullRequest, merge, oldest.check.Role, look, oldest.check.NextWakeAt.UTC().Format(time.RFC3339))
 }
 
 // issueRound is one update round an issue has open, and the claims in it, by role: the round a
@@ -835,6 +880,23 @@ func strandedSummary(stranded []api.StrandedClaim, suspended api.Suspenders) str
 		}
 	}
 	return fmt.Sprintf("claims nothing will wake: %d — %s", len(stranded), strings.Join(groups, "; "))
+}
+
+// wakesWaitingSummary is the line an operator reads for the wakes the daemon's pacing is holding
+// until their turn (api.State.WakesWaiting): how many, and each by claim with what kind of wake it
+// is and when it is due, in the state's own claim order. It is empty when nothing waits, and the
+// caller then prints nothing: every other line here says "none" because what it counts is always
+// worth a glance, while a wake queue is empty at every moment outside a restart or a plugin wave,
+// and a line saying so on every read would be noise in the one place an operator reads most.
+func wakesWaitingSummary(wakes []api.WakeWaiting) string {
+	if len(wakes) == 0 {
+		return ""
+	}
+	held := make([]string, len(wakes))
+	for i, wake := range wakes {
+		held[i] = fmt.Sprintf("%s %s due %s", wake.Claim, wake.Kind, wake.DueAt.Format(time.RFC3339))
+	}
+	return fmt.Sprintf("wakes waiting: %d — %s", len(wakes), strings.Join(held, "; "))
 }
 
 // strandedSuspenders is who suspended each stranded claim, which the state body does not carry:

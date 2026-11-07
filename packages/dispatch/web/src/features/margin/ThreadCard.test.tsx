@@ -21,7 +21,8 @@ import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import { answerThreadReads } from "../../__tests__/send-answers";
 import { api } from "../../api/client";
 import type { Comment } from "../../api/types";
-import { seedUnread } from "../replies/replies-fixture";
+import { userPreferenceStorageKey } from "../shell/userPreference";
+import { seedUnread } from "../threads/replies-fixture";
 import { ThreadCard } from "./ThreadCard";
 import type { Thread } from "./useMarginItems";
 
@@ -685,5 +686,77 @@ test("a collapsed thread shows no reply and marks nothing", async () => {
     expect(card.mark).not.toHaveBeenCalled();
   } finally {
     card.cleanup();
+  }
+});
+
+// A margin thread folds nothing and offers no order control of its own: it follows the one
+// choice the reader made in the Inbox's View menu, replies and reply box alike.
+for (const order of ["oldest", "newest"] as const) {
+  test(`a margin thread reads ${order} first, with its reply box beside the newest message`, async () => {
+    const key = userPreferenceStorageKey("alice", "inbox.thread-order");
+    window.localStorage.setItem(key, order);
+    const second = comment("reply-2", "Second reply", "2026-09-10T00:02:00Z", {
+      anchor: null,
+      reply_to: root.id,
+    });
+    const queryClient = new QueryClient({
+      defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+    });
+    seedUnread(queryClient, { issue: "CORE-1" }, []);
+    const view = renderCard(thread({ replies: [reply, second] }), {}, queryClient);
+    try {
+      const replies = await screen.findByRole("list", { name: "Replies" });
+      await waitFor(() =>
+        expect(Array.from(replies.querySelectorAll("li"), (item) => item.textContent)).toEqual(
+          order === "oldest"
+            ? [expect.stringContaining("First reply"), expect.stringContaining("Second reply")]
+            : [expect.stringContaining("Second reply"), expect.stringContaining("First reply")]
+        )
+      );
+      const composer = screen.getByRole("form", { name: "Comment composer" });
+      const composerFirst =
+        (replies.compareDocumentPosition(composer) & Node.DOCUMENT_POSITION_PRECEDING) !== 0;
+      expect(composerFirst).toBe(order === "newest");
+    } finally {
+      view.unmount();
+      window.localStorage.removeItem(key);
+    }
+  });
+}
+
+// INFRA-869: the margin keeps a card per reference for a body of several, now that the one
+// predicate decides which bodies show cards.
+test("a comment of several references shows a card for each of them", async () => {
+  const getIssueSummary = spyOn(api, "getIssueSummary").mockImplementation(async (key) => ({
+    documents: [],
+    key,
+    project: "CORE",
+    status: "in_progress",
+    title: key === "CORE-2" ? "The other issue" : "The third issue",
+  }));
+  const references = comment(
+    "root-1",
+    "dispatch://CORE-2 dispatch://CORE-3",
+    "2026-09-10T00:00:00Z"
+  );
+  const view = renderCard(thread({ replies: [], root: { comment: references, kind: "comment" } }));
+
+  try {
+    const card = screen.getByTestId(`margin-comment-${references.id}`);
+    const cards = await within(card).findByRole("region", { name: "References" });
+    const links = await waitFor(() => {
+      const found = within(cards).getAllByRole("link");
+      if (found.length < 2) throw new Error("the second card has not rendered");
+      return found;
+    });
+    expect(links.map((link) => link.getAttribute("href"))).toEqual([
+      "/issues/CORE-2",
+      "/issues/CORE-3",
+    ]);
+    await within(cards).findByText("The other issue");
+    await within(cards).findByText("The third issue");
+  } finally {
+    getIssueSummary.mockRestore();
+    view.unmount();
   }
 });

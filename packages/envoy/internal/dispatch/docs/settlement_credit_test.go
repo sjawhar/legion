@@ -1089,7 +1089,7 @@ func creditOf(lastActor *model.Actor, authors ...model.Actor) *testCredit {
 }
 
 // appendCredited appends an update to artifactID through the store as a room's persistence does
-// (AppendUpdateWithCredit), with an in-flight credit for credited, or none when it is nil.
+// (AppendUpdatesWithCredit), with an in-flight credit for credited, or none when it is nil.
 func appendCredited(t *testing.T, service *Service, artifactID string, credited *testCredit) {
 	t.Helper()
 	appendCreditedTo(t, service, artifactID, credited, nil)
@@ -1121,7 +1121,7 @@ func appendCreditedTo(t *testing.T, service *Service, artifactID string, credite
 	}
 	doc := crdt.New()
 	doc.GetXmlFragment(fragmentName)
-	if _, err := service.persistence.AppendUpdateWithCredit(ctx, artifactID, crdt.EncodeStateAsUpdateV1(doc, nil), true, credit, nil); err != nil {
+	if _, err := service.persistence.AppendUpdatesWithCredit(ctx, artifactID, []BrowserUpdate{{Update: crdt.EncodeStateAsUpdateV1(doc, nil), ContentChanged: true, Credit: credit}}); err != nil {
 		t.Fatalf("append the update: %v", err)
 	}
 }

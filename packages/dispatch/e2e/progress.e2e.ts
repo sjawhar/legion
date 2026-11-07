@@ -9,7 +9,7 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("an issue shows its spec's task list and its children counted, on its page, in the list and on the board @phone", async ({
+test("an issue shows its spec's task list and its children counted, on its page, in the list and on the board", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -39,10 +39,7 @@ test("an issue shows its spec's task list and its children counted, on its page,
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
-    const isPhone = testInfo.project.name === "iphone";
-    if (!isPhone) {
-      await page.setViewportSize({ height: 900, width: 1280 });
-    }
+    await page.setViewportSize({ height: 900, width: 1280 });
     const shot = async (name: string) => {
       const path = testInfo.outputPath(`progress-${name}-${testInfo.project.name}.png`);
       await page.screenshot({ fullPage: true, path });

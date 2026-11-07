@@ -34,6 +34,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/stream"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
+	"github.com/sjawhar/legion/daemon/internal/testtmp"
 	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 )
 
@@ -412,8 +413,16 @@ func (r *idleWakeRig) boot() {
 	r.t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
+	// The log's writer is taken here, on the test's own goroutine, and not in the goroutine
+	// below. Taking it registers the cleanup that prints the log's tail, and cleanups run in the
+	// reverse of the order they were registered in: registered before r.stopDaemon below, the
+	// tail is printed after the daemon has stopped, so it carries the shutdown's own lines and it
+	// sees a failure the stop itself raised. Taken in the goroutine, it would usually be
+	// registered after r.stopDaemon and so run before it, printing a log that ends where the
+	// shutdown begins, or none at all when the stop is what failed.
+	logger := slog.New(slog.NewJSONHandler(io.MultiWriter(r.logs, r.logFile()), &slog.HandlerOptions{Level: slog.LevelDebug}))
 	go func() {
-		done <- run(ctx, r.cfg, Build{}, slog.New(slog.NewJSONHandler(io.MultiWriter(r.logs, r.logFile()), &slog.HandlerOptions{Level: slog.LevelDebug})), overrides{
+		done <- run(ctx, r.cfg, logger, overrides{
 			listen: heldListen, runtime: r.newRuntime, clock: stillClock{}, idleTick: idleRigTick,
 			workflowTokens: idleRigAppTokens{workflowTokenRecorder: &workflowTokenRecorder{}}, githubAPI: repositoriesGitHub(r.t),
 		})
@@ -429,19 +438,84 @@ func (r *idleWakeRig) boot() {
 		base: "http://127.0.0.1:" + strconv.Itoa(r.cfg.Port), stopped: true}
 }
 
-// logFile keeps a copy of the daemon's log beside the test, which a failure names.
+// logFile keeps a copy of the daemon's log beside the test, under the test's own temporary
+// directory, which Go removes when the test ends whether it passed or failed: a finished run
+// leaves no log behind. The file is still worth naming while the test runs, and the cleanup
+// closes it and, when the test failed, prints the end of it into the test's own output, which Go
+// shows for a failing test. That is where a failure's diagnosis is read now, the file itself
+// being gone by the time anyone looks. It is called on the test's own goroutine, because the
+// order its cleanup runs in is the order that call is made in (boot).
 func (r *idleWakeRig) logFile() io.Writer {
 	r.t.Helper()
 	if r.daemonLog == nil {
-		file, err := os.CreateTemp("", "lgdaemon-*.log")
+		// TempDir registers the directory's removal the first time it is called, and cleanups run
+		// in the reverse of the order they were registered in, so the cleanup below is registered
+		// after this call: it reads the file while the directory holding it is still there.
+		file, err := os.CreateTemp(r.t.TempDir(), "lgdaemon-*.log")
 		if err != nil {
 			r.t.Fatal(err)
 		}
-		r.t.Cleanup(func() { _ = file.Close() })
-		r.t.Logf("the daemon's log: %s", file.Name())
+		r.t.Cleanup(func() {
+			_ = file.Close()
+			if !r.t.Failed() {
+				return
+			}
+			tail, omitted, err := idleRigLogTail(file.Name())
+			switch {
+			case err != nil:
+				r.t.Logf("the daemon's log %s could not be read back: %v", file.Name(), err)
+			case tail == "":
+				r.t.Logf("the daemon's log %s is empty: the daemon wrote nothing to it", file.Name())
+			case omitted > 0:
+				r.t.Logf("the daemon's log, its last %d bytes, %d earlier bytes left out; the rig's own diagnosis prints the last 40 lines of this same log, which are the end of what follows:\n%s",
+					len(tail), omitted, tail)
+			default:
+				r.t.Logf("the daemon's log, whole, %d bytes:\n%s", len(tail), tail)
+			}
+		})
+		r.t.Logf("the daemon's log: %s, a file the run removes when the test ends; a test that fails prints its last %d bytes instead",
+			file.Name(), idleRigLogTailBytes)
 		r.daemonLog = file
 	}
 	return r.daemonLog
+}
+
+// idleRigLogTailBytes is how much of the daemon's log a failing test prints. The whole log of a
+// long run is a quarter of a megabyte, which nobody reads in CI output, while the last 32 KiB is
+// the stretch the failure happened in and is still several times the 40 lines diagnose prints of
+// the same log, so the two read as a wide window and the close one inside it.
+const idleRigLogTailBytes = 32 << 10
+
+// idleRigLogTail reads the last idleRigLogTailBytes of the named file, returning them and how
+// many bytes it left out before them. It starts after the first newline in that window, so the
+// text begins with a whole log line rather than half of one, and the count it returns says how
+// much of the log the reader is not being shown.
+func idleRigLogTail(name string) (tail string, omitted int64, err error) {
+	file, err := os.Open(name)
+	if err != nil {
+		return "", 0, err
+	}
+	defer func() { _ = file.Close() }()
+	size, err := file.Seek(0, io.SeekEnd)
+	if err != nil {
+		return "", 0, err
+	}
+	at := size - idleRigLogTailBytes
+	if at < 0 {
+		at = 0
+	}
+	window := make([]byte, size-at)
+	if _, err := file.ReadAt(window, at); err != nil {
+		return "", 0, err
+	}
+	text := string(window)
+	if at > 0 {
+		if newline := strings.IndexByte(text, '\n'); newline >= 0 {
+			at += int64(newline) + 1
+			text = text[newline+1:]
+		}
+	}
+	return text, at, nil
 }
 
 // stopDaemon stops the running daemon, if one runs, and waits for it.
@@ -492,14 +566,28 @@ func (r *idleWakeRig) newRuntime(ctx context.Context, listener *stream.Listener,
 	tools := r.toolsDir()
 	opts.Conns, opts.StreamURL, opts.Store = listener, address, st
 	opts.Tokens = idleRigTokens{}
-	opts.GitHubCredential = func(_ context.Context, role claim.Role, owner string) (ghconfig.Bundle, error) {
+	opts.GitHubCredential = func(_ context.Context, role claim.Role, repo ghrepo.Repository) (ghconfig.Bundle, error) {
 		rendered := ghconfig.Render("ghs_idle_rig", string(appauth.AppRoleFor(role)), time.Now().Add(time.Hour))
-		return ghconfig.Bundle{Default: owner, Owners: map[string]ghconfig.Rendered{owner: rendered}}, nil
+		owner := strings.ToLower(repo.Owner())
+		return ghconfig.Bundle{Default: owner, Dirs: map[string]ghconfig.Rendered{owner: rendered}}, nil
 	}
-	// The owner set the pods' gh directories are built from, which sandbox.New now requires
+	// The controller's own bundle, which its launch and its refresh both ask for by owner
+	// (sandbox.Options.ControllerCredential, appauth.ControllerCredential): the review App's, over
+	// liveRepo's owner, the rig's one.
+	opts.ControllerCredential = func(_ context.Context, defaultOwner string) (ghconfig.Bundle, error) {
+		rendered := ghconfig.Render("ghs_idle_rig", string(appauth.Review), time.Now().Add(time.Hour))
+		owner := strings.Split(liveRepo, "/")[0]
+		if defaultOwner != "" {
+			owner = defaultOwner
+		}
+		return ghconfig.Bundle{Default: owner, Dirs: map[string]ghconfig.Rendered{owner: rendered}}, nil
+	}
+	// The directories the pods' gh is built from, which sandbox.New now requires
 	// (checkSupervision) and the runtime reads a running pod's gh projection against: the rig's
-	// issues are all on liveRepo, so its owner is the whole set.
-	opts.GitHubOwners = func() []string { return []string{strings.Split(liveRepo, "/")[0]} }
+	// issues are all on liveRepo, so its owner's directory is the whole set.
+	opts.GitHubDirs = func(ghrepo.Repository, []appauth.AppRole) []string {
+		return []string{strings.Split(liveRepo, "/")[0]}
+	}
 	opts.Mapped = func() []ghrepo.Repository { return nil }
 	opts.Tools.Legion = idleRigLegionTool(r.t, tools)
 	opts.Agent = idleRigAgentTool(r.t, tools)
@@ -514,18 +602,14 @@ func (r *idleWakeRig) newRuntime(ctx context.Context, listener *stream.Listener,
 	return rt, nil
 }
 
-// toolsDir holds the rig's `legion` and `omp` stand-ins, made once for the test.
+// toolsDir holds the rig's `legion` and `omp` stand-ins, made once for the test. The longest
+// path written under it is the `legion` stand-in (idleRigLegionTool).
 func (r *idleWakeRig) toolsDir() string {
 	r.t.Helper()
 	r.stopMu.Lock()
 	defer r.stopMu.Unlock()
 	if r.toolsPath == "" {
-		dir, err := os.MkdirTemp("", "lgt")
-		if err != nil {
-			r.t.Fatal(err)
-		}
-		r.t.Cleanup(func() { _ = os.RemoveAll(dir) })
-		r.toolsPath = dir
+		r.toolsPath = testtmp.Dir(r.t, "legion")
 	}
 	return r.toolsPath
 }
@@ -538,8 +622,8 @@ func (r *idleWakeRig) toolsDir() string {
 // (appauth.GitIdentity).
 type idleRigAppTokens struct{ *workflowTokenRecorder }
 
-func (t idleRigAppTokens) Token(ctx context.Context, role appauth.AppRole, owner string) (appauth.Lease, error) {
-	lease, err := t.workflowTokenRecorder.Token(ctx, role, owner)
+func (t idleRigAppTokens) Token(ctx context.Context, role appauth.AppRole, repo ghrepo.Repository) (appauth.Lease, error) {
+	lease, err := t.workflowTokenRecorder.Token(ctx, role, repo)
 	if err != nil {
 		return lease, err
 	}
@@ -551,7 +635,9 @@ func (t idleRigAppTokens) Token(ctx context.Context, role appauth.AppRole, owner
 // repository needs none, and no pod of this rig clones anything.
 type idleRigTokens struct{}
 
-func (idleRigTokens) Token(context.Context, string) (string, error) { return "idle-rig-provision", nil }
+func (idleRigTokens) Token(context.Context, ghrepo.Repository) (string, error) {
+	return "idle-rig-provision", nil
+}
 
 // launch waits until the issue's pod runs its role, registered, ready and having told the daemon
 // it runs no background work: the state the idle rule releases. The daemon starts the implementer

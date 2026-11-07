@@ -40,10 +40,11 @@ func statusHarness(t *testing.T) (*harness, []intake.Handler, *statusRecorder) {
 	h := newHarness(t)
 	records := record.NewStore()
 	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
-	engine := workflow.New(records, workflow.Config{Project: testDispatchProject, Repositories: testRepositories, DesignGate: config.DesignGateRootIssues}, quiet)
+	engine := workflow.New(records, workflow.Config{Project: testDispatchProject, Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps()}, quiet)
 	handlers := []intake.Handler{blockers.NewMirror(records, testDispatchProject), engine, admit.New(records, engine, 2, testDispatchProject, quiet)}
 	statuses := &statusRecorder{}
 	h.handler = NewServer("127.0.0.1", 8437, Options{
+		Steps:      config.DesignGateRootIssues.Steps(),
 		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, DispatchProject: testDispatchProject,
 		OperatorToken: testOperatorToken, Controller: h.store, Grants: credential.New(nil), Pool: h.store.Pool(), Record: records,
 		Handlers: handlers, Dispatch: statuses,
@@ -64,6 +65,7 @@ func statusHarness(t *testing.T) (*harness, []intake.Handler, *statusRecorder) {
 	}); err != nil {
 		t.Fatalf("seed the live tree: %v", err)
 	}
+	h.openTree(t, testDispatchProject, statusRoot)
 	statuses.issues = map[string]dispatch.Issue{
 		statusRoot:  {Key: statusRoot, ResolvedRepo: "acme/widgets", Title: statusRoot, Status: "in_progress", Rank: "A", Labels: []string{"legion"}, HandedOver: true, LastSeq: 3},
 		statusChild: {Key: statusChild, ResolvedRepo: "acme/widgets", Title: "the child", Status: "in_progress", Parent: &root, Rank: "B", LastSeq: 4},
@@ -79,12 +81,17 @@ func statusEcho(seq int64, status string) intake.DispatchIssue {
 		ResolvedRepo: "acme/widgets", DaemonActor: true, ClaimKnown: true}
 }
 
-// superviseRows counts the child's queued supervise rows of op for role.
+// superviseRows counts the child's queued supervise rows of op for role. A start of a phase
+// worker is two rows now (workflow.StartOrOwe): the relaunch, which carries no task and brings
+// the role's session back at once, and the row that carries the task and waits for the issue's
+// admission slot. Only the second is the start these tests count, as every other assertion
+// about a start in this tree counts it.
 func superviseRows(t *testing.T, h *harness, op string, role claim.Role) int {
 	t.Helper()
 	var rows int
 	if err := h.store.Pool().QueryRow(context.Background(),
-		`select count(*) from outbox where issue = $1 and kind = 'supervise' and payload->>'op' = $2 and payload->>'role' = $3`,
+		`select count(*) from outbox where issue = $1 and kind = 'supervise' and payload->>'op' = $2 and payload->>'role' = $3
+			and (payload->>'op' <> 'start' or coalesce(payload->>'task', '') <> '')`,
 		statusChild, op, string(role)).Scan(&rows); err != nil {
 		t.Fatalf("count the %s rows of %s: %v", op, role, err)
 	}

@@ -79,8 +79,9 @@ type Config struct {
 	// no person ever types a code.
 	MachineLoginURL string
 	// BROKER_API_ACCOUNTS: the accounts that call the broker's named-caller routes — the
-	// approval routes Dispatch's server calls on a person's behalf, and the introspection route
-	// a resource server reads one of the broker's access tokens back through —
+	// approval routes Dispatch's server calls on a person's behalf, the introspection route
+	// a resource server reads one of the broker's access tokens back through, and the grant-log
+	// route a quarterly access review reads the broker's audit trail through —
 	// whitespace-separated <caller>=<account> entries. An account is a Kubernetes service
 	// account, written as the subject a projected token carries
 	// (dispatch=system:serviceaccount:example-ns:example-dispatch), or a Google service
@@ -102,9 +103,14 @@ type Config struct {
 	// BROKER_VM_SERVICES, since a token from one proves nothing about which machine is asking.
 	//
 	// The caller's name decides what the account may do, and the broker
-	// knows two: dispatch reaches every one of those routes, the ten Dispatch's server relays a
-	// person's decisions and reads through as well as introspection, and listener reaches
-	// introspection alone, since the Envoy listener reads a token back and relays no decision. A
+	// knows three: dispatch reaches every one of those routes, the ten Dispatch's server relays
+	// a person's decisions and reads through as well as introspection; listener reaches
+	// introspection alone, since the Envoy listener reads a token back and relays no decision;
+	// and access-review reaches GET /v1/grant-log alone, which answers every audit row of a
+	// closed period, so whoever runs the quarterly review reads the whole trail and can decide
+	// nothing, release no secret value and write no row. Dispatch's server is deliberately not
+	// given that last one: it already holds approval authority over every person's secrets, and
+	// the review is a reader, so the two stay separate names and separate accounts. A
 	// name the broker does not know refuses the boot naming it and the names it knows, so a typo
 	// never quietly produces a caller that reaches nothing, and a new caller is a deliberate
 	// edit to the broker's own table (api.AccountFor). A listed caller reaching a route its name
@@ -182,6 +188,37 @@ type Config struct {
 	// approval recorded for that name in its grant. Another secret with kind=azure-login,
 	// the named secret retagged to agent tier, or an automatic grant releases no token.
 	AzureLoginSecret string
+	// BROKER_SERVICE_ACCOUNT_SECRETS: the one Google service account each google-service-account
+	// agent secret mints a token for, whitespace-separated <SECRET NAME>=<account email>
+	// entries, such as GCP_ADMIN=gcp-admin@example-project.iam.gserviceaccount.com. The name is
+	// the uppercase agent-secret name a session asks for (DEV_ADITYA, GCP_ADMIN), not that
+	// secret's store id or its slug, and each secret is named at most once; the account is a
+	// user-managed Google service account, <account id>@<project id>.iam.gserviceaccount.com in
+	// lowercase, held to secrets.ValidServiceAccountEmail, the minter's own rule, so no binding
+	// can ever name an address the minter would refuse. A Google-managed service agent is
+	// refused here as it is in BROKER_VM_SERVICES: Google's own services run as those accounts
+	// and the broker must not be able to impersonate one. One account may be bound to two
+	// secrets, since only the secret's name is the key.
+	//
+	// This setting, and not a secret's stored value, is what chooses the account a
+	// google-service-account secret mints for (secrets.GoogleServiceAccount.Accounts, which the
+	// broker fills from it): the broker holds roles/iam.serviceAccountTokenCreator on every
+	// account bound here, so a stored value alone choosing the account would let whoever may
+	// create an agent secret store another person's service account in a secret of their own,
+	// list themselves among its requesters and mint that person's token. A mint happens only
+	// where this binding and the stored value name the same account; either missing or the two
+	// disagreeing is refused before any call reaches Google.
+	//
+	// Unset, no secret is bound and every google-service-account mint is refused with
+	// secrets.ErrMintNotBound, logged class=binding. That is the window a deployment is in
+	// between this build and the apply that writes its bindings, and it is deliberately the
+	// safe side of the change: a broker that went on minting on the stored value alone until
+	// the setting arrived is the very thing the setting exists to stop. Nothing else needs it:
+	// a broker with no binding still boots and still serves every other kind. The policy loader
+	// reads it as well (policy.Loader.ServiceAccounts), for one rule — a secret bound to a
+	// dev-<name> account is one person's own, so it may list no registered service among its
+	// requesters.
+	ServiceAccountSecrets map[string]string
 	// BROKER_SERVICES: the registered services, whitespace-separated name=<service account>
 	// entries, such as legion-daemon=system:serviceaccount:legion:legion-worker. A name (lowercase
 	// letters, digits and hyphens, at most 64, not shared) is what a secret's owner tag may name; the
@@ -411,7 +448,7 @@ const noRulesFile = "the broker reads each secret's owner and tier from the secr
 const noGrantCap = "a request's --ttl chooses a shorter grant lifetime, otherwise its grant lasts 12 hours, or until the requesting session ends for a secret tagged default-grant=session"
 
 // noMintTargets is why BROKER_MINT_TARGETS is gone: each secret's kind tag names its minter.
-const noMintTargets = "the broker no longer mints service account tokens; a secret's kind tag selects what it mints"
+const noMintTargets = "the broker no longer reads one list of mint targets; each secret's kind tag names the minter it is served by"
 
 // removedVars are environment variables the broker no longer reads. A stale deployment still
 // setting one must fail loudly rather than silently running on configuration that means nothing
@@ -495,6 +532,52 @@ func bindOnce(seen map[string]string, setting, account, service string) error {
 	}
 	seen[account] = service
 	return nil
+}
+
+// parseServiceAccountSecrets reads setting's whitespace-separated <SECRET NAME>=<account email>
+// entries, the deployment's binding of each google-service-account agent secret to the one Google
+// service account the broker may mint a token for it, and answers them keyed by secret name, the
+// map secrets.GoogleServiceAccount.Accounts and policy.Loader.ServiceAccounts are both filled
+// from. Its grammar is its own and not parseServiceAccounts' <service>=<ServiceAccount subject>:
+// the name is an agent secret's, held to policy.NameToSlug exactly as BROKER_AZURE_LOGIN_SECRET
+// is in Load, and the value is a Google account address, held to
+// secrets.ValidServiceAccountEmail, the rule the minter itself applies, so a binding can never
+// name an address the minter would refuse and so turn every mint of that secret into
+// ErrMintNotBound at release time, where only the deployment could fix it.
+//
+// It refuses, naming setting and the whole entry text as the other parsers' refusals do: an
+// entry not of that form; a name that is no agent-secret name, quoting policy.NameToSlug's own
+// refusal; an account that is not a user-managed service account's address; a Google-managed
+// service agent (googleServiceAgentPattern), refused as it is for BROKER_VM_SERVICES, since
+// Google's own services run as those accounts and the broker must not be able to impersonate
+// one; and one secret named twice, since each secret is bound to one account. One account bound
+// to two secrets is allowed, and stays allowed: two secrets may name one account, and only the
+// secret name is the key. No entries answer nil, as an unset setting does.
+func parseServiceAccountSecrets(setting, value string) (map[string]string, error) {
+	var bindings map[string]string
+	for _, text := range strings.Fields(value) {
+		name, account, ok := strings.Cut(text, "=")
+		if !ok {
+			return nil, fmt.Errorf("%s must be <SECRET NAME>=<account email> entries, such as GCP_ADMIN=gcp-admin@example-project.iam.gserviceaccount.com, got %q", setting, text)
+		}
+		if _, err := policy.NameToSlug(name); err != nil {
+			return nil, fmt.Errorf("%s names the secret %q, which is %w, got %q: write the uppercase name a session asks for, such as GCP_ADMIN, not the secret's store id or its slug", setting, name, err, text)
+		}
+		if !secrets.ValidServiceAccountEmail(account) {
+			return nil, fmt.Errorf("%s must bind each secret to a user-managed Google service account, <account id>@<project id>.iam.gserviceaccount.com in lowercase, which is the only address the minter impersonates, got %q", setting, text)
+		}
+		if googleServiceAgentPattern.MatchString(account) {
+			return nil, fmt.Errorf("%s names a Google-managed service agent, got %q: Google's own services run as it and the broker must not be able to impersonate one; bind the secret to a user-managed account of your own", setting, text)
+		}
+		if bound, twice := bindings[name]; twice {
+			return nil, fmt.Errorf("%s names the secret %s twice, bound already to %s, got %q; each secret is bound to one account, so name it once", setting, name, bound, text)
+		}
+		if bindings == nil {
+			bindings = map[string]string{}
+		}
+		bindings[name] = account
+	}
+	return bindings, nil
 }
 
 // googleIDPart is the form Google gives both a service account's ID and a project's ID: a
@@ -987,6 +1070,9 @@ func Load(getenv func(string) string) (Config, error) {
 			cfg.ServiceLogins = map[string]string{}
 		}
 		cfg.ServiceLogins[entry.subject] = entry.service
+	}
+	if cfg.ServiceAccountSecrets, err = parseServiceAccountSecrets("BROKER_SERVICE_ACCOUNT_SECRETS", getenv("BROKER_SERVICE_ACCOUNT_SECRETS")); err != nil {
+		return Config{}, err
 	}
 	cfg.SignInDeviceAudience = strings.TrimSpace(getenv("BROKER_SIGNIN_DEVICE_AUDIENCE"))
 	if cfg.GoogleOIDCAudience == "" {

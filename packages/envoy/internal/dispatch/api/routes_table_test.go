@@ -2,10 +2,12 @@ package api
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"slices"
 	"sort"
 	"strings"
@@ -19,6 +21,43 @@ import (
 type routeIndex struct {
 	Routes []routeIndexEntry `json:"routes"`
 	Docs   string            `json:"docs"`
+}
+
+// routeIndexGolden is the committed index of the table: one route per line, sorted by path then
+// method, as `METHOD path auth`. It is what catches a route added or removed by accident, and
+// what a hand-kept count could not do — two branches that each add a route are each wrong about
+// a count, where this file merges into the union of the lines they add. Write it again with
+// `go test ./internal/dispatch/api -run TestRouteIndexLists -update`.
+const routeIndexGolden = "testdata/routes.txt"
+
+// routeIndexLines renders the table as routeIndexGolden holds it: the rows sorted by path, then
+// method, and rendered after that, so two methods of one path with different auth classes are
+// still ordered by their methods. Descriptions are left out: they are prose that changes with
+// every wording pass, and the test below already holds every row to having one.
+func routeIndexLines(routes []apiRoute) string {
+	sorted := slices.Clone(routes)
+	slices.SortFunc(sorted, func(left, right apiRoute) int {
+		return cmp.Or(strings.Compare(left.Pattern, right.Pattern), strings.Compare(left.Method, right.Method))
+	})
+	lines := make([]string, 0, len(sorted))
+	for _, route := range sorted {
+		lines = append(lines, route.Method+" "+route.Pattern+" "+string(route.Auth))
+	}
+	return strings.Join(lines, "\n") + "\n"
+}
+
+// The rendered index's own order, which the committed file can prove only for the pairs the
+// table happens to hold: two methods of one path whose auth classes sort the other way round are
+// ordered by their methods, not by their auth.
+func TestRouteIndexLinesOrderTwoMethodsOfOnePathByMethod(t *testing.T) {
+	got := routeIndexLines([]apiRoute{
+		{routeRow: routeRow{Method: http.MethodGet, Pattern: "/api/v1/things/{id}", Auth: authAny}},
+		{routeRow: routeRow{Method: http.MethodDelete, Pattern: "/api/v1/things/{id}", Auth: authPublic}},
+	})
+	want := "DELETE /api/v1/things/{id} public\nGET /api/v1/things/{id} any\n"
+	if got != want {
+		t.Fatalf("routeIndexLines = %q, want %q", got, want)
+	}
 }
 
 func TestRouteIndexListsEveryRouteSortedByPathThenMethod(t *testing.T) {
@@ -59,6 +98,37 @@ func TestRouteIndexListsEveryRouteSortedByPathThenMethod(t *testing.T) {
 	}
 	if len(index.Routes) != len((&server{}).routes()) {
 		t.Fatalf("index lists %d routes, table has %d", len(index.Routes), len((&server{}).routes()))
+	}
+
+	// The table against the committed index. A route added, removed, or given another auth class
+	// reds this test until testdata/routes.txt is written again, deliberately, with -update.
+	got := routeIndexLines((&server{}).routes())
+	if *updateFixtures {
+		if err := os.WriteFile(routeIndexGolden, []byte(got), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("wrote %s", routeIndexGolden)
+	}
+	want, err := os.ReadFile(routeIndexGolden)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != string(want) {
+		committed := strings.Split(strings.TrimSuffix(string(want), "\n"), "\n")
+		table := strings.Split(strings.TrimSuffix(got, "\n"), "\n")
+		var added, removed []string
+		for _, line := range table {
+			if !slices.Contains(committed, line) {
+				added = append(added, line)
+			}
+		}
+		for _, line := range committed {
+			if !slices.Contains(table, line) {
+				removed = append(removed, line)
+			}
+		}
+		t.Errorf("the table and %s differ.\nthe table has, and the file does not: %v\nthe file has, and the table does not: %v\nRun the test again with -update when the change is deliberate.",
+			routeIndexGolden, added, removed)
 	}
 }
 
@@ -106,14 +176,20 @@ func TestWriteRouteIndexCarriesEveryRouteTheTableHas(t *testing.T) {
 	}
 }
 
-// The table is the registration: every row is mounted, every row is described, and the
-// count only moves when a route is deliberately added or removed.
+// The table is the registration: every row is mounted, every row is described, and no row is
+// listed twice.
+//
+// No count is pinned. A count is one number two branches cannot both be right about: a branch
+// that adds a route updates it, and the base that added one first then makes that branch's
+// merge red for a reason that is not the branch's change
+// (docs/solutions/github/a-base-gate-arrives-in-the-merge-and-the-job-your-branch-alone-adds-is-the-line-it-refuses-pr2517.md:63-67
+// records that failure: "routes() has 147 rows, want 146: the base had added a route").
+// What catches a route added or removed by accident is the committed index
+// TestRouteIndexListsEveryRouteSortedByPathThenMethod compares the table against
+// (testdata/routes.txt), which two branches that each add a route merge into the union of their
+// two lines.
 func TestRoutesTablePinsEveryRegisteredRoute(t *testing.T) {
-	const registeredRoutes = 163
 	routes := (&server{}).routes()
-	if len(routes) != registeredRoutes {
-		t.Fatalf("routes() has %d rows, want %d (update the pin when adding a route)", len(routes), registeredRoutes)
-	}
 	seen := make(map[string]struct{}, len(routes))
 	for _, route := range routes {
 		key := route.Method + " " + route.Pattern
@@ -133,9 +209,118 @@ func TestRoutesTablePinsEveryRegisteredRoute(t *testing.T) {
 			t.Fatalf("route %q has auth %q", key, route.Auth)
 		}
 	}
-	if got := len((&server{deps: Deps{TestHooksEnabled: true}}).routes()); got != registeredRoutes+12 {
-		t.Fatalf("test hooks add twelve routes: got %d, want %d", got, registeredRoutes+12)
+	if got := len((&server{deps: Deps{TestHooksEnabled: true}}).routes()); got != len(routes)+12 {
+		t.Fatalf("test hooks add twelve routes: got %d, want %d", got, len(routes)+12)
 	}
+}
+
+// TestEveryIDRouteIsNamed: every route whose pattern carries {id} or {block_id} says what that
+// id names — a kind whose prefix is resolved into it and the 404 that route answers for an id
+// it does not hold, or a reason it resolves none — and every name in the table is a route the
+// server serves. The sub-tests are the negative control, as TestEveryMutatingRouteIsClassed's
+// are: the same walk over a fixture holding a route the table does not name, one that resolves
+// nothing and says why not at once, and one that resolves an id without naming that 404, fails
+// on each.
+func TestEveryIDRouteIsNamed(t *testing.T) {
+	routes := (&server{deps: Deps{TestHooksEnabled: true}}).routes()
+	if undecided := undecidedIDRoutes(routes); len(undecided) > 0 {
+		t.Fatalf("%d route(s) whose id the prefix layer cannot decide:\n%s", len(undecided), strings.Join(undecided, "\n"))
+	}
+	served := make(map[string]bool, len(routes))
+	for _, route := range routes {
+		served[route.Method+" "+route.Pattern] = true
+	}
+	for name := range idRoutes {
+		if !served[name] {
+			t.Errorf("idRoutes names %q, which the table does not serve", name)
+		}
+		if !hasIDWildcard(name) {
+			t.Errorf("idRoutes names %q, whose pattern carries no id", name)
+		}
+	}
+
+	t.Run("a route the table does not name fails this walk", func(t *testing.T) {
+		undecided := undecidedIDRoutes([]apiRoute{
+			{routeRow: routeRow{Method: http.MethodGet, Pattern: "/api/v1/widgets", Auth: authAny}},
+			{routeRow: routeRow{Method: http.MethodGet, Pattern: "/api/v1/widgets/{id}", Auth: authAny}},
+		})
+		if len(undecided) != 1 || !strings.HasPrefix(undecided[0], "GET /api/v1/widgets/{id}:") {
+			t.Fatalf("the walk answered %q, want the unnamed id route named and the other left alone", undecided)
+		}
+	})
+
+	t.Run("a row that resolves nothing and gives no reason fails it too", func(t *testing.T) {
+		withIDRoute(t, "GET /api/v1/widgets/{block_id}", idRoute{})
+		undecided := undecidedIDRoutes([]apiRoute{
+			{routeRow: routeRow{Method: http.MethodGet, Pattern: "/api/v1/widgets/{block_id}", Auth: authAny}},
+		})
+		if len(undecided) != 1 || !strings.Contains(undecided[0], "gives no reason") {
+			t.Fatalf("the walk answered %q, want the reasonless row named", undecided)
+		}
+	})
+
+	t.Run("a row that resolves a kind and gives a reason fails it too", func(t *testing.T) {
+		withIDRoute(t, "GET /api/v1/widgets/{id}", idRoute{Kind: "ask", NotFound: "NOT_FOUND", Reason: "and also not"})
+		undecided := undecidedIDRoutes([]apiRoute{
+			{routeRow: routeRow{Method: http.MethodGet, Pattern: "/api/v1/widgets/{id}", Auth: authAny}},
+		})
+		if len(undecided) != 1 || !strings.Contains(undecided[0], "a reason not to") {
+			t.Fatalf("the walk answered %q, want the contradictory row named", undecided)
+		}
+	})
+
+	t.Run("a row that resolves an id and names no 404 of its own fails it too", func(t *testing.T) {
+		withIDRoute(t, "GET /api/v1/widgets/{id}", idRoute{Kind: "ask"})
+		undecided := undecidedIDRoutes([]apiRoute{
+			{routeRow: routeRow{Method: http.MethodGet, Pattern: "/api/v1/widgets/{id}", Auth: authAny}},
+		})
+		if len(undecided) != 1 || !strings.Contains(undecided[0], "what 404 the route answers") {
+			t.Fatalf("the walk answered %q, want the row with no not-found answer named", undecided)
+		}
+	})
+
+	t.Run("a row that resolves a block and names no 404 for it fails it too", func(t *testing.T) {
+		withIDRoute(t, "GET /api/v1/widgets/{id}/blocks/{block_id}",
+			idRoute{Kind: "artifact", NotFound: "ARTIFACT_NOT_FOUND", Blocks: true})
+		undecided := undecidedIDRoutes([]apiRoute{
+			{routeRow: routeRow{Method: http.MethodGet, Pattern: "/api/v1/widgets/{id}/blocks/{block_id}", Auth: authAny}},
+		})
+		if len(undecided) != 1 || !strings.Contains(undecided[0], "the document does not hold") {
+			t.Fatalf("the walk answered %q, want the row with no block not-found answer named", undecided)
+		}
+	})
+
+	t.Run("every row names a kind the prefix resolver reads and a 404 that is one", func(t *testing.T) {
+		for name, entry := range idRoutes {
+			switch entry.Kind {
+			case "", "ask", "comment", "message", "artifact":
+			default:
+				t.Errorf("idRoutes gives %q the kind %q, which refs.ResolvePrefix does not read", name, entry.Kind)
+			}
+			if entry.WithinIssue && !strings.Contains(name, "{key}") {
+				t.Errorf("idRoutes looks within the issue of %q, whose pattern names none", name)
+			}
+			if entry.Blocks && !strings.Contains(name, "{block_id}") {
+				t.Errorf("idRoutes reads a block of %q, whose pattern carries no {block_id}", name)
+			}
+			if strings.Contains(name, "{block_id}") && !entry.Blocks {
+				t.Errorf("idRoutes leaves the {block_id} of %q unresolved", name)
+			}
+			for column, code := range map[string]string{"NotFound": entry.NotFound, "BlockNotFound": entry.BlockNotFound} {
+				if code != "" && code != notFoundNone && !strings.HasSuffix(code, "NOT_FOUND") {
+					t.Errorf("idRoutes gives %q the %s code %q, which is no not-found code", name, column, code)
+				}
+			}
+		}
+	})
+}
+
+// withIDRoute names one route in idRoutes for the length of a test, so a negative control can
+// walk a row the server does not serve without leaving it behind.
+func withIDRoute(t *testing.T, name string, entry idRoute) {
+	t.Helper()
+	idRoutes[name] = entry
+	t.Cleanup(func() { delete(idRoutes, name) })
 }
 
 // routeProbePath fills a mux pattern's wildcards with well-formed placeholders so the request
@@ -199,11 +384,20 @@ func authRefusal(response *httptest.ResponseRecorder) (bool, string) {
 	return false, ""
 }
 
-// personalTokenHolding mints a personal agent token on the test store holding exactly the scopes
-// named, and answers its plaintext: the credential a scoped row admits. The row is written
-// straight to the table rather than minted through POST /api/v1/me/agent-tokens, which is itself
-// one of the rows under test and needs a credential of this kind to call.
+// personalTokenHolding mints a personal agent token of alice's on the test store holding exactly
+// the scopes named, and answers its plaintext: the credential a scoped row admits.
 func personalTokenHolding(t *testing.T, database *store.Store, scopes ...string) string {
+	t.Helper()
+	return personalTokenOwnedBy(t, database, "alice", scopes...)
+}
+
+// personalTokenOwnedBy mints one person's personal agent token holding exactly the scopes named.
+// The row is written straight to the table rather than minted through POST
+// /api/v1/me/agent-tokens, which is itself one of the rows under test and needs a credential of
+// this kind to call. The owner is a parameter because two owners' tokens are what tells a route
+// comparing whole identities from one comparing kind and id alone: every personal token resolves
+// with an empty id (agent_tokens.go), so only the owner tells them apart.
+func personalTokenOwnedBy(t *testing.T, database *store.Store, owner string, scopes ...string) string {
 	t.Helper()
 	plaintext, hash, err := newAgentToken()
 	if err != nil {
@@ -217,7 +411,7 @@ func personalTokenHolding(t *testing.T, database *store.Store, scopes ...string)
 	if _, err := database.Pool.Exec(context.Background(), `
 		insert into agent_tokens (owner, name, token_hash, prefix, scopes)
 		values ($1, $2, $3, $4, $5)
-	`, "alice", "probe", hash[:], plaintext[len("dsp_"):len("dsp_")+agentTokenPrefixLength], scopes); err != nil {
+	`, owner, "probe", hash[:], plaintext[len("dsp_"):len("dsp_")+agentTokenPrefixLength], scopes); err != nil {
 		t.Fatalf("insert a personal token: %v", err)
 	}
 	return plaintext
@@ -319,6 +513,11 @@ func TestEveryRouteThatWasABrowsersAloneNamesThePersonScope(t *testing.T) {
 		"GET /api/v1/me/answers",
 		"GET /api/v1/me/replies",
 		"PUT /api/v1/me/threads/{id}/read",
+		// The Inbox's Mark all read is no older row either: it writes the person's own read
+		// marks, so it is theirs as the two rows above it are.
+		"POST /api/v1/me/inbox/read",
+		// The Dismiss beside it writes the person's own dismissal marks, so it is theirs too.
+		"POST /api/v1/me/inbox/dismiss",
 		"GET /api/v1/agents/{session_id}/messages",
 		"POST /api/v1/agents/{session_id}/messages",
 		"POST /api/v1/broadcasts",
