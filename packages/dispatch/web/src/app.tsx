@@ -7,7 +7,9 @@ import { useEventFeed } from "./api/event-feed";
 import { useLiveSocketPill } from "./api/live-socket";
 import { userAgentStateQuery, whoAmIQuery } from "./api/queries";
 import type { AuthenticatedUser } from "./api/types";
+import { useLiveViews } from "./features/agent-view/live-views";
 import { LiveViewRoute, MountedLiveViews } from "./features/agent-view/MountedLiveViews";
+import { legacyPinnedIds, useAgentPinWrite, usePinnedAgents } from "./features/agents/pins";
 import { totalUnreadReplies, unreadRepliesLabel } from "./features/agents/unread";
 import { MachineLoginRoute } from "./features/credentials/MachineLoginRoute";
 import { TextAskBlockCard } from "./features/doc/AskBlockCard";
@@ -60,7 +62,7 @@ import {
 } from "./features/shell/useDialog";
 import { useDocumentTitle } from "./features/shell/useDocumentTitle";
 import { useKeyboardFit } from "./features/shell/useKeyboardFit";
-import { useUserPreference } from "./features/shell/userPreference";
+import { legacyPinnedAgentsKey, useUserPreference } from "./features/shell/userPreference";
 import { Sidebar } from "./features/sidebar/Sidebar";
 import "./features/writes/kinds";
 import { KeptWrites } from "./features/writes/KeptWrites";
@@ -454,6 +456,26 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
   // mounts that view and the one the person left (`MountedLiveViews`, below `<Routes>`), so it
   // is the one thing about the live view the router still decides.
   const frontLiveView = matchPath(AGENT_LIVE_PATH, location.pathname)?.params.sessionId ?? null;
+  // The person's pins, which the shell owns rather than the rail: the registry keeps a sleeping
+  // pinned view and discards a sleeping unpinned one (`live-views.ts`, D8), and the rail is not
+  // on the page while the sidebar is collapsed or its sheet is closed.
+  const liveViews = useLiveViews();
+  const pinnedAgents = usePinnedAgents();
+  useEffect(() => {
+    liveViews.setPinned(pinnedAgents);
+  }, [liveViews, pinnedAgents]);
+  // The pins were this browser's until INFRA-812 made them the person's. At the first load
+  // after the change each id the old key holds is written as a pin and the key is removed, so
+  // this runs once per browser and Dispatch ends up holding the union of what each of the
+  // person's browsers had kept.
+  const writePin = useAgentPinWrite();
+  useEffect(() => {
+    const key = legacyPinnedAgentsKey(user.login);
+    const kept = window.localStorage.getItem(key);
+    if (kept === null) return;
+    window.localStorage.removeItem(key);
+    for (const sessionId of legacyPinnedIds(kept)) writePin(sessionId, true);
+  }, [user.login, writePin]);
   const connection = useLiveSocketPill();
   const needsYouCount = useNeedsYouCount();
   const unreadReplies = totalUnreadReplies(useQuery(userAgentStateQuery()).data);

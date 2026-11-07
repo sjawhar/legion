@@ -1,11 +1,13 @@
 import { afterEach, expect, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 import { api } from "../api/client";
-import type { InboxRow, IssueDetails } from "../api/types";
+import type { Agent, InboxRow, IssueDetails } from "../api/types";
 import { AuthGate } from "../app";
+import { liveViewsOf } from "../features/agent-view/live-views";
+import { answerAgentStates } from "./send-answers";
 
 const issue: IssueDetails = {
   route_status: null,
@@ -58,6 +60,7 @@ const originalApi = {
   getIssue: api.getIssue,
   getMyAgentState: api.getMyAgentState,
   getMyState: api.getMyState,
+  listAgents: api.listAgents,
   listComments: api.listComments,
   listIssueAsks: api.listIssueAsks,
   listIssues: api.listIssues,
@@ -81,7 +84,12 @@ function setViewport(width: number): void {
     }) as MediaQueryList) as typeof window.matchMedia;
 }
 
-function renderShellAt(width: number, inbox: InboxRow[] = [], unreadThreads = 0): void {
+function renderShellAt(
+  width: number,
+  inbox: InboxRow[] = [],
+  unreadThreads = 0,
+  listedAgents: Agent[] = []
+): QueryClient {
   setViewport(width);
   api.whoAmI = async () => ({ event_head: "0", kind: "user", login: "alice" });
   api.listMyReplies = async (query) => ({
@@ -124,20 +132,19 @@ function renderShellAt(width: number, inbox: InboxRow[] = [], unreadThreads = 0)
   ];
   api.listIssueAsks = async () => [];
   api.listComments = async () => [];
+  api.listAgents = async () => listedAgents;
 
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
+  });
   render(
-    <QueryClientProvider
-      client={
-        new QueryClient({
-          defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
-        })
-      }
-    >
+    <QueryClientProvider client={queryClient}>
       <MemoryRouter initialEntries={["/issues/CORE-1/children"]}>
         <AuthGate />
       </MemoryRouter>
     </QueryClientProvider>
   );
+  return queryClient;
 }
 
 afterEach(() => {
@@ -259,4 +266,96 @@ test("the compact header shows no Replies link while nothing is unread", async (
     expect(screen.queryByRole("button", { name: "Open navigation" })).not.toBeNull()
   );
   expect(screen.queryByRole("link", { name: /^Replies/ })).toBeNull();
+});
+
+/** A session Dispatch lists, for the rail's pinned rows. */
+function agent(sessionId: string, title: string): Agent {
+  return {
+    capabilities: ["aside"],
+    dir: "/workspaces/legion",
+    host: "build-host",
+    last_activity: null,
+    last_seen: Date.now(),
+    machine_id: "build-host",
+    open_asks: 0,
+    roles: [],
+    session_id: sessionId,
+    title,
+  };
+}
+
+const PINS_KEY = "dispatch.agents.pinned:alice";
+
+// The pins were this browser's until INFRA-812 made them the person's. The shell writes each id
+// the old key holds as a pin and removes the key, so the person's pins survive the change
+// without being pinned again by hand, and each browser migrates only its own list.
+test("the shell writes the browser's old pins to Dispatch once and forgets the old key", async () => {
+  const putAgentState = answerAgentStates().mockImplementation(async (_session, input) =>
+    input.pinned === true ? { pinned_at: "2026-09-14T12:00:00Z" } : {}
+  );
+  window.localStorage.setItem(PINS_KEY, JSON.stringify(["planner-session", "reviewer-session"]));
+  api.getMyAgentState = async () => ({});
+
+  try {
+    renderShellAt(1280);
+    await waitFor(() => expect(putAgentState).toHaveBeenCalledTimes(2));
+    expect(putAgentState.mock.calls.map(([session, input]) => [session, input])).toEqual([
+      ["planner-session", { pinned: true }],
+      ["reviewer-session", { pinned: true }],
+    ]);
+    expect(window.localStorage.getItem(PINS_KEY)).toBeNull();
+
+    // The next load of the same browser has nothing left to migrate, so it writes nothing.
+    cleanup();
+    renderShellAt(1280);
+    await waitFor(() =>
+      expect(screen.queryByRole("navigation", { name: "Navigation" })).not.toBeNull()
+    );
+    expect(putAgentState).toHaveBeenCalledTimes(2);
+  } finally {
+    window.localStorage.removeItem(PINS_KEY);
+    putAgentState.mockRestore();
+  }
+});
+
+// Below 1280 pixels the rail is a sheet behind the Menu control, and the person's pinned agents
+// are in that sheet (R1), not left behind on the desktop rail.
+test("a phone finds the pinned agents in the sidebar sheet", async () => {
+  api.getMyAgentState = async () => ({
+    "planner-session": { pinned_at: "2026-09-14T00:00:01Z" },
+  });
+  renderShellAt(800, [], 0, [agent("planner-session", "Planner")]);
+
+  fireEvent.click(await screen.findByRole("button", { name: "Open navigation" }));
+  const sheet = await screen.findByRole("dialog", { name: "Navigation" });
+  await within(sheet).findByRole("link", { name: "Planner" });
+  expect(
+    within(sheet).getByRole("button", { name: "Unpin Planner from the sidebar" })
+  ).toBeTruthy();
+});
+
+// The registry keeps a sleeping pinned view and discards a sleeping unpinned one (`D8`), so the
+// shell - not the rail, which is off the page at a phone width or a collapsed sidebar - tells it
+// what the person has pinned. Without that, coming back to a pinned agent would lose where they
+// were reading and what its view opened with.
+test("the shell tells the live-view registry which agents the person pinned", async () => {
+  api.getMyAgentState = async () => ({
+    "planner-session": { pinned_at: "2026-09-14T00:00:01Z" },
+  });
+  const queryClient = renderShellAt(1280, [], 0, [agent("planner-session", "Planner")]);
+  await screen.findByRole("button", { name: "Unpin Planner from the sidebar" });
+
+  const views = liveViewsOf(queryClient);
+  act(() => {
+    views.show("planner-session");
+    views.setUnreadAtOpen("planner-session", 3);
+    views.show("other-session");
+    views.setUnreadAtOpen("other-session", 2);
+    // A third view puts the first to sleep at once, where only a pin keeps its entry.
+    views.show("third-session");
+    views.show(null);
+  });
+
+  expect(views.unreadAtOpen("planner-session")).toBe(3);
+  expect(views.unreadAtOpen("other-session")).toBe(0);
 });

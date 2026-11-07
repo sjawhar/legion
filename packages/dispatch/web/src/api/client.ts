@@ -490,7 +490,8 @@ export function issueStateRequest(
   return { body: input, method: "PUT", path: `/api/v1/me/issues/${pathSegment(key)}/state` };
 }
 
-/** `PUT /api/v1/me/agents/{session}/state`: the person's state of a session (`putAgentState`). */
+/** `PUT /api/v1/me/agents/{session}/state`: the person's state of a session (`putAgentState`) -
+ *  a Clear, a read mark, or the pin the rail's Agents list is drawn from (`pinned`). */
 export function agentStateRequest(
   sessionID: string,
   input: UserAgentStateInput

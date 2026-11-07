@@ -135,6 +135,9 @@ function message(body: string, overrides: Partial<Message> = {}): Message {
   };
 }
 
+/** When Dispatch says it took a pin, in the answer the fake route gives. */
+const ANSWERED_PIN_AT = "2026-09-14T12:00:00Z";
+
 /** Exposes the router's current query string, for the one test that needs to see a typed search
  *  land on the page's own address rather than only in its rendered rows. */
 function LocationProbe() {
@@ -200,10 +203,20 @@ function renderAgents({
     state: "sent",
   });
   const getMyAgentState = spyOn(api, "getMyAgentState").mockResolvedValue(agentState);
-  const putAgentState = answerAgentStates().mockImplementation(async (_session, input) => ({
-    ...input,
-    unread_replies: 0,
-  }));
+  // Dispatch answers a state write with the session's whole state: the marks the write set over
+  // the state it held, with `pinned_at` added by a pin and dropped by an unpin, and nothing left
+  // unread.
+  const putAgentState = answerAgentStates().mockImplementation(async (session, input) => {
+    const { pinned, read_replies: _read, ...marks } = input;
+    const { pinned_at: held, ...rest } = agentState[session] ?? {};
+    const pinnedAt = pinned === undefined ? held : pinned ? ANSWERED_PIN_AT : undefined;
+    return {
+      ...rest,
+      ...marks,
+      ...(pinnedAt === undefined ? {} : { pinned_at: pinnedAt }),
+      unread_replies: 0,
+    };
+  });
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const view = render(
     <MemoryRouter initialEntries={[initialEntry]}>
@@ -700,8 +713,12 @@ test("Agents lists a pinned silent session among the active rows, and folds it a
     session_id: "silent-session",
     title: "Silent",
   };
-  window.localStorage.setItem("dispatch.agents.pinned:alice", JSON.stringify(["silent-session"]));
-  const page = renderAgents({ listedAgents: [...agents, silent] });
+  // The pin is the person's, held by Dispatch (INFRA-812): this page reads it from their agent
+  // state, where it was `dispatch.agents.pinned:<login>` in this browser before.
+  const page = renderAgents({
+    agentState: { "silent-session": { pinned_at: "2026-09-14T00:00:00Z" } },
+    listedAgents: [...agents, silent],
+  });
 
   try {
     const region = await screen.findByRole("region", { name: "Agents" });
@@ -714,12 +731,16 @@ test("Agents lists a pinned silent session among the active rows, and folds it a
     expect(within(region).queryByRole("button", { name: /^No Dispatch activity \(/ })).toBeNull();
 
     fireEvent.click(within(region).getByRole("button", { name: "Unpin Silent" }));
-    expect(within(region).getByRole("button", { name: "No Dispatch activity (1)" })).toBeTruthy();
+    await waitFor(() =>
+      expect(within(region).getByRole("button", { name: "No Dispatch activity (1)" })).toBeTruthy()
+    );
     expectFolded(region, "Silent");
+    expect(page.putAgentState.mock.calls.map(([session, input]) => [session, input])).toEqual([
+      ["silent-session", { pinned: false }],
+    ]);
   } finally {
     page.view.unmount();
     page.restore();
-    window.localStorage.removeItem("dispatch.agents.pinned:alice");
   }
 });
 
@@ -779,8 +800,10 @@ test("Agents folds a session that is both silent and unseen under Inactive, neve
 });
 
 test("Agents keeps a pinned session in the active list however long it has been quiet", async () => {
-  window.localStorage.setItem("dispatch.agents.pinned:alice", JSON.stringify(["stale-session"]));
-  const page = renderAgents({ listedAgents: [...agents, stale] });
+  const page = renderAgents({
+    agentState: { "stale-session": { pinned_at: "2026-09-14T00:00:00Z" } },
+    listedAgents: [...agents, stale],
+  });
 
   try {
     const region = await screen.findByRole("region", { name: "Agents" });
@@ -793,17 +816,20 @@ test("Agents keeps a pinned session in the active list however long it has been 
     expect(within(region).queryByRole("button", { name: /^Inactive \(/ })).toBeNull();
 
     fireEvent.click(within(region).getByRole("button", { name: "Unpin Stale" }));
-    expect(within(region).getByRole("button", { name: "Inactive (1)" })).toBeTruthy();
+    await waitFor(() =>
+      expect(within(region).getByRole("button", { name: "Inactive (1)" })).toBeTruthy()
+    );
     expectFolded(region, "Stale");
   } finally {
     page.view.unmount();
     page.restore();
-    window.localStorage.removeItem("dispatch.agents.pinned:alice");
   }
 });
 
-test("Agents pins cards in a per-login preference across a reload", async () => {
-  window.localStorage.removeItem("dispatch.agents.pinned:alice");
+// The pin belongs to the person, not to the browser (INFRA-812, R1): pressing it writes the
+// session's state to Dispatch, so their other browsers and the rail show it, and nothing of it
+// is kept in this browser's own storage.
+test("Agents pins a card by writing the person's agent state, not a browser preference", async () => {
   const first = renderAgents();
   let firstActive = true;
 
@@ -811,18 +837,27 @@ test("Agents pins cards in a per-login preference across a reload", async () => 
     const pin = await screen.findByRole("button", { name: "Pin Planner" });
     expect(pin.getAttribute("aria-pressed")).toBe("false");
     fireEvent.click(pin);
-    expect(pin.getAttribute("aria-pressed")).toBe("true");
-    expect(window.localStorage.getItem("dispatch.agents.pinned:alice")).toBe(
-      JSON.stringify(["planner-session"])
+
+    const unpin = await screen.findByRole("button", { name: "Unpin Planner" });
+    expect(unpin.getAttribute("aria-pressed")).toBe("true");
+    expect(within(unpin.closest("article") ?? unpin).getByRole("heading").textContent).toBe(
+      "Planner"
     );
+    expect(first.putAgentState.mock.calls.map(([session, input]) => [session, input])).toEqual([
+      ["planner-session", { pinned: true }],
+    ]);
+    expect(window.localStorage.getItem("dispatch.agents.pinned:alice")).toBeNull();
+
+    // The person's second browser reads the same pin from Dispatch, with nothing of this one's.
     first.view.unmount();
     first.restore();
     firstActive = false;
-
-    const second = renderAgents();
+    const second = renderAgents({
+      agentState: { "planner-session": { pinned_at: "2026-09-14T00:00:00Z" } },
+    });
     try {
-      const persistedPin = await screen.findByRole("button", { name: "Unpin Planner" });
-      expect(persistedPin.getAttribute("aria-pressed")).toBe("true");
+      const elsewhere = await screen.findByRole("button", { name: "Unpin Planner" });
+      expect(elsewhere.getAttribute("aria-pressed")).toBe("true");
     } finally {
       second.view.unmount();
       second.restore();
@@ -832,7 +867,6 @@ test("Agents pins cards in a per-login preference across a reload", async () => 
       first.view.unmount();
       first.restore();
     }
-    window.localStorage.removeItem("dispatch.agents.pinned:alice");
   }
 });
 

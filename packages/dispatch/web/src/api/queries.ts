@@ -119,9 +119,12 @@ export const artifactBlocksQuery = (id: string) =>
     queryFn: () => api.getArtifactBlocks(id),
   });
 
-/** The viewer's per-agent conversation state: each session's Clear, read mark, and count of
- *  unread replies to the viewer's direct messages. The navigation, the Agents page, and the
- *  live view all read this one key. */
+/** The viewer's per-agent conversation state: each session's Clear, read mark, count of unread
+ *  replies to the viewer's direct messages, and `pinned_at` where the viewer pinned it
+ *  (`features/agents/pins.ts`). The navigation, the Agents page, and the live view all read this
+ *  one key, and `user_agent_state.updated` refreshes it, so a pin or a read mark another browser
+ *  of the same person made shows here without a reload. A session the viewer has only pinned is
+ *  in the answer too. */
 export const userAgentStateQuery = () =>
   queryOptions({
     queryKey: ["user-agent-state"],

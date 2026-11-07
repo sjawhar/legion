@@ -1951,3 +1951,57 @@ test("a session advertising no delivery mode still takes a mid-turn send as an a
   );
   expect(screen.getByTestId("agent-takes-no-messages")).toBeTruthy();
 });
+
+/** Dispatch's answer to a pin write: the session's whole state, with the time it took the pin
+ *  and none once the viewer unpinned it. */
+function answerPinWrites(): Mock<typeof api.putAgentState> {
+  return answerAgentStates().mockImplementation(async (_session, input) =>
+    input.pinned === true ? { pinned_at: "2026-09-27T22:00:00Z", unread_replies: 0 } : {}
+  );
+}
+
+// A person pins an agent from its live view as well as from its row on the Agents page
+// (INFRA-812, R1): the pin is theirs, so it is written to Dispatch and the rail lists the
+// session at once.
+test("the live view's header pins the session, and the rail lists it", async () => {
+  const putAgentState = answerPinWrites();
+  renderLiveView({ agentState: {}, messages: [], putAgentState });
+
+  const pin = await screen.findByRole("button", { name: "Pin Planner" });
+  expect(pin.getAttribute("aria-pressed")).toBe("false");
+  expect(screen.queryByRole("button", { name: "Unpin Planner from the sidebar" })).toBeNull();
+
+  fireEvent.click(pin);
+
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "Unpin Planner from the sidebar" })).toBeTruthy()
+  );
+  expect(screen.getByRole("button", { name: "Unpin Planner" }).getAttribute("aria-pressed")).toBe(
+    "true"
+  );
+  expect(putAgentState).toHaveBeenCalledWith(SESSION, { pinned: true }, keyedAttempt);
+});
+
+// And unpins it from the same place, which takes the rail's row with it.
+test("the live view's header unpins the session, and the rail's row goes", async () => {
+  const putAgentState = answerPinWrites();
+  renderLiveView({
+    agentState: { [SESSION]: { pinned_at: "2026-09-27T21:00:00Z" } },
+    messages: [],
+    putAgentState,
+  });
+
+  const unpin = await screen.findByRole("button", { name: "Unpin Planner" });
+  expect(unpin.getAttribute("aria-pressed")).toBe("true");
+  await screen.findByRole("button", { name: "Unpin Planner from the sidebar" });
+
+  fireEvent.click(unpin);
+
+  await waitFor(() =>
+    expect(screen.queryByRole("button", { name: "Unpin Planner from the sidebar" })).toBeNull()
+  );
+  expect(screen.getByRole("button", { name: "Pin Planner" }).getAttribute("aria-pressed")).toBe(
+    "false"
+  );
+  expect(putAgentState).toHaveBeenCalledWith(SESSION, { pinned: false }, keyedAttempt);
+});

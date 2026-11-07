@@ -4,7 +4,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { whoAmIQuery } from "../../api/queries";
 
 export type UserPreference =
-  | "agents.pinned"
   | "project.board-edges"
   | "project.board-lanes"
   | "project.issue-filters"
@@ -16,6 +15,16 @@ export type UserPreference =
 /** Browser-only preferences are private to the signed-in Dispatch identity. */
 export function userPreferenceStorageKey(login: string, preference: UserPreference): string {
   return `dispatch.${preference}:${login}`;
+}
+
+/**
+ * Where this browser kept the Agents page's pins before they became the person's own, held by
+ * Dispatch (INFRA-812). Nothing writes it any more, so it is no `UserPreference`: the shell
+ * reads it once at the first load after the change, writes each id it holds as a pin and
+ * removes it. The format is the one `userPreferenceStorageKey` wrote, frozen as it was written.
+ */
+export function legacyPinnedAgentsKey(login: string): string {
+  return `dispatch.agents.pinned:${login}`;
 }
 
 type UserPreferenceIdentity = "failed" | "pending" | "resolved";

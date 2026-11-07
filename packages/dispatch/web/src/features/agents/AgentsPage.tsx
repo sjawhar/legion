@@ -4,7 +4,6 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   type ReactNode,
   type RefObject,
-  useCallback,
   useId,
   useLayoutEffect,
   useMemo,
@@ -75,7 +74,6 @@ import { Timestamp } from "../refs/Timestamp";
 import { closestMatching, focusOnDocument } from "../shell/roving";
 import { MD_VIEWPORT_QUERY, useMediaQuery } from "../shell/useDialog";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
-import { useUserPreference } from "../shell/userPreference";
 import { useKeyedWrite } from "../writes/useKeyedWrite";
 import { AgentMessageComposer, type AgentReply, agentSendKey } from "./AgentMessageComposer";
 import {
@@ -93,6 +91,7 @@ import { broadcastSendState, type ComposedBroadcast, composedBroadcast } from ".
 import type { BroadcastSend } from "./broadcast-queue";
 import { EndedAgentsWithReplies } from "./EndedAgentsWithReplies";
 import { AGENT_ROW_SELECTOR, foldToggleOf, leaveAgentComposer, useAgentsKeymap } from "./keyboard";
+import { useAgentPinWrite, usePinnedAgents } from "./pins";
 import { foldLabel, matchingSelection, selectionSummary, toggleMatching } from "./selection";
 import { storeAgentState, unreadRepliesLabel, useMarkRepliesRead, useUnreadAtOpen } from "./unread";
 
@@ -1194,19 +1193,11 @@ export function AgentsPage(): ReactNode {
   const inbox = useQuery(inboxQuery());
   // Until `/auth/whoami` answers, no question is counted as the reader's.
   const viewer = useQuery(whoAmIQuery()).data?.login;
-  const readPinned = useCallback((stored: string | null): readonly string[] => {
-    try {
-      const parsed: unknown = stored === null ? [] : JSON.parse(stored);
-      return Array.isArray(parsed)
-        ? parsed.filter((value): value is string => typeof value === "string")
-        : [];
-    } catch {
-      return [];
-    }
-  }, []);
-  const [pinned, setPinned] = useUserPreference("agents.pinned", readPinned, (next) =>
-    JSON.stringify(next)
-  );
+  // The pins are the person's, not this browser's (INFRA-812): the Agents page reads them from
+  // the viewer's agent state and writes them to Dispatch, so a pin made here is in the rail and
+  // in the person's other browsers at once.
+  const pinned = usePinnedAgents();
+  const writePin = useAgentPinWrite();
   // The first card number: the reader's own work with this session - a question whose next move
   // is a person's, on an issue assigned to them. One meaning for every count of what waits on
   // the reader, wherever it is shown.
@@ -1296,10 +1287,7 @@ export function AgentsPage(): ReactNode {
     ) {
       focusAfterPin.current = sessionID;
     }
-    const next = pinned.includes(sessionID)
-      ? pinned.filter((candidate) => candidate !== sessionID)
-      : [...pinned, sessionID];
-    setPinned(next);
+    writePin(sessionID, !pinned.includes(sessionID));
   };
   const select = (sessionID: string, next: boolean) => {
     setSelected((current) => {

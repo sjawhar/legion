@@ -6,6 +6,7 @@ import { Link } from "react-router-dom";
 import { agentMessageRequest, apiErrorMessage } from "../../api/client";
 import { agentMessagesQuery, whoAmIQuery } from "../../api/queries";
 import type { Message } from "../../api/types";
+import { PinButton } from "../../components/PinButton";
 import {
   connectionDotConnecting,
   connectionDotFailed,
@@ -17,6 +18,7 @@ import {
   textMutedOnCanvas,
   textPrimaryOnCanvas,
 } from "../../theme/classes";
+import { useAgentPinWrite, usePinnedAgents } from "../agents/pins";
 import { useMarkRepliesRead } from "../agents/unread";
 import { MODE_LABELS } from "../conversation/delivery";
 import { useAgents } from "../conversation/useAgents";
@@ -91,6 +93,10 @@ export function AgentConversationPage({
   // its registry title, else its short id. Only the view in front names the tab.
   const label = useAgentText().sessionText(sessionId, undefined);
   useDocumentTitle(label, front);
+  // The pin is the person's, not this browser's (INFRA-812): pinning here lists the session in
+  // the rail, as pinning its row on the Agents page does, and either place unpins it.
+  const pinned = usePinnedAgents().includes(sessionId);
+  const writePin = useAgentPinWrite();
 
   const { conversation, replays, responding, status } = useAgentStream(sessionId);
   // The model and thinking level the session runs now (INFRA-195), next to its title: what its
@@ -193,6 +199,12 @@ export function AgentConversationPage({
         <h1 className={`min-w-0 truncate text-lg font-semibold ${textPrimaryOnCanvas}`}>
           <AgentName kind="static" sessionId={sessionId} storedTitle={undefined} />
         </h1>
+        <PinButton
+          label={pinned ? `Unpin ${label}` : `Pin ${label}`}
+          onClick={() => writePin(sessionId, !pinned)}
+          pinned={pinned}
+          title={pinned ? "Unpin agent" : "Pin agent"}
+        />
         <SessionSettings
           onPick={onPick}
           pending={switchPending}
