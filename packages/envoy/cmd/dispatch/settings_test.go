@@ -36,6 +36,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/api"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/config"
+	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/embed"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp/githubapptest"
 	"github.com/sjawhar/envoy/internal/dispatch/routes"
@@ -822,6 +823,12 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 				t.Errorf("unset: PprofAddr = %q, want none", boot.PprofAddr)
 			}
 			refusedWith(t, map[string]string{"DISPATCH_PPROF_PORT": "0"}, "DISPATCH_PPROF_PORT")
+		},
+		"DISPATCH_MAX_LIVE_ROOMS": func(t *testing.T) {
+			documentCapReachesTheService(t, "DISPATCH_MAX_LIVE_ROOMS", func(rooms, _ int) int { return rooms })
+		},
+		"DISPATCH_MAX_DOC_CONNECTIONS": func(t *testing.T) {
+			documentCapReachesTheService(t, "DISPATCH_MAX_DOC_CONNECTIONS", func(_, connections int) int { return connections })
 		},
 		"DISPATCH_SERVER_URL": func(t *testing.T) {
 			if cfg, err := envoyJSON(t, map[string]string{"DISPATCH_SERVER_URL": "https://from-the-table.example"}); err != nil || cfg.Dispatch.ServerURL != "https://from-the-table.example" {
@@ -2025,6 +2032,55 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 	}
 	for name := range cases {
 		t.Errorf("a case for %s, which the settings table does not list", name)
+	}
+}
+
+// Every setting the document service takes from boot reaches the service main builds
+// (newDocumentService, through documentDeps): boot's seven values, each one distinct, are each
+// found on the dependencies the service is built from.
+func TestDocumentDepsCarryEveryBootSetting(t *testing.T) {
+	boot := bootConfig{
+		SettleDelay:       11 * time.Second,
+		MarkWait:          12 * time.Second,
+		UnrecordedMarkTTL: 13 * time.Second,
+		EditNoticeQuiet:   14 * time.Second,
+		MaxLiveRooms:      15,
+		MaxDocConnections: 16,
+		TestHooksEnabled:  true,
+	}
+	got := documentDeps(boot, docs.Deps{})
+	for _, field := range []struct {
+		name      string
+		got, want any
+	}{
+		{"Settle", got.Settle, boot.SettleDelay},
+		{"MarkWait", got.MarkWait, boot.MarkWait},
+		{"UnrecordedMarkTTL", got.UnrecordedMarkTTL, boot.UnrecordedMarkTTL},
+		{"EditNoticeQuiet", got.EditNoticeQuiet, boot.EditNoticeQuiet},
+		{"MaxLiveRooms", got.MaxLiveRooms, boot.MaxLiveRooms},
+		{"MaxDocConnections", got.MaxDocConnections, boot.MaxDocConnections},
+		{"TestHooks", got.TestHooks, boot.TestHooksEnabled},
+	} {
+		if field.got != field.want {
+			t.Errorf("docs.Deps.%s = %v, want boot's %v: documentDeps drops the setting", field.name, field.got, field.want)
+		}
+	}
+}
+
+// documentCapReachesTheService hands name, one of the document service's caps, to the service
+// main builds (newDocumentService) through the settings read alone, and reads back the cap it
+// sets (capOf of docs.Service.RoomCapsForTest): unset, the service's own default of 1,000; set,
+// its value; and a value that is not a positive integer refuses startup naming it.
+func documentCapReachesTheService(t *testing.T, name string, capOf func(rooms, connections int) int) {
+	t.Helper()
+	for value, want := range map[string]int{"": 1000, " 25 ": 25} {
+		boot := resolveWith(t, map[string]string{name: value})
+		if got := capOf(newDocumentService(boot, docs.Deps{}).RoomCapsForTest()); got != want {
+			t.Errorf("%s=%q: the document service's cap is %d, want %d", name, value, got, want)
+		}
+	}
+	for _, invalid := range []string{"0", "-5", "+3", "1.5", "lots"} {
+		refusedWith(t, map[string]string{name: invalid}, fmt.Sprintf("%s=%q (expected a positive integer)", name, invalid))
 	}
 }
 

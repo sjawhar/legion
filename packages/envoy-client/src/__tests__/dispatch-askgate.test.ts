@@ -3,19 +3,20 @@ import { createHash, randomBytes } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readdirSync,
   readFileSync,
   rmSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { removeTemporaryDirectories, temporaryDirectory } from "../../test/temp-dir";
 import { keepStore, MARKER_MAX_AGE_MS, mintMarker, setRecordMode } from "../askgate-marker";
 import { cliRefusals, runDispatchCli } from "../dispatch-cli";
 import { resetAdviceMemory } from "../dispatch-execute";
 import { pruneSessions } from "../dispatch-session-state";
+
+afterAll(removeTemporaryDirectories);
 
 // AskGate's enforcement at the posting CLI. A live Oh My Pi process whose gate is bound leaves an
 // owner file in the session's state directory (`askgate/<pid>-<start>.json`) that names it and
@@ -73,7 +74,7 @@ const messagePosts = () => postsTo(MESSAGES);
 let stateDir = "";
 beforeEach(() => {
   posts.length = 0;
-  stateDir = mkdtempSync(join(tmpdir(), "dispatch-askgate-"));
+  stateDir = temporaryDirectory("dispatch-askgate-");
   resetAdviceMemory();
 });
 afterEach(() => rmSync(stateDir, { recursive: true, force: true }));

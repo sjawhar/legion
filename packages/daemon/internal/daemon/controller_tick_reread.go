@@ -79,7 +79,7 @@ func (w *workflowRuntime) waitedOn(ctx context.Context) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("list the admission slots: %w", err)
 	}
-	facts, err := record.ReadLineFacts(ctx, tx, w.records, w.dispatchProject, issues)
+	facts, err := record.ReadLineFacts(ctx, tx, w.records, w.dispatchProject, issues, w.gatedSteps)
 	if err != nil {
 		return nil, err
 	}

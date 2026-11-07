@@ -360,7 +360,7 @@ func TestABootServesHealthzWhileTheStrandedReportStoreReadWaits(t *testing.T) {
 
 	runCtx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- run(runCtx, cfg, Build{}, quietLogger(), fakeRuntime(fake.NewRuntime(), &built{})) }()
+	go func() { done <- run(runCtx, cfg, quietLogger(), fakeRuntime(fake.NewRuntime(), &built{})) }()
 	t.Cleanup(func() {
 		if locked {
 			_ = lock.Rollback(context.Background())
@@ -452,7 +452,7 @@ func TestStateSnapshotKeepsStrandedClaimsConsistentWithWorkerStates(t *testing.T
 		startedAt: time.Now(), deployment: func() capabilities.Deployment { return capabilities.Deployment{} },
 		reports: func() map[claim.Token]capabilities.Report { return nil },
 	}
-	state, err := view.State(ctx, tx)
+	state, _, err := view.State(ctx, tx)
 	if err != nil {
 		t.Fatalf("State: %v", err)
 	}

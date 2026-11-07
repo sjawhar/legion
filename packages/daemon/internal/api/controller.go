@@ -12,9 +12,9 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
-	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/controller"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
+	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
@@ -36,12 +36,17 @@ type ControllerSecretRequest struct {
 }
 
 // ControllerSecretResponse is `POST /legion/v1/controller/secret`'s answer: the capability the
-// controller's Oh My Pi registers with, and the project's design gate policy (`gates.design`),
-// which `legion controller start` tells the controller so its take comment promises a design
-// approval only when the gate is armed. `legion controller start` reads it; the plugin never does.
+// controller's Oh My Pi registers with, and the design-gate steps the project gates
+// (`gates.design`), in the order it gates them, which `legion controller start` tells the
+// controller so its take comment promises a design approval only where the deployment gates a
+// step. The list is empty for a deployment that gates none and is never absent: `legion
+// controller start` refuses an answer that omits it, which is a daemon from before contract 55.
+// `legion controller start` reads it; the plugin never does.
 type ControllerSecretResponse struct {
-	Secret     string            `json:"secret"`
-	DesignGate config.DesignGate `json:"designGate"`
+	Secret string `json:"secret"`
+	// DesignGateSteps is the deployment's list, never nil, so a deployment that gates no step
+	// answers `[]` and only a daemon that does not know the field answers nothing at all.
+	DesignGateSteps []record.DesignStep `json:"designGateSteps"`
 }
 
 // ControllerCredentialRequest is `POST /legion/v1/controller/github-credential`'s body: the
@@ -136,12 +141,13 @@ func (s *server) controllerSecret(w http.ResponseWriter, r *http.Request) {
 	}
 	s.grants.RevokeControllers()
 	s.log.Info("api: minted a controller capability; the previous controller's registration and grants are revoked", "generation", generation)
-	writeJSON(w, http.StatusOK, ControllerSecretResponse{Secret: secret, DesignGate: s.designGate})
+	writeJSON(w, http.StatusOK, ControllerSecretResponse{Secret: secret, DesignGateSteps: s.steps})
 }
 
 // controllerGitHubCredential is `legion controller start`'s refresh call: proving the current
 // controller capability buys the review App's fresh read-only tokens for every owner of the
-// project (appauth.GitHubCredential), each rendered as the two files `gh` reads. The capability
+// project, each narrowed to the repositories that owner serves
+// (appauth.ControllerCredential), each rendered as the two files `gh` reads. The capability
 // compare runs under controllerMu, the same lock the mint and the controller-session grant take,
 // so a capability a concurrent mint just replaced is never matched; the token mints run after the
 // lock is released, since GitHub is the slow step and holding the lock across it would block every
@@ -151,6 +157,15 @@ func (s *server) controllerSecret(w http.ResponseWriter, r *http.Request) {
 // retrying forever; a daemon that launches its own controller (`controller: daemon`) refuses every
 // call, as controllerSecret does, since its controller's tokens live in its pod's Secret and no
 // `legion controller start` runs against it.
+//
+// A default owner the App's installation no longer reaches — GitHub refusing a lease over every
+// repository that owner serves (appauth.ErrNarrowingRefused) — is DEFAULT_OWNER_UNREACHABLE,
+// naming the owner and the repositories the lease would have reached. The caller sees a refusal
+// rather than a 200 whose bundle names no App and no owner, which it could only read as gh files
+// it cannot write; its refresh loop keeps the files it has and tries again at its next tick,
+// since the owner is reached again the moment the account adds those repositories to the
+// installation. A caller that names no owner is answered from the owners the mint did reach, so
+// this is the recorded default's case alone.
 func (s *server) controllerGitHubCredential(w http.ResponseWriter, r *http.Request) {
 	if s.controllerLaunched {
 		s.log.Warn("api: refused a controller GitHub credential: this daemon launches the project's controller itself")
@@ -185,7 +200,10 @@ func (s *server) controllerGitHubCredential(w http.ResponseWriter, r *http.Reque
 		writeFailure(w, http.StatusInternalServerError, "GITHUB_TOKEN_SOURCE_UNAVAILABLE", "GitHub token source is unavailable")
 		return
 	}
-	bundle, err := appauth.GitHubCredential(s.tokens, s.githubOwners, s.renames)(r.Context(), claim.RoleController, req.Default)
+	// No left-out record (appauth.LeftOut): this bundle is built per request and reaches a
+	// `legion controller start` that rewrites its own gh directory every minute, so no pod's
+	// fixed projection is ever compared against it.
+	bundle, err := appauth.ControllerCredential(s.tokens, s.githubRepositories, s.renames, nil, s.log)(r.Context(), req.Default)
 	switch {
 	case errors.Is(err, runtime.ErrNoGitHubOwner):
 		writeFailure(w, http.StatusInternalServerError, "GITHUB_OWNER_UNCONFIGURED", "no repository owner is configured for GitHub App tokens")
@@ -194,25 +212,29 @@ func (s *server) controllerGitHubCredential(w http.ResponseWriter, r *http.Reque
 		s.log.Warn("api: refused a controller GitHub credential: DEFAULT_OWNER_OUTSIDE_PROJECT", "default", strings.ToLower(req.Default))
 		writeFailure(w, http.StatusBadRequest, "DEFAULT_OWNER_OUTSIDE_PROJECT", err.Error())
 		return
+	case appauth.NarrowingRefused(err):
+		s.log.Warn("api: refused a controller GitHub credential: DEFAULT_OWNER_UNREACHABLE", "default", strings.ToLower(req.Default), "error", err)
+		writeFailure(w, http.StatusInternalServerError, "DEFAULT_OWNER_UNREACHABLE", err.Error())
+		return
 	case err != nil:
 		s.log.Error("api: mint the controller's GitHub App tokens", "error", err)
 		writeFailure(w, http.StatusBadGateway, "GITHUB_TOKEN_FAILED", "GitHub token exchange failed")
 		return
 	}
 	answer := ControllerCredentialResponse{
-		Owners:  make(map[string]ControllerOwnerCredential, len(bundle.Owners)),
+		Owners:  make(map[string]ControllerOwnerCredential, len(bundle.Dirs)),
 		Default: bundle.Default,
-		App:     bundle.Owners[bundle.Default].App,
+		App:     bundle.Dirs[bundle.Default].App,
 	}
 	var soonest time.Time
-	for owner, rendered := range bundle.Owners {
+	for owner, rendered := range bundle.Dirs {
 		answer.Owners[owner] = ControllerOwnerCredential{Hosts: rendered.Hosts, Config: rendered.Config}
 		if soonest.IsZero() || rendered.ExpiresAt.Before(soonest) {
 			soonest = rendered.ExpiresAt
 		}
 	}
 	answer.ExpiresAt = soonest.UTC().Format(timeFormat)
-	s.log.Info("api: controller github credential served", "app", answer.App, "expiresAt", soonest, "owners", bundle.OwnerNames())
+	s.log.Info("api: controller github credential served", "app", answer.App, "expiresAt", soonest, "owners", bundle.DirNames())
 	writeJSON(w, http.StatusOK, answer)
 }
 
@@ -221,11 +243,11 @@ func (s *server) controllerGitHubCredential(w http.ResponseWriter, r *http.Reque
 func (s *server) controllerCapabilityCurrent(r *http.Request, secret string) (bool, error) {
 	s.controllerMu.Lock()
 	defer s.controllerMu.Unlock()
-	record, found, err := s.controller.Controller(r.Context(), s.project)
+	stored, found, err := s.controller.Controller(r.Context(), s.project)
 	if err != nil {
 		return false, err
 	}
-	return found && subtle.ConstantTimeCompare(record.CapabilityHash, capabilityHash(secret)) == 1, nil
+	return found && subtle.ConstantTimeCompare(stored.CapabilityHash, capabilityHash(secret)) == 1, nil
 }
 
 // registerController is a registration whose token is no launch's boot token, on a daemon that
@@ -240,13 +262,13 @@ func (s *server) registerController(w http.ResponseWriter, r *http.Request, req 
 	ctx := context.WithoutCancel(r.Context())
 	s.controllerMu.Lock()
 	defer s.controllerMu.Unlock()
-	record, found, err := s.controller.Controller(ctx, s.project)
+	stored, found, err := s.controller.Controller(ctx, s.project)
 	if err != nil {
 		s.log.Error("api: read the controller record for a registration", "error", err)
 		writeJSON(w, http.StatusInternalServerError, errorBody("register failed: the daemon could not read its controller record"))
 		return
 	}
-	if !found || subtle.ConstantTimeCompare(record.CapabilityHash, capabilityHash(req.BootToken)) != 1 {
+	if !found || subtle.ConstantTimeCompare(stored.CapabilityHash, capabilityHash(req.BootToken)) != 1 {
 		writeJSON(w, claim.InvalidBootToken.Status, claim.InvalidBootToken)
 		return
 	}
@@ -258,7 +280,7 @@ func (s *server) registerController(w http.ResponseWriter, r *http.Request, req 
 		return
 	}
 	secret := rand.Text()
-	registered, err := s.controller.RegisterController(ctx, s.project, record.Generation, req.SessionID, capabilityHash(secret), time.Now().UTC(), req.PluginContract)
+	registered, err := s.controller.RegisterController(ctx, s.project, stored.Generation, req.SessionID, capabilityHash(secret), time.Now().UTC(), req.PluginContract)
 	if err != nil {
 		s.log.Error("api: record a controller registration", "error", err)
 		writeJSON(w, http.StatusInternalServerError, errorBody("register failed: the daemon could not record it"))
@@ -269,12 +291,12 @@ func (s *server) registerController(w http.ResponseWriter, r *http.Request, req 
 		return
 	}
 	token := claim.ControllerToken(s.project)
-	s.log.Info("api: controller registered", "claim", token, "generation", record.Generation,
+	s.log.Info("api: controller registered", "claim", token, "generation", stored.Generation,
 		"session", req.SessionID, "agent", req.AgentID)
 	writeJSON(w, http.StatusOK, ControllerRegisterResponse{
 		ClaimToken: token,
 		Role:       claim.RoleController,
-		Generation: record.Generation,
+		Generation: stored.Generation,
 		Secret:     secret,
 	})
 }
@@ -332,17 +354,17 @@ func (s *server) registerLaunchedController(w http.ResponseWriter, r *http.Reque
 func (s *server) controllerSessionGrant(w http.ResponseWriter, r *http.Request, req GrantRequest) {
 	s.controllerMu.Lock()
 	defer s.controllerMu.Unlock()
-	record, found, err := s.controller.Controller(r.Context(), s.project)
+	stored, found, err := s.controller.Controller(r.Context(), s.project)
 	if err != nil {
 		s.log.Error("api: read the controller record for a grant", "error", err)
 		writeFailure(w, http.StatusInternalServerError, "GRANT_MINT_FAILED", "could not mint grant")
 		return
 	}
-	if !found || !controllerSessionRegistered(record, req.SessionID, req.Secret) {
+	if !found || !controllerSessionRegistered(stored, req.SessionID, req.Secret) {
 		writeFailure(w, http.StatusForbidden, "INVALID_SESSION_SECRET", claim.InvalidSecret.Message)
 		return
 	}
-	if s.refuseIfStaleController(w, r, record) {
+	if s.refuseIfStaleController(w, r, stored) {
 		return
 	}
 	s.mintControllerGrant(w)
@@ -351,9 +373,9 @@ func (s *server) controllerSessionGrant(w http.ResponseWriter, r *http.Request, 
 // controllerSessionRegistered is the one authentication of a controller session against its
 // record: the current capability's registration, naming this session, whose secret hashes to the
 // recorded one. controllerSessionGrant and refuseIfStaleControllerSession both authenticate by it.
-func controllerSessionRegistered(record controller.Record, session, secret string) bool {
-	return record.Registered() && record.Session == session &&
-		subtle.ConstantTimeCompare(record.SecretHash, capabilityHash(secret)) == 1
+func controllerSessionRegistered(stored controller.Record, session, secret string) bool {
+	return stored.Registered() && stored.Session == session &&
+		subtle.ConstantTimeCompare(stored.SecretHash, capabilityHash(secret)) == 1
 }
 
 // refuseIfStaleController is the stale-caller refusal for the operator's controller record
@@ -364,13 +386,13 @@ func controllerSessionRegistered(record controller.Record, session, secret strin
 // operator's own `legion controller start`) the daemon never relaunches the operator's controller,
 // so there is no relaunch to wait for: it is stale, with claim.StaleControllerContract's sentence,
 // whenever its recorded contract differs at all.
-func (s *server) refuseIfStaleController(w http.ResponseWriter, r *http.Request, record controller.Record) bool {
+func (s *server) refuseIfStaleController(w http.ResponseWriter, r *http.Request, stored controller.Record) bool {
 	if !s.controllerLaunched {
-		if record.PluginContract == DaemonAPIVersion {
+		if stored.PluginContract == DaemonAPIVersion {
 			return false
 		}
-		s.logStaleRefusal(r, "session", record.Session, record.PluginContract)
-		refusal := claim.StaleControllerContract(record.PluginContract, DaemonAPIVersion)
+		s.logStaleRefusal(r, "session", stored.Session, stored.PluginContract)
+		refusal := claim.StaleControllerContract(stored.PluginContract, DaemonAPIVersion)
 		writeFailure(w, http.StatusConflict, "STALE_PLUGIN_CONTRACT", refusal.Message)
 		return true
 	}
@@ -383,7 +405,7 @@ func (s *server) refuseIfStaleController(w http.ResponseWriter, r *http.Request,
 	if !stale {
 		return false
 	}
-	s.logStaleRefusal(r, "session", record.Session, got)
+	s.logStaleRefusal(r, "session", stored.Session, got)
 	refusal := claim.StalePluginContract(got, DaemonAPIVersion)
 	writeFailure(w, http.StatusConflict, "STALE_PLUGIN_CONTRACT", refusal.Message)
 	return true

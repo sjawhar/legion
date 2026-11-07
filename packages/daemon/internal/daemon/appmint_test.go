@@ -26,8 +26,9 @@ import (
 )
 
 // gitHubStandIn serves the GitHub App endpoints a boot's token mint calls, for the owner acme:
-// installation discovery answers through discover, the exchange and identity lookups succeed, and
-// each App's slug is legion-test-<its id>, so the two bot logins differ as two real Apps' do.
+// installation discovery answers through discover, the installation is granted every permission
+// a role's set names, the exchange and identity lookups succeed, and each App's slug is
+// legion-test-<its id>, so the two bot logins differ as two real Apps' do.
 // It counts each App's installation discoveries by the App id its JWT names.
 type gitHubStandIn struct {
 	mu          sync.Mutex
@@ -84,7 +85,16 @@ func appTokens(t *testing.T, discover func(w http.ResponseWriter, r *http.Reques
 		case strings.HasSuffix(r.URL.Path, "/installation"):
 			fmt.Fprint(w, `{"id":77}`)
 		case strings.HasSuffix(r.URL.Path, "/access_tokens"):
-			fmt.Fprintf(w, `{"token":"installation-token","expires_at":%q}`, time.Now().Add(time.Hour).Format(time.RFC3339))
+			// A mint names the repositories its token may reach and the permissions it holds,
+			// and refuses an answer wider than it asked for (appauth), so the stand-in answers
+			// with both as the request named them, as GitHub does for a narrowed token.
+			repositories, permissions := exchangeBody(t, r)
+			mintedToken(w, "installation-token", repositories, permissions)
+		case strings.HasPrefix(r.URL.Path, "/app/installations/"):
+			// A mint reads what the installation is granted before it asks for a token and cuts
+			// its request down to it (appauth's exchangeGranted), so the stand-in's installation
+			// is granted every permission a role's set names.
+			fmt.Fprint(w, `{"id":77,"permissions":{"actions":"write","checks":"write","contents":"write","metadata":"read","pull_requests":"write","statuses":"write","workflows":"write"}}`)
 		case r.URL.Path == "/app":
 			fmt.Fprintf(w, `{"slug":"legion-test-%s"}`, jwtIssuer(t, r))
 		case strings.HasPrefix(r.URL.Path, "/users/"):
@@ -124,7 +134,7 @@ func bootsOrExitsLogging(t *testing.T, cfg config.Config, tokens appauth.Tokens,
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- run(ctx, cfg, Build{}, log, overrides{
+		done <- run(ctx, cfg, log, overrides{
 			listen:         heldListen,
 			runtime:        fakeRuntime(fake.NewRuntime(), &built{}).runtime,
 			clock:          stillClock{},

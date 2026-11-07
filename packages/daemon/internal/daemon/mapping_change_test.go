@@ -33,8 +33,9 @@ import (
 func TestAMappingChangeAtRuntimeChangesWhatTheDaemonServes(t *testing.T) {
 	t.Run("GitHub answering at once", func(t *testing.T) { mappingChangeAtRuntime(t, 5*time.Second, 0) })
 	// A refresh reads Dispatch and GitHub, which can take longer than the event's acknowledgement
-	// window (AckWait): a GitHub answering every read later than that window still has the change
-	// applied, rather than its event redelivered with a refresh that never finishes.
+	// window (AckWait), the bound intake puts on a mapping read a handler makes inline: a GitHub
+	// answering every read later than that window still has the change applied, by the refresh
+	// that runs on its own, rather than cut off part way and never finishing.
 	t.Run("every GitHub read outlasting the acknowledgement window", func(t *testing.T) {
 		mappingChangeAtRuntime(t, 300*time.Millisecond, 400*time.Millisecond)
 	})

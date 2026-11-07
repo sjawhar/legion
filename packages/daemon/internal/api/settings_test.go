@@ -145,14 +145,11 @@ var settingsEmitted = map[string]string{
 	"Project.MergeQueueRole":                         "projects.<KEY>.merge_queue_role",
 	"Project.Merge":                                  "projects.<KEY>.merge",
 	"Project.SlackChannels":                          "projects.<KEY>.slack_channels",
-	"Project.Deploys":                                "projects.<KEY>.deploys",
 	"Project.Memory":                                 "projects.<KEY>.memory",
+	"Project.ProductionCheck":                        "projects.<KEY>.production_check",
 	"Memory.Mode":                                    "projects.<KEY>.memory.mode",
 	"Memory.ConfigFiles":                             "projects.<KEY>.memory.config_files",
 	"Memory.InstructionsPath":                        "projects.<KEY>.memory.instructions",
-	"Deploy.Repo":                                    "projects.<KEY>.deploys[].repo",
-	"Deploy.Workflow":                                "projects.<KEY>.deploys[].workflow",
-	"Deploy.Step":                                    "projects.<KEY>.deploys[].step",
 	"MergeRules.ByHand":                              "projects.<KEY>.merge.by_hand",
 	"PathPattern.Expression":                         "projects.<KEY>.merge.by_hand[]",
 	"Gates.Design":                                   "gates.design",
@@ -189,6 +186,7 @@ var settingsExcluded = map[string]string{
 	"PodConfig.ServiceAccount":        "runtime.kubernetes.pod: the operator's ServiceAccount, which every pod runs as and reads from its own spec",
 	"Kubernetes.PluginsFromBinary":    "derived: where the settled plugins pair came from, not a setting",
 	"PathPattern.Regexp":              "compiled from Expression, not a setting",
+	"Config.Warnings":                 "not a setting: the loader's own lines for the operator about a key the file still sets and this daemon no longer reads, which `legion start` logs and `--check-config` prints",
 	"Project.CommitIssueTrailerRepos": "a deployment's own repositories, named by a route that authenticates nobody (GET /legion/v1/state)",
 	"Config.StallLimits":              "derived: the three LEGION_STALL_* numbers this daemon's own environment sets, which it passes to every session; no legion.yaml key names them",
 	"StallLimits.CallBound":           "derived: LEGION_STALL_CALL_BOUND_MS in the daemon's environment, not a legion.yaml key",
@@ -300,7 +298,7 @@ func TestSettingsOfAKubernetesConfigurationNamesEveryKeyAndNoSecret(t *testing.T
 	top := keysOf(t, encoded)
 	assertKeys(t, "settings", top, wantTop)
 
-	// (b) runtime.kubernetes, and one App.
+	// (b) runtime.kubernetes, one project, and one App.
 	runtimeKeys := keysOf(t, top["runtime"])
 	assertKeys(t, "settings.runtime", runtimeKeys, []string{"name", "kubernetes"})
 	kubernetesKeys := keysOf(t, runtimeKeys["kubernetes"])
@@ -317,6 +315,11 @@ func TestSettingsOfAKubernetesConfigurationNamesEveryKeyAndNoSecret(t *testing.T
 	apps := keysOf(t, top["github_apps"])
 	assertKeys(t, "settings.github_apps", apps, []string{"implement", "review"})
 	assertKeys(t, "settings.github_apps.implement", keysOf(t, apps["implement"]), []string{"app_id", "installations"})
+	projects := keysOf(t, top["projects"])
+	assertKeys(t, "settings.projects", projects, []string{"LEGION", "WIDGETS"})
+	assertKeys(t, "settings.projects.WIDGETS", keysOf(t, projects["WIDGETS"]), []string{
+		"merge_queue_role", "merge", "slack_channels", "memory", "production_check", "deploys",
+	})
 
 	// (c) Nothing planted reaches the wire, and no key of a credential's shape does either.
 	for _, planted := range settingsFixturePlanted {
@@ -357,6 +360,14 @@ func TestSettingsOfAKubernetesConfigurationNamesEveryKeyAndNoSecret(t *testing.T
 	if settings.Projects["WIDGETS"].MergeQueueRole != "merge-queue" {
 		t.Errorf("projects = %+v, want WIDGETS's merge queue role", settings.Projects)
 	}
+	// The project that names no `production_check` shows the default role, and the one that turns
+	// the check off shows that word, never the empty string the role takes for off.
+	if got := settings.Projects["LEGION"].ProductionCheck; got != "tester" {
+		t.Errorf("projects.LEGION.production_check = %q, want tester, which a project that names no key gets", got)
+	}
+	if got := settings.Projects["WIDGETS"].ProductionCheck; got != "off" {
+		t.Errorf("projects.WIDGETS.production_check = %q, want the file's off as the word", got)
+	}
 	if settings.ProductionCheckHours != 240 {
 		t.Errorf("production_check_hours = %v, want the file's 240", settings.ProductionCheckHours)
 	}
@@ -388,12 +399,6 @@ func TestSettingsOfAKubernetesConfigurationNamesEveryKeyAndNoSecret(t *testing.T
 	}
 	if want := []string{"C0123ABCD", "C0123ABCE"}; !slices.Equal(settings.Projects["LEGION"].SlackChannels, want) {
 		t.Errorf("projects.LEGION.slack_channels = %q, want %q", settings.Projects["LEGION"].SlackChannels, want)
-	}
-	if want := []DeploySettings{{Repo: "sjawhar/legion", Workflow: ".github/workflows/release.yaml", Step: "Apply"}}; !slices.Equal(settings.Projects["LEGION"].Deploys, want) {
-		t.Errorf("projects.LEGION.deploys = %+v, want %+v", settings.Projects["LEGION"].Deploys, want)
-	}
-	if deploys := settings.Projects["WIDGETS"].Deploys; deploys == nil || len(deploys) != 0 {
-		t.Errorf("projects.WIDGETS.deploys = %#v, want the empty list a project with no deploy shows", deploys)
 	}
 	if want := map[string]string{"pool-capacity": "the pool is sized by hand for the admission cap"}; !maps.Equal(settings.Capabilities.Decided, want) {
 		t.Errorf("capabilities.decided = %q, want %q", settings.Capabilities.Decided, want)

@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
@@ -107,9 +108,10 @@ func seedUnjudgedRound(t *testing.T, pool *pgxpool.Pool) {
 }
 
 // requiredRuntime is a workflow runtime over pool whose required-checks read goes to api, logging
-// to log, serving acme/widgets alone (servedAcme), with testReviewAppID as the review App's id.
+// to log, serving acme/widgets alone (servedAcme), with testReviewAppID as the review App's id and
+// the shipped production_check default, so a merged close opens the tester's check.
 func requiredRuntime(pool *pgxpool.Pool, api string, log *slog.Logger) *workflowRuntime {
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE", Repositories: testRepositories}, log)
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE", Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps(), ProductionCheckRole: claim.RoleTester}, log)
 	return &workflowRuntime{
 		pool: pool, records: projectRecords{Store: record.NewStore(), project: "CAPTURE"}, engine: engine, handlers: []intake.Handler{engine},
 		tokens: outboxTokens{}, dispatchProject: "CAPTURE", bootID: "test-boot", log: log, githubAPI: api, repositories: servedAcme(),
@@ -547,7 +549,7 @@ func TestThePassDecidesARedAtAHeadTheBranchReturnedTo(t *testing.T) {
 	w := requiredRuntime(pool, mergeableStandIn(t, "true").URL, quietLogger())
 	start := time.Now().Add(-2 * time.Hour)
 	var now time.Time
-	w.engine = workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE", Repositories: testRepositories, Clock: func() time.Time { return now }}, quietLogger())
+	w.engine = workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE", Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps(), Clock: func() time.Time { return now }}, quietLogger())
 	w.handlers = []intake.Handler{w.engine}
 	apply := func(at time.Duration, facts ...intake.Fact) {
 		t.Helper()

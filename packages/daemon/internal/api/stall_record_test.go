@@ -2,7 +2,6 @@ package api
 
 import (
 	"encoding/json"
-	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -41,8 +40,9 @@ func stepsServed(t *testing.T, body []byte) (calls []string, views int) {
 // since that pod's plugin reads the state with a schema that knows no such key and refuses the
 // whole body for it. A pod at that contract, a pod whose claims record no contract at all, and a
 // caller the daemon cannot place in a pod — the operator's `legion state`, whose tool-call line
-// reads these records — are served it; a pod whose claims cannot be read is served the body
-// every reader since 45 takes, which is the one without.
+// reads these records — are served it. The claims are the state snapshot's own, so there is no
+// readable state whose caller's contract is unknown: a snapshot without them is no state, and
+// the route refuses it.
 func TestTheStateRouteServesAPodItsPluginContractsStallRecord(t *testing.T) {
 	full := stateFrom(t, populatedState(t), "192.0.2.1:41000", podClaims(stallRecordContract))
 	wantCalls, wantViews := stepsServed(t, full)
@@ -53,19 +53,18 @@ func TestTheStateRouteServesAPodItsPluginContractsStallRecord(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		remote string
-		sup    Supervisor
+		claims []supervise.Claim
 		stall  bool
 	}{
-		{name: "a pod whose plugin is the contract before this one", remote: statePodAddr + ":41000", sup: podClaims(stallRecordContract - 1)},
-		{name: "a pod below PodUpdateContract, below every one of them", remote: statePodAddr + ":41000", sup: podClaims(supervise.PodUpdateContract - 1)},
-		{name: "the same pod asking over IPv6", remote: "[::ffff:" + statePodAddr + "]:41000", sup: podClaims(stallRecordContract - 1)},
-		{name: "a pod whose claims cannot be read", remote: statePodAddr + ":41000", sup: claimsOnly{err: errors.New("the claims could not be read")}},
-		{name: "a pod at stallRecordContract", remote: statePodAddr + ":41000", sup: podClaims(stallRecordContract), stall: true},
-		{name: "a pod whose claims record no contract", remote: statePodAddr + ":41000", sup: podClaims(0), stall: true},
-		{name: "a caller in no pod", remote: "192.0.2.1:41000", sup: podClaims(stallRecordContract - 1), stall: true},
+		{name: "a pod whose plugin is the contract before this one", remote: statePodAddr + ":41000", claims: podClaims(stallRecordContract - 1)},
+		{name: "a pod below PodUpdateContract, below every one of them", remote: statePodAddr + ":41000", claims: podClaims(supervise.PodUpdateContract - 1)},
+		{name: "the same pod asking over IPv6", remote: "[::ffff:" + statePodAddr + "]:41000", claims: podClaims(stallRecordContract - 1)},
+		{name: "a pod at stallRecordContract", remote: statePodAddr + ":41000", claims: podClaims(stallRecordContract), stall: true},
+		{name: "a pod whose claims record no contract", remote: statePodAddr + ":41000", claims: podClaims(0), stall: true},
+		{name: "a caller in no pod", remote: "192.0.2.1:41000", claims: podClaims(stallRecordContract - 1), stall: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			body := stateFrom(t, populatedState(t), tc.remote, tc.sup)
+			body := stateFrom(t, populatedState(t), tc.remote, tc.claims)
 			calls, views := stepsServed(t, body)
 			if views != wantViews {
 				t.Fatalf("the state %s carries %d claim views, want the fixture's %d", body, views, wantViews)

@@ -1,0 +1,5 @@
+kind: Changed
+body: 'A secrets-broker request that names no `--ttl` and asks for a human-tier secret now gets a 15-minute grant (`requests.DefaultHumanGrantLifetime`) instead of 12 hours, so the window in which the broker releases and reuses that credential is about the action the approver''s card named, and a request after it waits for a person again. A signed `--ttl` is unchanged, `max-grant` still bounds it, a secret tagged `default-grant=session` still opts out, and an agent-tier request still gets 12 hours. Reuse matches the lifetime, so across the deploy a no-`--ttl` request does not reuse an existing 12-hour human grant and opens a new request instead; while an earlier 12-hour request for the same names is still pending, it is refused `409 REQUEST_PENDING`, and the session waits for that card or cancels it. The documented `LEGION_REVIEW_APP` token command now names `--ttl 12h`, because the daemon renews its lease about 40 minutes after minting and would otherwise wait for a person at every renewal.'
+time: 2026-11-05T04:05:00.000000000Z
+custom:
+    Issue: pr2793

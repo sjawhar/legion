@@ -103,8 +103,8 @@ mapping in Dispatch.
 
 Legion uses three GitHub Apps, each installed on the owner of every repository Legion works: an
 implement App, a review App and an Envoy App. The daemon mints each agent's token from its role's
-App, with the App's whole installation permissions, so the implement and review Apps' permissions
-are exactly what Legion's agents can do on GitHub:
+App, narrowed to the repositories that agent works and to the permissions its work needs, so the
+implement and review Apps' permissions bound what Legion's agents can do on GitHub:
 
 | App | Write | Read |
 | --- | --- | --- |
@@ -112,7 +112,12 @@ are exactly what Legion's agents can do on GitHub:
 | **implement** (implementer, merger) | contents, pull requests, issues, actions, statuses, workflows | checks, metadata, packages |
 
 The implement App cannot create a check run, and a review never comes from the App that wrote the
-change. `gh api /apps/<app slug> --jq .permissions` shows what an App holds. The daemon itself reads
+change. `gh api /apps/<app slug> --jq .permissions` shows what an App asks accounts for, and
+`gh api /app/installations/<id> --jq .permissions`, under the App's own JWT, shows what one
+account granted it. The mint reads that second set before each token and asks for the role's
+permissions cut down to it: a permission the account has not approved is left out of the
+request, and the daemon says so once on its stderr, naming the App, the owner and the
+permission. The daemon itself reads
 GitHub with the implement App too, in a pass as it starts and every two minutes after: it reads
 each open pull request's base branch and the checks that branch requires (its rulesets and its
 branch protection), since only those decide whether CI is red at a head, and so where Legion sends
@@ -345,26 +350,30 @@ What each part is for:
   ([Envoy](/legion/dispatch/envoy/#how-slack-mentions-arrive-and-how-an-agent-replies) says how
   the mentions arrive and where the controller's reply token is stored). A channel belongs to one
   project: the loader refuses one named twice. A daemon restarted with a changed list relaunches the
-  controller, which resumes its session hearing the new list. Its optional `deploys` names the
-  workflows that deploy its repositories to production, each a repository, a workflow file
-  directly under `.github/workflows/` (ending `.yml` or `.yaml`, the top-level file a run names,
-  not one it calls) and the step whose success is the deploy:
+  controller, which resumes its session hearing the new list.
+- **`projects.<KEY>.production_check`** (optional) decides whether a merge that closes one of the
+  project's issues opens a
+  [production check](/legion/legion/concepts/#the-production-check), and which role works it. It
+  takes `off` or `tester`, and a project that names no key gets `tester`:
 
   ```yaml
   projects:
     WIDGETS:
-      deploys: [{repo: <owner>/<name>, workflow: .github/workflows/<file>.yaml, step: Apply}]
+      production_check: tester
   ```
 
-  Each time a run of that workflow on the repository's default branch completes, the daemon reads
-  the run and its jobs from GitHub as the implement App, and wakes each open
-  [production check](/legion/legion/concepts/#the-production-check) of that repository once for
-  every job of the run whose named step succeeded after the check's pull request merged. A run a
-  pull request triggered, a step that was skipped or failed, and a step that finished before the
-  merge wake nothing. The run's `workflow_run` webhook reaches the daemon through Envoy, so the
-  Envoy App (or a repository webhook) must deliver the repository's events. The loader refuses one
-  repository's workflow named twice, and a daemon that predates the key refuses it at boot, as it
-  does any key it does not know.
+  With `tester`, the merge hands the tester the check's first look in its live session, and the
+  other five claims of the issue are retired. With `off`, no check opens at all: the close
+  retires every claim of the issue and releases its pod. The loader refuses any other value,
+  naming the key and the value it read. The check's record carries the role, written when the
+  check opened, so moving the key leaves an open check with the role it started under and a check
+  opened before this release keeps the implementer.
+
+  The checking agent names its own next look, with `wake_at` on each `pending` report but the
+  check's last, and nothing else wakes a check. `projects.<KEY>.deploys` is still accepted and
+  read for nothing: the loader warns once per project that sets it, `legion start` logs each
+  warning as it boots, and `legion start --check-config` prints each after its `Config OK` line
+  and exits 0. Remove the key.
 - **`projects.<KEY>.memory`** (optional) decides what each tree that project opens runs with.
   `mode` is `off`, the default and what a project with no block gets, `on`, which gives every new
   tree a memory group, or `random`, a fair coin for each new tree:
@@ -447,7 +456,7 @@ What each part is for:
   names the old repository. The loader refuses a pair whose two names are one repository, a
   repository renamed twice, a chain of two pairs (`a/b` to `c/d` with `c/d` to `e/f`), and one
   owner's repositories moved to two owners (`a/b` to `c/d` with `a/e` to `f/g`), since the gh
-  directory a worker reads is keyed by an owner and holds one installation's token; several
+  bundle holds one directory for that owner and one installation's token in it; several
   repositories of one owner may move to one owner, and a rename inside the owner (`a/b` to `a/c`)
   counts as a move to that owner, so `a/b` to `a/c` beside `a/e` to `f/g` is refused.
   `legion start --check-config` prints one line
@@ -462,8 +471,16 @@ What each part is for:
 - **`github_apps`**: each App takes exactly one of `private_key` (the PEM itself),
   `private_key_command` (a command whose output is the PEM) or `private_key_secret`. The daemon
   finds each App's installations itself; `installations` (owner to installation id) is optional.
-- **`gates.design`**: `root-issues` asks a person to approve every root issue's spec before any
-  phase starts; `off` skips the approval. There is no other way past the gate.
+- **`gates.design`**: the design gate steps, a list naming `decisions` (the root issue's decisions
+  document), `criteria` (its Verification document) and `spec` (its primary document), in the
+  order a person approves them. No phase of the tree starts, no released child starts and no
+  merger's READY is accepted until a person has approved the document of every step listed. The
+  default is `[spec]`, which the word `root-issues` also means; the empty list `[]` skips the
+  approval, which the word `off` also means. A list naming one step twice, and any other word,
+  is refused at load. There is no other way past the gate. `legion state --json` answers the
+  resolved list at `settings.gates.design`, and the daemon publishes it onto the project's row in
+  Dispatch, which `GET /api/v1/projects` answers as
+  `gated_steps`.
 - **`instructions`** (optional) names a Markdown file of your standing rules (required checks,
   deploy and smoke commands, scope) that is appended to every agent's system prompt. It must hold no
   secret.
@@ -492,8 +509,8 @@ What each part is for:
 - **`runtime.kubernetes.setup`** (optional) is a command, as an argv, that every role, in its own
   namespaces,
   runs before each start of its Oh My Pi. It runs in the role's working directory with the role's
-  environment, and its `git`
-  answers `https://github.com` for your project's owners with the role's App token. Oh My Pi starts
+  environment, and its `git` answers `https://github.com` for your project's repositories with the
+  role's App token: write for the issue's own repository, read for every other. Oh My Pi starts
   only once it exits 0; a failure is a failed launch, and its output is in the role's log. Under
   this runtime it must fetch nothing: a clone in a role's launch context ends the pod's gVisor
   sandbox a few seconds in, so install skills with `skills_repository` below and leave `setup` to
@@ -509,7 +526,7 @@ What each part is for:
   with `legion controller start`, or `daemon`, a pod the daemon launches and keeps running
   ([Start the controller](#start-the-controller)).
 - Workflow limits, all optional: `linger_hours` (72), `production_check_hours` (336: how long a
-  closed issue's production check waits for its deploy before its last look, 14 days by default,
+  closed issue's production check runs before its last look, 14 days by default,
   decimals allowed), `pod_update_retask_hours` (1: how long an update round waits before it asks
   a worker that has not answered again, decimals allowed), `pod_update_notice_hours` (4: how long
   an update round runs before the controller is told it is not finishing, decimals allowed),
@@ -720,7 +737,7 @@ command or writing a file:
 
 ```sh
 legion start --config legion.yaml --check-config
-# Config OK: project=WIDGETS
+# Config OK: project=WIDGETS design-gate-steps=spec
 ```
 
 Then start it:
@@ -968,7 +985,7 @@ Closing the terminal leaves the project without one, and the daemon logs
   blocked on Dispatch links: none
   memory: none
   roots waiting on a person: 1, 0 answered and waiting for a slot — WIDGETS-9 waits on ask 7f3c2a10, unanswered
-  open production checks: 1; the oldest, WIDGETS-12 #42 at 4b7d2a1, look 1 woken by merge at 2026-10-03T10:15:02Z, bound 2026-10-17T10:15:02Z
+  open production checks: 1; the oldest, WIDGETS-12 #42 at 4b7d2a1, worked by the tester, look 1 woken by merge at 2026-10-03T10:15:02Z, next look 2026-10-03T14:15:02Z
   open update rounds: none
   agents in a tool call: 1 — WIDGETS-12 implementer "bash toolu_01F3 since 2026-10-03T10:41:07Z"
   pending Dispatch status writes: none
@@ -976,8 +993,8 @@ Closing the terminal leaves the project without one, and the daemon logs
   claims nothing will wake: none
   webhook App missing: none
   consumer legion-go-WIDGETS-dispatch: 0 waiting
-  consumer legion-go-WIDGETS-dispatch-server: 0 waiting
   consumer legion-go-WIDGETS-github: 3 waiting, oldest 2s
+  consumer legion-go-WIDGETS-wake: 0 waiting
   ```
 
   The `admission` line counts the issues that hold a slot, a root or a child, against the cap: a
@@ -992,10 +1009,13 @@ Closing the terminal leaves the project without one, and the daemon logs
   capacity it freed looks idle.
 
   The `open production checks` line counts the closed issues whose production check is still
-  open and names the oldest: its pull request, merge commit, which look it is on, what woke that
-  look (`merge`, `issue.deployed`, `deploy run`, `daemon boot`, `dispatch start` (Dispatch's
-  announcement that every server process serves a build), `dispatch build` or `bound`) and when,
-  and when the check's bound comes due (`none` when no check is open).
+  open and names the oldest: its pull request, merge commit, the role working it, which look it
+  is on, what woke that look (`merge`, `check wake` — the time the checking agent named for
+  itself, or the retry of a look nobody reported — or `bound`) and when, and when its next look
+  is due (`none` when no check is open).
+  The role is on the line because a check opened before the release that gave the project
+  `production_check` is worked by the implementer, and one opened after it by the role that
+  setting names.
 
   The `agents in a tool call` line names every claim whose agent is in a tool call the daemon has
   seen the start of and no end of: how many, and each by issue and role with the tool, the call id
@@ -1021,10 +1041,10 @@ Closing the terminal leaves the project without one, and the daemon logs
   line. It is what says whether a wave is still going out, and the last `due` on it is when the
   last of that wave goes.
 
-  The `consumer` lines are the lag of the daemon's three durable consumers on the
+  The `consumer` lines are the lag of the daemon's durable consumers on the
   `ENVOY_NOTIFICATIONS` stream: `legion-go-<project>-dispatch` (Dispatch's issue events and the
-  project's repository mapping), `legion-go-<project>-dispatch-server` (Dispatch's own start) and
-  `legion-go-<project>-github` (the GitHub events of the project's repositories). Each says how
+  project's repository mapping), `legion-go-<project>-github` (the GitHub events of the project's
+  repositories) and `legion-go-<project>-wake` (the Envoy listener's wake reports). Each says how
   many messages wait for the consumer, delivered and not yet handled or not yet delivered, the
   events the daemon will acknowledge without acting on included, and how long ago the oldest of
   them was stored (`oldest unknown` when that message could not be read). A message is handled
@@ -1041,12 +1061,16 @@ Closing the terminal leaves the project without one, and the daemon logs
   `--json` prints everything the daemon records: `admission` (`cap`, `active` the issues holding a slot, `waiting` the issues in the line, `trees` the roots of the live trees, and `blocked`), each
   issue under `issues` with its `phase`, `status`, `tree` (the root of its tree), `repo` and `defaultBranch`, `holdReason`,
   `architect` and `workers` (each claim's `state`), `pullRequest` (`repo`, `head`, `checksVerdict`,
-  `fixAttempts`), `designGate` (`currentVersion`, `approvedVersion`), for a root in `awaiting_person`
+  `fixAttempts`), `designGate` (`currentVersion`, `approvedVersion`) with `gatedSteps` beside it
+  (one entry per gated step: `step`, `artifactId`, `currentVersion`, `approvedVersion`, `status`
+  — `unregistered`, `waiting`, `approved` or `changes_requested` — and `changesReason`), for a root in `awaiting_person`
   `waitingOn` (`kind` `ask` with its `ask`, or `gate` with `gateVersion` and `artifactId`; `since`; and
   `answeredAt` with `answeredBy` once it was answered) and, for a closed
   issue whose
-  production check is open, `check` (`repo`, `pullRequest`, `mergeCommit`, `openedAt`, `looks`,
-  `lookOpen`, `lastWake` with its `kind`, `detail` and `at`, `nextWakeAt`, `last`), the
+  production check is open, `check` (`repo`, `pullRequest`, `mergeCommit`, `openedAt`, `role` —
+  the role the check recorded as the one that works it — `looks`,
+  `lookOpen`, `lastWake` with its `kind`, `detail` and `at`, `nextWakeAt`, when the next look is
+  due, and `last`), the
   `controllerLocator`, `pendingStatusWrites`,
   `heldOutboxRows` ([An issue's stop or start waits behind its own launch](/legion/legion/troubleshooting/#an-issues-stop-or-start-waits-behind-its-own-launch)),
   `strandedClaims` ([A tree does not move after a restart](/legion/legion/troubleshooting/#a-tree-does-not-move-after-a-restart)),
@@ -1065,7 +1089,7 @@ Closing the terminal leaves the project without one, and the daemon logs
   broker is configured:
 
   ```sh
-  legion state --config legion.yaml --json | jq '.issues["WIDGETS-12"] | {phase, status, holdReason, pullRequest, designGate}'
+  legion state --config legion.yaml --json | jq '.issues["WIDGETS-12"] | {phase, status, holdReason, pullRequest, designGate, gatedSteps}'
   ```
 
 - **The daemon's log** (standard error) names every launch, death, refusal and relaunch; the lines

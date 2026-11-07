@@ -1,0 +1,27 @@
+-- 20261105093503_user_threads_dismissed.up.sql
+--
+-- INFRA-450: the Dismissed view reads a person's dismissed threads
+-- (`GET /api/v1/me/replies?state=dismissed`), newest dismissal first, 200 at a time from a cursor.
+-- Neither user_threads_unread (0095) nor user_threads_inbox (20261105093502) covers a dismissed
+-- row, and neither orders by the dismissal, so without this index that read is a scan of
+-- user_threads and a sort of whatever it keeps. The column order is the read's own: the login it
+-- narrows to, then the order it answers in and the cursor it resumes from, which is the same pair
+-- (api/replies.go, myRepliesDismissed), so one index scan answers a page with no sort.
+--
+-- Building the index takes SHARE on user_threads, which blocks that table's writers - the triggers
+-- of 0095-0097, so every comment, answer and issue message waits for the build - and no reader. A
+-- plain create index scans the table and sorts every row the predicate keeps, which is every row
+-- carrying a dismissal mark; the predicate is the read's own filter, and because 20261105093501
+-- clears the mark when somebody else writes again, those rows are exactly the dismissed threads.
+-- The window is therefore one scan and sort of user_threads, with no row rewritten and none
+-- refused, and the census answers 0. Migrations run in one transaction, so create index
+-- concurrently is impossible here; it is a plain create index, as 0148's is.
+--
+-- Measured on this pod's test database: user_threads held 24 rows after the api suite's Inbox
+-- seeds, the largest any one test's database held while
+-- `go test ./internal/dispatch/api/ -run 'InboxRead|Replies|InboxRows'` ran (sampled every 0.3 s).
+-- Every one of those rows carried a null mark, so the index was built empty; on a production table
+-- the window is one scan of however many rows it holds, of which only the dismissed ones are
+-- sorted into the index.
+create index user_threads_dismissed on user_threads (login, dismissed_at desc, thread_id desc)
+  where dismissed_at is not null;

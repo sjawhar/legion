@@ -29,6 +29,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
@@ -187,7 +188,7 @@ func TestSpawnOverAnExistingSandbox(t *testing.T) {
 			sandboxObject(t, name, "uid-sandbox-kept", modeRunning, labels),
 			podObject(name, "uid-pod-old", "uid-sandbox-kept", labels, runningStatus()),
 		})
-		g.suspendDelay = 50 * time.Millisecond
+		g.suspendDelay.Store(int64(50 * time.Millisecond))
 		loc := g.spawn(workerSpec(t))
 		expectSteps(t, steps(t, g.writes(), name), "suspend", "create secret", "run", "record addresses")
 		if loc.Sandbox.PodUID == "uid-pod-old" || loc.Sandbox.PodUID != string(g.pod(name).UID) {
@@ -388,7 +389,7 @@ func supersededIssue(t *testing.T, options ...rigOption) *rig {
 		withSupersededDisk(t, sandboxObject(t, name, "uid-sandbox-superseded", modeRunning, labels)),
 		podObject(name, "uid-pod-old", "uid-sandbox-superseded", labels, runningStatus()),
 	}, options...)
-	g.suspendDelay = 50 * time.Millisecond
+	g.suspendDelay.Store(int64(50 * time.Millisecond))
 	return g
 }
 
@@ -669,7 +670,7 @@ func TestResumeAfterAFailedPod(t *testing.T) {
 		}),
 		oldSecret,
 	})
-	g.suspendDelay = 50 * time.Millisecond
+	g.suspendDelay.Store(int64(50 * time.Millisecond))
 	g.launcher(workerToken)
 	spec := workerSpec(t)
 	spec.Generation, spec.BootToken, spec.ResumeSessionFile = 2, "boot-g2", resumeSession
@@ -1164,10 +1165,10 @@ func TestBootRefusesWhenTheAPIServerRefusesTheConnection(t *testing.T) {
 // deadlineTokens records whether each mint's context carries a deadline.
 type deadlineTokens struct{ bounded []bool }
 
-func (d *deadlineTokens) Token(ctx context.Context, owner string) (string, error) {
+func (d *deadlineTokens) Token(ctx context.Context, repo ghrepo.Repository) (string, error) {
 	_, ok := ctx.Deadline()
 	d.bounded = append(d.bounded, ok)
-	return "ghs_provision_" + owner, nil
+	return "ghs_provision_" + repo.Owner(), nil
 }
 
 // The provisioning token is minted under the pod's launch turn, so its mint is bounded like any
@@ -1218,11 +1219,11 @@ func TestAFailedStepOfAnIssuePodsProvisioningReleasesThePodsTurn(t *testing.T) {
 		},
 		"a role's github credential mint": {
 			fail: func(t *testing.T, failed *atomic.Bool) (rigOption, func(g *rig) runtime.SpawnSpec) {
-				credential := func(ctx context.Context, role claim.Role, owner string) (ghconfig.Bundle, error) {
+				credential := func(ctx context.Context, role claim.Role, repo ghrepo.Repository) (ghconfig.Bundle, error) {
 					if failed.CompareAndSwap(false, true) {
 						return ghconfig.Bundle{}, errors.New("no installation token: GitHub is down")
 					}
-					return staticCredential(ctx, role, owner)
+					return staticCredential(ctx, role, repo)
 				}
 				return withOptions(func(o *Options) { o.GitHubCredential = credential }), func(*rig) runtime.SpawnSpec { return rootSpec(t) }
 			},
@@ -1268,11 +1269,11 @@ func failedLaunch(t *testing.T, g *rig, spec runtime.SpawnSpec) error {
 // outageTokens refuses its next installation token, once, as a GitHub outage would.
 type outageTokens struct{ failed *atomic.Bool }
 
-func (o *outageTokens) Token(ctx context.Context, owner string) (string, error) {
+func (o *outageTokens) Token(ctx context.Context, repo ghrepo.Repository) (string, error) {
 	if o.failed.CompareAndSwap(false, true) {
 		return "", errors.New("no installation token: GitHub is down")
 	}
-	return staticTokens{}.Token(ctx, owner)
+	return staticTokens{}.Token(ctx, repo)
 }
 
 // A role starting into a running issue pod reads every launcher Secret of the pod to check the pod

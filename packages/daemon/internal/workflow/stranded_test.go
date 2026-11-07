@@ -48,8 +48,8 @@ func (s *strandedStore) TreeLifecycles(_ context.Context, _ pgx.Tx, _ string, tr
 
 // Gates and OwedStarts answer nothing: Stranded reads the live trees of the line facts and no
 // other part of them.
-func (s *strandedStore) Gates(context.Context, pgx.Tx, []string) (map[string]record.DesignGate, error) {
-	return map[string]record.DesignGate{}, nil
+func (s *strandedStore) Gates(context.Context, pgx.Tx, []string) (map[string]map[record.DesignStep]record.DesignGate, error) {
+	return map[string]map[record.DesignStep]record.DesignGate{}, nil
 }
 
 func (s *strandedStore) OwedStarts(context.Context, pgx.Tx, string) ([]record.OwedStart, error) {
@@ -152,7 +152,7 @@ func TestStrandedNamesAReleasedClaimOnlyWhenItsWakeNeverBroughtThePodBack(t *tes
 		{Issue: "LEGION-4", Role: string(claim.RolePlanner), At: strandedNow, Stuck: true},
 	}
 
-	got, err := Stranded(context.Background(), nil, s, "LEGION", claims, resumes, strandedNow)
+	got, err := Stranded(context.Background(), nil, s, "LEGION", nil, claims, resumes, strandedNow)
 	if err != nil {
 		t.Fatalf("Stranded: %v", err)
 	}
@@ -164,7 +164,7 @@ func TestStrandedNamesAReleasedClaimOnlyWhenItsWakeNeverBroughtThePodBack(t *tes
 	// A wake exactly at the bound has not run out of it.
 	atTheBound := []ReleasedWake{{Issue: "LEGION-1", Role: string(claim.RoleImplementer),
 		At: strandedNow.Add(-StrandedReleaseWake)}}
-	got, err = Stranded(context.Background(), nil, s, "LEGION", []supervise.Claim{never}, atTheBound, strandedNow)
+	got, err = Stranded(context.Background(), nil, s, "LEGION", nil, []supervise.Claim{never}, atTheBound, strandedNow)
 	if err != nil {
 		t.Fatalf("Stranded at the bound: %v", err)
 	}
@@ -272,7 +272,7 @@ func TestStrandedNamesTheClaimsNothingWillWake(t *testing.T) {
 		},
 	}
 
-	got, err := Stranded(context.Background(), nil, s, "LEGION", claims, nil, strandedNow)
+	got, err := Stranded(context.Background(), nil, s, "LEGION", nil, claims, nil, strandedNow)
 	if err != nil {
 		t.Fatalf("Stranded: %v", err)
 	}
@@ -317,7 +317,7 @@ func TestStrandedLeavesOutTheWorkersTheRuleResumes(t *testing.T) {
 		queued: map[claim.Token][]record.QueuedSupervise{
 			unknownStarted.Token: {{ID: 21, Request: record.SuperviseRequest{Op: "start", Tree: "LEGION-5", Role: claim.RoleTester, Generation: 2, Phase: phase.Testing}}},
 		}}
-	got, err := Stranded(context.Background(), nil, store, "LEGION", claims, nil, strandedNow)
+	got, err := Stranded(context.Background(), nil, store, "LEGION", nil, claims, nil, strandedNow)
 	if err != nil {
 		t.Fatalf("Stranded: %v", err)
 	}
@@ -351,7 +351,7 @@ func TestStrandedReadsRoleRunsInBatches(t *testing.T) {
 		claims = append(claims, current)
 	}
 
-	got, err := Stranded(context.Background(), nil, store, "LEGION", claims, nil, strandedNow)
+	got, err := Stranded(context.Background(), nil, store, "LEGION", nil, claims, nil, strandedNow)
 	if err != nil {
 		t.Fatalf("Stranded: %v", err)
 	}
