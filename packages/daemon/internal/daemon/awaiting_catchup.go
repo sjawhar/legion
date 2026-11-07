@@ -18,11 +18,12 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
-// The boot catch-up of the roots that run or wait on a person (admitted in a slot, awaiting_person): what a
-// root's durable Dispatch stream may not have delivered while this daemon was down, read from the
-// root's Dispatch event log and applied through the live decoder and handlers, so the record — the
-// asks' mirror, the architect's hand-backs, the gate, the answers — stands as the live events would
-// have left it. Each root is held out of admission's decision whether it waits on a person from
+// The boot catch-up of the roots whose own architect runs or waits on a person (at admitted in a
+// slot with their design gate never opened, or in awaiting_person): what a root's durable Dispatch
+// stream may not have delivered while this daemon was down, read from the root's Dispatch event
+// log and applied through the live decoder and handlers, so the record — the asks' mirror, the
+// architect's hand-backs, the gate, the answers — stands as the live events would have left it.
+// Each root is held out of admission's decision whether it waits on a person from
 // before the boot's own admission pass until its window is applied (admit's HoldForCatchUp), and
 // one pass then decides it, so no root enters awaiting_person or is told in place halfway through
 // what it missed.
@@ -61,16 +62,29 @@ const (
 	catchUpRetryDelay = 2 * time.Second
 )
 
-// catchesUp says whether the boot's catch-up reads issue: a tree root of the daemon's project, not
-// lingering, in awaiting_person, or at admitted holding a slot (slotted). A root waiting in line
-// for its first slot never ran: its architect has handed nothing back, and its admission is a
-// handout of its own.
-func (w *workflowRuntime) catchesUp(issue record.Issue, slotted map[string]struct{}) bool {
+// catchesUp says whether the boot's catch-up reads issue: a tree root of the daemon's project,
+// not lingering, either in awaiting_person or a root ReconcileAwaiting could move into it —
+// at admitted, holding the admission slot its own work takes, its design gate never opened
+// (record.CanWaitOnPerson, which is decideAwait's rule 0). gate is the root's own design gate,
+// the zero value for a root with none registered. A root in a phase of its own tree is read by
+// neither this nor ReconcileAwaiting: the phase's worker holds the work, and the root's
+// architect waits for it.
+//
+// The boot must read every root that pass can move, or it would decide one on a mirror of its
+// asks that has not caught up with what Dispatch recorded while the daemon was down — a person's
+// answer given then would read as unanswered, and the root would enter awaiting_person. A root
+// waiting in line for its first slot is not one of them: its architect has never run and has
+// handed nothing back, its admission is a handout of its own, and the event log below that
+// handout is history this release must not replay.
+func (w *workflowRuntime) catchesUp(issue record.Issue, gate record.DesignGate, slotted map[string]struct{}) bool {
 	if issue.Project != w.dispatchProject || !claim.IsTreeRoot(issue.Key, issue.Tree) || issue.Lingers() {
 		return false
 	}
+	if issue.Phase == phase.AwaitingPerson {
+		return true
+	}
 	_, holds := slotted[issue.Key]
-	return issue.Phase == phase.AwaitingPerson || issue.Phase == phase.Admitted && holds
+	return record.CanWaitOnPerson(issue, gate, holds)
 }
 
 // slottedIssues is the key of every issue holding an admission slot.
@@ -98,18 +112,39 @@ func (w *workflowRuntime) holdForCatchUp(ctx context.Context, tx pgx.Tx) error {
 	if err != nil {
 		return fmt.Errorf("list the roots to catch up: %w", err)
 	}
+	gates, err := w.rootGates(ctx, tx, issues)
+	if err != nil {
+		return err
+	}
 	slotted, err := w.slottedIssues(ctx, tx)
 	if err != nil {
 		return err
 	}
 	var keys []string
 	for _, issue := range issues {
-		if _, done := w.caughtUp[caughtUpKey(issue)]; w.catchesUp(issue, slotted) && !done {
+		if _, done := w.caughtUp[caughtUpKey(issue)]; w.catchesUp(issue, gates[issue.Key], slotted) && !done {
 			keys = append(keys, issue.Key)
 		}
 	}
 	w.admission.HoldForCatchUp(keys...)
 	return nil
+}
+
+// rootGates is the design gate of every tree root among issues, by key, in one read: what the
+// predicate above asks of each of them. A root with none registered has no entry, which reads as
+// the zero gate, a root whose architect has still to write its spec.
+func (w *workflowRuntime) rootGates(ctx context.Context, tx pgx.Tx, issues []record.Issue) (map[string]record.DesignGate, error) {
+	roots := make([]string, 0, len(issues))
+	for _, issue := range issues {
+		if claim.IsTreeRoot(issue.Key, issue.Tree) {
+			roots = append(roots, issue.Key)
+		}
+	}
+	gates, err := w.records.Gates(ctx, tx, roots)
+	if err != nil {
+		return nil, fmt.Errorf("read the design gates of the roots to catch up: %w", err)
+	}
+	return gates, nil
 }
 
 // caughtUpKey names a root's catch-up in this boot: its key and generation.
@@ -143,17 +178,21 @@ func (w *workflowRuntime) catchUpAwaiting(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		gates, err := w.rootGates(listing, tx, issues)
+		if err != nil {
+			return err
+		}
 		slotted, err := w.slottedIssues(listing, tx)
 		if err != nil {
 			return err
 		}
 		for _, issue := range issues {
-			if !w.catchesUp(issue, slotted) {
+			if !w.catchesUp(issue, gates[issue.Key], slotted) {
 				continue
 			}
 			root := catchUpRoot{issue: issue}
-			if root.gate, err = w.records.Gate(listing, tx, issue.Key); err != nil {
-				return err
+			if gate, registered := gates[issue.Key]; registered {
+				root.gate = &gate
 			}
 			if root.cursor, root.hasCursor, err = w.records.CaughtUpSeq(listing, tx, issue.Key); err != nil {
 				return err

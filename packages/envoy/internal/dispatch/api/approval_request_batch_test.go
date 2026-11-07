@@ -122,11 +122,11 @@ func countedApprovalRequest(t *testing.T, handler http.Handler, artifactID strin
 	return response
 }
 
-// One approval request on a document with no request open costs at most thirty-four round trips,
+// One approval request on a document with no request open costs at most thirty-five round trips,
 // counted as the issue read's are (roundTrips): one for each statement it runs on its own and one
 // for each batch, whatever that batch holds. The budget is a ceiling, and the enumeration below
 // is where it goes today: the first eight read the coverage the answer reports, before the
-// request's transaction opens (approvalCoverage); the twenty-six after them are the transaction
+// request's transaction opens (approvalCoverage); the twenty-seven after them are the transaction
 // itself. In the order it sends them:
 //
 //  1. the artifact row the coverage is read for (loadArtifact);
@@ -154,25 +154,28 @@ func countedApprovalRequest(t *testing.T, handler http.Handler, artifactID strin
 //  18. the ask row (openApprovalAsk);
 //  19. the author's follow (asks.FollowAuthor);
 //  20. the question's references, none of which it names (replaceReferences);
-//  21. the ask's block-state row, inserted where it has none (refs.IndexAskPartsCounted, through
+//  21. the row the ask owes the grammar's re-index queue, deleted where it has one
+//     (refs.settleOwed): the write holds the source's row and has just read its text with the
+//     whole grammar, so nothing is owed for it any more (INFRA-869);
+//  22. the ask's block-state row, inserted where it has none (refs.IndexAskPartsCounted, through
 //     lockItemState);
-//  22. that state row, read and locked;
-//  23. the part rows of the new ask - its question and each option (writeItemBlocks);
-//  24. the text of each part at the new revision;
-//  25. the state the parts were indexed at (storeItemState);
-//  26. the thread's followers, for the event payload (events.AskEventPayload);
-//  27. the issue's sequence, locked (appendEvent);
-//  28. the ask.opened event row;
-//  29. that event's payload, rewritten with its own id (events.Broker.Append);
-//  30. the issue's last_seq;
-//  31. the references' source sequence (refs.Stamp);
-//  32. the source sequence of the links the ask's parts hold, none here (refs.Stamp's block arm);
-//  33. a batch of 2: the approval as the request leaves it (attachApproval again);
-//  34. commit.
+//  23. that state row, read and locked;
+//  24. the part rows of the new ask - its question and each option (writeItemBlocks);
+//  25. the text of each part at the new revision;
+//  26. the state the parts were indexed at (storeItemState);
+//  27. the thread's followers, for the event payload (events.AskEventPayload);
+//  28. the issue's sequence, locked (appendEvent);
+//  29. the ask.opened event row;
+//  30. that event's payload, rewritten with its own id (events.Broker.Append);
+//  31. the issue's last_seq;
+//  32. the references' source sequence (refs.Stamp);
+//  33. the source sequence of the links the ask's parts hold, none here (refs.Stamp's block arm);
+//  34. a batch of 2: the approval as the request leaves it (attachApproval again);
+//  35. commit.
 //
 // The four batches hold ten statements between them, so a request that sent each statement on
 // its own would send forty round trips.
-func TestApprovalRequestsCostAtMostThirtyFourRoundTrips(t *testing.T) {
+func TestApprovalRequestsCostAtMostThirtyFiveRoundTrips(t *testing.T) {
 	database := storetest.Open(t)
 	counter := &roundTrips{}
 	traced := &store.Store{Pool: storetest.Traced(t, database.Pool, counter, nil)}
@@ -194,10 +197,10 @@ func TestApprovalRequestsCostAtMostThirtyFourRoundTrips(t *testing.T) {
 		t.Fatalf("request approval: status=%d body=%s", response.Code, response.Body.String())
 	}
 	// A ceiling, not an equality: the round trips are counted through helpers several other
-	// requests share, so an exact 34 reds this row for a change that sends one round trip fewer
-	// and costs nothing. What the name states is the cost bound, and the enumeration above says
-	// where the thirty-four go.
-	const ceiling = 34
+	// requests share, so an exact count reds this row for a change that sends one round trip
+	// fewer and costs nothing. What the name states is the cost bound, and the enumeration above
+	// says where the thirty-five go.
+	const ceiling = 35
 	if len(counted) > ceiling {
 		t.Fatalf("the approval request made %d round trips, want at most %d:\n%s",
 			len(counted), ceiling, strings.Join(roundTripLines(counted), "\n"))

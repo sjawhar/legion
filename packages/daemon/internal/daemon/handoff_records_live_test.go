@@ -14,36 +14,30 @@
 // repository mapping, the issue list, its status writes and messages, and the read of the record a
 // completion names - goes to the real routes. The worker side is the real `dispatch` CLI
 // (packages/envoy-client/bin/dispatch.ts under bun) run as each claim's registered session, and
-// the daemon's own routes: registration, grants and POST /legion/v1/handoff/complete. The import's
-// records are written by `legion handoffs import` itself (handoffimport.Run) against the running
-// daemon's state and the real Dispatch.
+// the daemon's own routes: registration, grants and POST /legion/v1/handoff/complete.
 //
 // What is stood in for lies outside the records. The broker is a native nats-server the script
-// starts and names in LEGION_E2E_NATS_URL. GitHub is two REST stand-ins: the daemon's
+// starts and names in LEGION_E2E_NATS_URL. GitHub is the daemon's own REST stand-in
 // (mergedRootWaitsGitHub, which answers each repository with default branch main and nothing
-// else), and the import's (handoffRecordsGitHub), one branch carrying `.legion/<KEY>/`, which the
-// import reads through GitHub's contents API and, its issue in testing, leaves as it is. The Apps'
-// tokens are workflowTokenRecorder's placeholders, Envoy's listener is the package's
-// noticeListener, and no
-// agent runs: each claim is launched by the package's fake runtime, which provisions its workspace
-// in its own pod, and is driven over the daemon's worker stream as its pane's shim drives it
-// (handoffClaimant). The issues, their pull requests, their trees' slots and the claims the boot
-// relaunches are seeded through the store, as every daemon test seeds its fixture; every
-// assertion is a read of GET /legion/v1/state, of a route's answer, of what the CLI printed, of
-// Dispatch's own routes, or of the task a started worker's shim was prompted with.
+// else). The Apps' tokens are workflowTokenRecorder's placeholders, Envoy's listener is the
+// package's noticeListener, and no agent runs: each claim is launched by the package's fake
+// runtime, which provisions its workspace in its own pod, and is driven over the daemon's worker
+// stream as its pane's shim drives it (handoffClaimant). The issues, their pull requests, their
+// trees' slots and the claims the boot relaunches are seeded through the store, as every daemon
+// test seeds its fixture; every assertion is a read of GET /legion/v1/state, of a route's answer,
+// of what the CLI printed, of Dispatch's own routes, or of the task a started worker's shim was
+// prompted with.
 package daemon
 
 import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -60,7 +54,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
-	"github.com/sjawhar/legion/daemon/internal/handoffimport"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
@@ -92,10 +85,9 @@ type handoffRecordsLive struct {
 	root     string
 	dispatch *handoffDispatch
 	github   string
-	importGH *handoffRecordsGitHub
 	cliHome  string
-	// a6 is the issue A6 writes to, on Dispatch alone; a3 and a10 are in planning, a7 in testing
-	// with its branch carrying `.legion/`, and renew implementing, the HANDOFF_NOT_NEW step's.
+	// a6 is the issue A6 writes to, on Dispatch alone; a3 and a10 are in planning, a7 in testing,
+	// and renew implementing, the HANDOFF_NOT_NEW step's.
 	a6, a3, a7, renew, a10 string
 	// claimants is each registered claim, by token.
 	claimants map[claim.Token]*handoffClaimant
@@ -112,7 +104,7 @@ func TestHandoffRecordsLive(t *testing.T) {
 	r.step("a6-control-a-body-one-byte-over-the-cap-is-refused", r.a6OverCap)
 	r.step("a3-a-record-another-session-wrote-is-refused-at-completion", r.a3Refused)
 	r.step("a3-control-the-planners-own-record-moves-the-issue-to-implementing", r.a3Accepted)
-	r.step("a7-the-imports-record-is-refused-the-tester-writes-it-again-and-the-reviewer-is-told-it", r.a7Import)
+	r.step("a7-a-record-the-daemons-session-wrote-is-refused-the-tester-writes-it-again-and-the-reviewer-is-told-it", r.a7DaemonSessionRecord)
 	r.step("handoff-not-new-the-implementers-round-1-record-is-refused-in-round-2", r.notNew)
 	r.step("a10-control-with-dispatch-up-the-first-write-succeeds", r.a10Up)
 	r.step("a10-with-dispatch-stopped-the-write-fails-and-the-completion-is-refused", r.a10Down)
@@ -154,7 +146,6 @@ func newHandoffRecordsLive(t *testing.T) *handoffRecordsLive {
 	}
 	r.cfg.DispatchURL = r.dispatch.base
 	r.setUpDispatch()
-	r.importGH = newHandoffRecordsGitHub(t, r.a7)
 	r.seed()
 	o := fakeRuntime(r.rt, r.built)
 	o.workflowTokens = &workflowTokenRecorder{}
@@ -186,7 +177,7 @@ func (r *handoffRecordsLive) setUpDispatch() {
 	}
 	r.a6 = create("A6: a 40 KB handoff round trip", "backlog", []string{})
 	r.a3 = create("A3: the planner's handoff under another session", "in_progress", []string{"legion"})
-	r.a7 = create("A7: a tester mid-phase at the import", "in_progress", []string{"legion"})
+	r.a7 = create("A7: a tester on a record the daemon's session wrote", "in_progress", []string{"legion"})
 	r.renew = create("HANDOFF_NOT_NEW: the implementer's second round", "in_progress", []string{"legion"})
 	r.a10 = create("A10: Dispatch stops under a completion", "in_progress", []string{"legion"})
 }
@@ -290,9 +281,10 @@ func (r *handoffRecordsLive) a6RoundTrip() {
 	}
 }
 
-// Step A6's control. A body of the cap plus one byte is refused: the CLI refuses it before it
-// sends anything, and Dispatch itself, sent it raw, answers 413 CAP_EXCEEDED. The issue still
-// holds two versions.
+// Step A6's control. A body of the cap plus one byte is refused, by Dispatch, which owns every
+// bound: the CLI sends it and exits non-zero carrying the server's 413 CAP_EXCEEDED (contracts'
+// handoffProblem checks no length of its own), and Dispatch itself, sent the same body raw,
+// answers 413 CAP_EXCEEDED. The issue still holds two versions.
 func (r *handoffRecordsLive) a6OverCap() {
 	t := r.t
 	const session = "ses_a6_writer"
@@ -300,8 +292,8 @@ func (r *handoffRecordsLive) a6OverCap() {
 	file := r.bodyFile("over-cap", body)
 	out, code := r.cli(session, "handoff-write", "--issue", r.a6, "--phase", "implement", "--body-file", file)
 	over := fmt.Sprintf("1 bytes over the %d-byte limit", handoffBodyMax)
-	if code == 0 || !strings.Contains(out, "was not called") || !strings.Contains(out, over) {
-		t.Fatalf("handoff-write of %d bytes exited %d: %q, want a refusal before the call naming %q", len(body), code, out, over)
+	if code == 0 || !strings.Contains(out, "CAP_EXCEEDED") || !strings.Contains(out, over) {
+		t.Fatalf("handoff-write of %d bytes exited %d: %q, want a refusal naming CAP_EXCEEDED and %q", len(body), code, out, over)
 	}
 	r.note("handoff-write of a %d-byte body exited %d: %s", len(body), code, strings.Join(strings.Fields(out), " "))
 	status, answer := r.dispatch.agentPost("/api/v1/issues/"+r.a6+"/handoffs/implement", map[string]any{
@@ -360,69 +352,48 @@ func (r *handoffRecordsLive) a3Accepted() {
 	r.note("read back: %s is in %s", r.a3, got.Phase)
 }
 
-// Step A7. `legion handoffs import` writes the files on a7's branch as its records under the
-// daemon's session and, a7 being in testing under the records' daemon, defers the removal of
-// `.legion/` and writes nothing to the branch; the tester's completion naming the imported test
-// record is refused 403 HANDOFF_SESSION_MISMATCH; the tester reads it with `dispatch
-// handoff-read`, writes it again under its own session, and completes; and the reviewer the pass
-// starts is told that record in its task, the version its command reads.
-func (r *handoffRecordsLive) a7Import() {
+// Step A7. A test record written under the daemon's own session, as the issues carry from before
+// handoffs moved to Dispatch, is refused at the tester's completion 403
+// HANDOFF_SESSION_MISMATCH; the tester reads it with `dispatch handoff-read`, writes it again
+// under its own session, and completes; and the reviewer the pass starts is told that record in
+// its task, the version its command reads.
+func (r *handoffRecordsLive) a7DaemonSessionRecord() {
 	t := r.t
 	tester := r.claimant(claim.RoleTester, r.a7, "ses_a7_tester")
-	var stdout, stderr bytes.Buffer
-	state := func(ctx context.Context) ([]byte, error) {
-		request, err := http.NewRequestWithContext(ctx, http.MethodGet, r.cfg.DaemonURL+"/legion/v1/state", nil)
-		if err != nil {
-			return nil, err
-		}
-		response, err := http.DefaultClient.Do(request)
-		if err != nil {
-			return nil, err
-		}
-		defer response.Body.Close()
-		if response.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("GET /legion/v1/state answered %d", response.StatusCode)
-		}
-		return io.ReadAll(response.Body)
+	body := r.smallBody(r.a7, "test", "written under the daemon's session before handoffs moved to Dispatch")
+	// The seed goes to Dispatch's own route with the daemon's session as its actor, the author of
+	// the records the issues carry from before handoffs moved to Dispatch: the `dispatch` CLI is
+	// this harness's worker side and refuses a session id with a colon in it, which
+	// legion-daemon:<PROJECT> has, so that nothing speaks as the daemon by setting a variable.
+	daemonSession := dispatch.DaemonSession(r.a7)
+	status, answer := r.dispatch.agentPost("/api/v1/issues/"+r.a7+"/handoffs/test", map[string]any{
+		"actor": map[string]string{"kind": "session", "id": daemonSession}, "body": string(body),
+	})
+	if status != http.StatusCreated {
+		t.Fatalf("the write of %s's test handoff under %s = %d %s, want 201", r.a7, daemonSession, status, answer)
 	}
-	code := handoffimport.Run(context.Background(), handoffimport.Options{
-		Project: r.cfg.Project, State: state, GitHubAPI: r.importGH.server.URL,
-		Tokens: &workflowTokenRecorder{}, Dispatch: dispatch.New(r.dispatch.base, r.dispatch.token),
-	}, &stdout, &stderr)
-	for _, line := range strings.Split(strings.TrimSpace(stdout.String()), "\n") {
-		r.note("legion handoffs import: %s", line)
+	r.note("POST /api/v1/issues/%s/handoffs/test as session %s: %d", r.a7, daemonSession, status)
+	daemonRecord := r.dispatch.latest(r.a7, "test")
+	if daemonRecord.Author.Kind != "session" || daemonRecord.Author.ID != daemonSession || daemonRecord.Body != string(body) {
+		t.Fatalf("the test record of %s = %+v, want the body written under %s", r.a7, daemonRecord, daemonSession)
 	}
-	if code != 0 {
-		t.Fatalf("legion handoffs import exited %d: %s%s", code, stdout.String(), stderr.String())
-	}
-	deferred := r.a7 + ": removal deferred: " + r.a7 + " is in testing; run the import again once the phase ends"
-	for _, want := range []string{r.a7 + " plan: imported v1", r.a7 + " implement: imported v1", r.a7 + " test: imported v1", deferred} {
-		if !strings.Contains(stdout.String(), want) {
-			t.Fatalf("the import printed %q, want a line %q", stdout.String(), want)
-		}
-	}
-	r.importGH.heldNoRemoval(t, r)
-	imported := r.dispatch.latest(r.a7, "test")
-	if imported.Author.Kind != "session" || imported.Author.ID != dispatch.DaemonSession(r.a7) || imported.Body != r.importGH.files["test.json"] {
-		t.Fatalf("the imported test record = %+v, want the branch's test.json under %s", imported, dispatch.DaemonSession(r.a7))
-	}
-	r.note("Dispatch's test record of %s: version %d (id %s) by session %s, the branch's test.json byte for byte", r.a7, imported.Version, imported.ID, imported.Author.ID)
+	r.note("Dispatch's test record of %s: version %d (id %s) by session %s, the body written byte for byte", r.a7, daemonRecord.Version, daemonRecord.ID, daemonRecord.Author.ID)
 
-	status, failure := tester.complete(api.HandoffCompleteRequest{Summary: "tested", Verdict: "pass", HandoffID: imported.ID, HandoffVersion: imported.Version})
+	status, failure := tester.complete(api.HandoffCompleteRequest{Summary: "tested", Verdict: "pass", HandoffID: daemonRecord.ID, HandoffVersion: daemonRecord.Version})
 	if status != http.StatusForbidden || failure.Code != "HANDOFF_SESSION_MISMATCH" ||
-		!strings.Contains(failure.Error, dispatch.DaemonSession(r.a7)) || !strings.Contains(failure.Error, tester.session) {
-		t.Fatalf("the tester's completion naming the imported record = %d %+v, want 403 HANDOFF_SESSION_MISMATCH naming %s and %s",
-			status, failure, dispatch.DaemonSession(r.a7), tester.session)
+		!strings.Contains(failure.Error, daemonSession) || !strings.Contains(failure.Error, tester.session) {
+		t.Fatalf("the tester's completion naming the daemon session's record = %d %+v, want 403 HANDOFF_SESSION_MISMATCH naming %s and %s",
+			status, failure, daemonSession, tester.session)
 	}
-	r.note("POST /legion/v1/handoff/complete as %s naming the imported record: %d %s: %s", tester.session, status, failure.Code, failure.Error)
+	r.note("POST /legion/v1/handoff/complete as %s naming the daemon session's record: %d %s: %s", tester.session, status, failure.Code, failure.Error)
 	r.holdPhase(r.a7, phase.Testing)
 
 	meta, body := r.read(tester.session, r.a7, "test")
 	r.note("handoff-read as %s: %s", tester.session, meta)
 	rewritten := r.write(tester.session, r.a7, "test", body)
 	r.note("handoff-write as %s of the body it read: %s", tester.session, rewritten.line)
-	if again := r.dispatch.latest(r.a7, "test"); again.Body != imported.Body || again.Author.ID != tester.session {
-		t.Fatalf("the rewritten test record = %+v, want the imported body under %s", again, tester.session)
+	if again := r.dispatch.latest(r.a7, "test"); again.Body != daemonRecord.Body || again.Author.ID != tester.session {
+		t.Fatalf("the rewritten test record = %+v, want the same body under %s", again, tester.session)
 	}
 	status, failure = tester.complete(api.HandoffCompleteRequest{Summary: "tested", Verdict: "pass", HandoffID: rewritten.id, HandoffVersion: rewritten.version})
 	if status != http.StatusOK {
@@ -1022,82 +993,4 @@ func (d *handoffDispatch) latest(key, word string) handoffRecord {
 	var latest handoffRecord
 	d.agentGet("/api/v1/issues/"+key+"/handoffs/"+word+"/latest", &latest)
 	return latest
-}
-
-// handoffRecordsGitHub is GitHub's REST API as `legion handoffs import` reads it for one branch,
-// legion/<key> on liveRepo, whose head carries `.legion/<key>/{plan,implement,test}.json`: the
-// ref, and the contents API's listings and files. Every request is recorded, so a write the import
-// must not make is seen; every other path, and every other branch, is 404, which the import
-// reports as no branch.
-type handoffRecordsGitHub struct {
-	server   *httptest.Server
-	key      string
-	files    map[string]string
-	mu       sync.Mutex
-	requests []string
-}
-
-// handoffGitHead is the commit the stand-in branch names.
-const handoffGitHead = "1111111111111111111111111111111111111111"
-
-func newHandoffRecordsGitHub(t *testing.T, key string) *handoffRecordsGitHub {
-	t.Helper()
-	g := &handoffRecordsGitHub{key: key, files: map[string]string{
-		"plan.json":      fmt.Sprintf("{\n  \"schemaVersion\": 1,\n  \"phase\": \"plan\",\n  \"issue\": %q,\n  \"plan\": \"committed before the cutover\"\n}\n", key),
-		"implement.json": fmt.Sprintf("{\n  \"schemaVersion\": 1,\n  \"phase\": \"implement\",\n  \"issue\": %q,\n  \"proof\": [{\"criterion\": \"A7\", \"observed\": \"committed before the cutover\"}]\n}\n", key),
-		"test.json":      fmt.Sprintf("{\n  \"schemaVersion\": 1,\n  \"phase\": \"test\",\n  \"issue\": %q,\n  \"verdict\": \"pass\",\n  \"implementerProof\": [\"A7\"]\n}\n", key),
-	}}
-	g.server = httptest.NewServer(http.HandlerFunc(g.serve))
-	t.Cleanup(g.server.Close)
-	return g
-}
-
-func (g *handoffRecordsGitHub) serve(w http.ResponseWriter, r *http.Request) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	g.requests = append(g.requests, r.Method+" "+r.URL.Path)
-	w.Header().Set("Content-Type", "application/json")
-	repo := "/repos/" + liveRepo
-	path := strings.TrimPrefix(r.URL.Path, repo)
-	answer := func(value any) { _ = json.NewEncoder(w).Encode(value) }
-	notFound := func() { w.WriteHeader(http.StatusNotFound); _, _ = io.WriteString(w, `{"message":"Not Found"}`) }
-	ref := r.URL.Query().Get("ref")
-	legion := ".legion/" + g.key
-	switch {
-	case r.Method != http.MethodGet || !strings.HasPrefix(r.URL.Path, repo+"/"):
-		notFound()
-	case path == "/git/ref/heads/legion/"+g.key:
-		answer(map[string]any{"object": map[string]string{"sha": handoffGitHead}})
-	case path == "/contents/.legion" && ref == handoffGitHead:
-		answer([]map[string]string{{"name": g.key, "type": "dir"}})
-	case path == "/contents/"+legion && ref == handoffGitHead:
-		var entries []map[string]string
-		for name := range g.files {
-			entries = append(entries, map[string]string{"name": name, "type": "file"})
-		}
-		answer(entries)
-	case strings.HasPrefix(path, "/contents/"+legion+"/") && ref == handoffGitHead:
-		text, ok := g.files[strings.TrimPrefix(path, "/contents/"+legion+"/")]
-		if !ok {
-			notFound()
-			return
-		}
-		answer(map[string]string{"encoding": "base64", "content": base64.StdEncoding.EncodeToString([]byte(text))})
-	default:
-		notFound()
-	}
-}
-
-// heldNoRemoval holds that the import, deferring the removal of an issue in testing, wrote nothing
-// to the branch: every request it made of GitHub was a read.
-func (g *handoffRecordsGitHub) heldNoRemoval(t *testing.T, r *handoffRecordsLive) {
-	t.Helper()
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	for _, request := range g.requests {
-		if !strings.HasPrefix(request, http.MethodGet+" ") {
-			t.Fatalf("the import sent %s to GitHub, want only reads while the removal is deferred", request)
-		}
-	}
-	r.note("GitHub stand-in received %d reads and no write: %v", len(g.requests), g.requests)
 }

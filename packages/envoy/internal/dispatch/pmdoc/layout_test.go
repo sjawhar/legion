@@ -407,7 +407,7 @@ func spliceDifferential(t *testing.T, name string, doc *Node, perBlock, rounds i
 func TestIncrementalRenderMatchesTheWholeRenderOnTheFixtures(t *testing.T) {
 	tally := newSpliceTally()
 	perBlock, rounds := 21, 30
-	if raceEnabled || testing.Short() {
+	if testing.Short() {
 		perBlock, rounds = 7, 10
 	}
 	for index, fx := range loadFixtures(t) {
@@ -546,7 +546,7 @@ func TestIncrementalRenderMatchesTheWholeRenderOnALargeDocument(t *testing.T) {
 	started := time.Now()
 	tally := newSpliceTally()
 	stride, rounds := 1, 20
-	if raceEnabled || testing.Short() {
+	if testing.Short() {
 		stride, rounds = 16, 4
 	}
 	rng := rand.New(rand.NewPCG(644, 390))

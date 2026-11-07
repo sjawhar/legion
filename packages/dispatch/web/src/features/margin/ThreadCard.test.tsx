@@ -687,3 +687,40 @@ test("a collapsed thread shows no reply and marks nothing", async () => {
     card.cleanup();
   }
 });
+
+// INFRA-869: the margin keeps a card per reference for a body of several, now that the one
+// predicate decides which bodies show cards.
+test("a comment of several references shows a card for each of them", async () => {
+  const getIssueSummary = spyOn(api, "getIssueSummary").mockImplementation(async (key) => ({
+    documents: [],
+    key,
+    project: "CORE",
+    status: "in_progress",
+    title: key === "CORE-2" ? "The other issue" : "The third issue",
+  }));
+  const references = comment(
+    "root-1",
+    "dispatch://CORE-2 dispatch://CORE-3",
+    "2026-09-10T00:00:00Z"
+  );
+  const view = renderCard(thread({ replies: [], root: { comment: references, kind: "comment" } }));
+
+  try {
+    const card = screen.getByTestId(`margin-comment-${references.id}`);
+    const cards = await within(card).findByRole("region", { name: "References" });
+    const links = await waitFor(() => {
+      const found = within(cards).getAllByRole("link");
+      if (found.length < 2) throw new Error("the second card has not rendered");
+      return found;
+    });
+    expect(links.map((link) => link.getAttribute("href"))).toEqual([
+      "/issues/CORE-2",
+      "/issues/CORE-3",
+    ]);
+    await within(cards).findByText("The other issue");
+    await within(cards).findByText("The third issue");
+  } finally {
+    getIssueSummary.mockRestore();
+    view.unmount();
+  }
+});

@@ -326,6 +326,13 @@ const legionIssue = z.object({
   generation: z.number().int().nonnegative(),
   phase: z.enum(LEGION_PHASES),
   status: nonEmptyString,
+  /** The key of the root of the issue's tree, equal to `key` on a root (contract 51). A child
+   * holds an admission slot of its own, so neither `admission.active` nor `admission.waiting`
+   * says which tree an issue belongs to; a reader tells a child from a root here, and finds the
+   * members of a tree that lingers. Absent on an issue the workflow does not record (phase
+   * `unrecorded`, an operator's claim), which stands in no tree, and absent from every issue of
+   * the body the route serves a caller before 51 (`api.stateFor`, `withoutTrees`). */
+  tree: issueKey.optional(),
   /** The repository (`owner/name`) the issue targets and that repository's default branch, taken
    * when the daemon first recorded the issue and never changed after; absent on an issue the
    * workflow does not record (phase `unrecorded`, an operator's claim) (contract 31). */
@@ -371,14 +378,27 @@ const legionBlockedIssue = z.object({
 });
 
 /** `api.Admission` — the issue cap and the issues under it, in Dispatch rank order. Concurrency
- * is capped on issues, never on workers: there is no worker queue on this wire. `blocked` is
- * every root and every child Legion is waiting to start behind a Dispatch issue nobody has
- * finished, by issue key; `waiting` stays the roots' waiting line, so a blocked root is in both.
+ * is capped on issues, never on workers: there is no worker queue on this wire. Since contract 51
+ * the cap counts the issues at work rather than the trees (dispatch://INFRA-980): `active` is
+ * every issue holding a slot and `waiting` the admission line, children as much as roots, so one
+ * tree with three working children holds three slots and a tree whose issues only wait holds
+ * none. `trees` is the root of every live tree, sorted, which a reader needs because a running
+ * tree may hold no slot at all — the controller reads it where it read `active` as the running
+ * trees. A daemon at this contract writes it on every state, empty rather than null, and it is
+ * optional here only because that daemon leaves it off one body: a reader before 51 refuses the
+ * key outright, so the route strips `trees` and the issues' `tree` for a caller in a pod whose
+ * claims record a contract below 51, and for a caller in a pod whose claims it cannot read at
+ * all, which may be a pod at this contract (`api.stateFor`, `withoutTrees`). A reader that finds
+ * it absent has been served that stripped body and learns nothing about which trees run; it is
+ * never a daemon older than this plugin, whom the boot gate and `legion probe-image` refuse.
+ * `blocked` is every root and every child Legion is waiting to start behind a Dispatch
+ * issue nobody has finished, by issue key; a blocked issue the line carries is in `waiting` too.
  * The controller names them in the day's report and takes nothing for them. */
 const legionAdmission = z.object({
   cap: z.number().int().nonnegative(),
   active: z.array(nonEmptyString),
   waiting: z.array(nonEmptyString),
+  trees: z.array(issueKey).optional(),
   blocked: z.array(legionBlockedIssue),
   free: z.number().int().nonnegative().optional(),
 });
@@ -540,7 +560,7 @@ export const LegionRegisterResponse = z.object({
 
 export type LegionRegistration = z.output<typeof LegionRegisterResponse>;
 
-/** `claim.CapabilityReport` — what a session measured of the live capability rows at boot: when it
+/** `claim.CapabilityReport` — what a session measured of the live capability rows: when it
  * measured, how long the measuring took, and one row per capability it checked, `ok` with the fact
  * the check found in `detail`. A `detail` may be empty on the wire: a passing check with nothing
  * to add. The daemon normalises the rows (unknown names dropped, a live row not reported marked
@@ -556,8 +576,9 @@ export type LegionCapabilityRow = LegionCapabilityReportBody["rows"][number];
 
 /** `claim.ReadyRequest`, the body of `POST /legion/v1/claims/ready`: the registered claim says its
  * agent has booted and can be prompted, authenticated by the registration's secret and naming the
- * launch generation it answers for. `capabilities` is the session's report of the live rows; a
- * ready without one (the controller's) reports nothing and changes no row. */
+ * launch generation it answers for. A boot's ready and a role-regain's carry no report; a claimed
+ * session sends its report on a `claims/ready` of its own, from the interval it runs while it is
+ * idle. A ready without a `capabilities` report reports nothing and changes no row. */
 export const LegionReadyRequest = z.strictObject({
   claimToken: nonEmptyString,
   sessionId: nonEmptyString,
@@ -947,8 +968,10 @@ export const LegionEscalateRequest = z.strictObject({
 });
 
 /** `api.SignOffRequest`, the owning architect's acceptance of an issue in `accepting`, which moves
- * it to `retro`; the daemon refuses it in every other phase (`SIGNOFF_OUTSIDE_ACCEPTING`). Issues
- * still in the workflow beneath it do not hold it: a root's close waits for them instead. */
+ * it to `retro`; the daemon refuses it in every other phase (`SIGNOFF_OUTSIDE_ACCEPTING`). Since
+ * contract 51 it is also refused while an issue beneath that one is still in the workflow
+ * (`SIGNOFF_CHILD_IN_WORKFLOW`, naming them): children are accepted and merged before their
+ * parent, whose own head proves their merged work (dispatch://INFRA-980). */
 export const LegionSignOffRequest = z.strictObject({
   grantId: nonEmptyString,
   issue: nonEmptyString,
