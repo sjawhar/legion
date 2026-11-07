@@ -10,6 +10,7 @@ Dispatch is a record for the people who decide, never a log of your work.
 - Use the `dispatch` command; the HTTP API only for what no command does. `dispatch <command> --help` gives its rules and an example.
 - Put long text on stdin: `--<field>-file -` with a quoted here-document (`<<'EOF'`); give object and list fields as JSON.
 - Exit 1 is a refusal, 2 a usage error. A refusal lists each problem: fix them all, then call once.
+- A Dispatch command that is hard to use, or that stores, changes or loses something wrongly, is a defect to report, not work around. Open a Dispatch issue in the project that owns Dispatch's code, correctness first; a Legion role tells its architect or controller instead (`skill://legion-worker/references/findings.md`).
 
 ## Asks and ask blocks
 
@@ -24,7 +25,6 @@ The question and the recommendation, as `skill://dispatch-writing-specs` writes 
 :::
 ```
 
-- An ask is short and asks one thing; its reasoning goes in the document.
 - An open ask is the request; never repeat it per message.
 - Change an open ask's block with `dispatch edit-ask`, or `doc-edit`'s `replace` or `move`. An answered ask is fixed: ask anew.
 - Reply on an open ask with `dispatch comment --reply-to-ask`; `--turn agent` (a progress note) needs it. An approval request a newer version moved needs `request-approval` again.
@@ -45,11 +45,11 @@ Outside Legion, claim your issue (`dispatch claim`) and move it and your childre
 
 `unresponsive` holders keep their claims 20 minutes (`skill://envoy`).
 
-A claim, or `dispatch issue-update --route session:<your id>` (`--route ''` on release), brings a person's answers, comments and messages; for agents' activity, `envoy_subscribe notifications.dispatch.issue.<KEY>.>`, which shows no quiet event.
+A claim (or `dispatch issue-update --route session:<your id>`, `--route ''` to release) brings a person's answers, comments and messages; `envoy_subscribe notifications.dispatch.issue.<KEY>.>` adds agents' activity, no quiet event.
 
 ## Close what you opened
 
-- Resolve your open ask (`dispatch resolve-ask`) the turn it turns needless: another answer, a later write, dropped work, a replacement. If a person said keep it open, say why in its thread; they close it.
+- Resolve your open ask (`dispatch resolve-ask`) the turn it turns needless. If a person said keep it open, say why in its thread; they close it.
 
 ## Structure over stream
 
@@ -59,7 +59,7 @@ A claim, or `dispatch issue-update --route session:<your id>` (`--route ''` on r
 
 ## Architecture components
 
-Attach each architectural issue to its components (`--components-json`), the root before decomposing it. Change code and `.dispatch/architecture/<id>.md` in the same review.
+Attach each architectural issue to its components (`--components-json`), the root first; change code and `.dispatch/architecture/<id>.md` together.
 
 ## References
 
@@ -81,7 +81,7 @@ dispatch://PROJECT/artifact/<slug>/ask/<id>
 dispatch://PROJECT/artifact/<slug>/comment/<id>#b-<block>[@vN]
 ```
 
-A bare id, filename or path is no reference, nor `dispatch://` outside Dispatch: give `dispatch`'s `https://` link. Write ids whole; a unique short id resolves.
+A bare id or path, or `dispatch://` outside Dispatch, is no link: give the `https://` one. Write ids whole.
 
 ## Setup and the HTTP API
 
