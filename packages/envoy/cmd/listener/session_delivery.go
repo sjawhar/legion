@@ -288,13 +288,17 @@ func (m *sessionDelivery) deleteConsumer(ctx context.Context, d *listenerDeps, s
 // It is 0 when there is no floor to read: the stream holds no such consumer, the session id
 // names none, or the call failed. A restore then starts at the start the record names alone,
 // which is the session's own answer and never above its floor, so it may offer the session
-// messages it has acked; the failure is logged, since that is the only sign of it.
+// messages it has acked. Every one of the three is logged, the call's failure as a warning and
+// a consumer the stream no longer holds below it, since that line is the only sign of why a
+// restore started where it did.
 func (m *sessionDelivery) ackFloorBeforeDelete(ctx context.Context, sessionID string) uint64 {
 	floor, err := m.consumers.AckFloor(ctx, sessionID)
 	switch {
 	case err == nil:
 		return floor
 	case errors.Is(err, bus.ErrSessionConsumerNotFound) || errors.Is(err, bus.ErrNoSessionConsumerName):
+		m.logger.Info("listener found no consumer to read an ack floor from for the session it is deleting; a restore of it starts at the record's own consumer start",
+			slog.String("session_id", sessionID))
 		return 0
 	default:
 		m.logger.Warn("listener could not read the ack floor of the consumer it is deleting; a restore of it starts at the record's own consumer start",

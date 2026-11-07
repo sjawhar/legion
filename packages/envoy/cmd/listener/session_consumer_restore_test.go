@@ -244,6 +244,79 @@ func TestASessionThatRacesADeleteThroughItsEntryWriteIsOfferedNothingItAcked(t *
 	}
 }
 
+// A session whose own registration repairs its consumer is offered nothing it had acknowledged
+// when that registration's consumer call read the floor. The repair carries that floor
+// (listenerDeps.registerPass hands confirmRegistered outcome.ackFloor) and creates the consumer
+// again at the sequence after it, above the start the record names, which is the sequence the
+// consumer was created at and far below every frame the session has acked since. A repair that
+// dropped the floor would restore at that start and hand the session each of those frames again.
+//
+// The delete is made on a second listener, as a reaper pass or a clean stop on another task
+// makes it: it takes no lock of this process, so the whole of it runs inside the window the hook
+// holds open - after this registration's consumer call and before the entry write that would let
+// the delete restore from the bucket. That delete therefore finds no record, restores nothing,
+// and the only repair left is the registration's own.
+func TestARegistrationsOwnRepairDoesNotOfferTheAckedFramesAgain(t *testing.T) {
+	registering := newRelayRig(t)
+	deleting := newSessionConsumerRig(t)
+	sessionID := "ses_register_repair_" + id.New()
+	agent := contracts.AgentSubject(sessionID)
+	standIn := startSessionStandIn(t, registering.url, sessionID, answerDone)
+	registering.subscribe(t, consumerRegistration(sessionID, "epoch-1"))
+	// The frames the session acks before the registration below: its floor stands at the last of
+	// them, and the start its record names stays the one its consumer was created at.
+	var written []contracts.Envelope
+	var floor uint64
+	for range 5 {
+		item, seq := registering.storeEvent(t, agent)
+		written = append(written, item)
+		floor = seq
+	}
+	requireFrames(t, standIn.collect(t, len(written), 10*time.Second), written...)
+	awaitAcked(t, registering.consumers, sessionID, floor)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	var raced sync.Once
+	registering.deps.consumers.afterRegisterFilter = func() {
+		raced.Do(func() {
+			// The record delete every delete of a consumer follows, and the consumer delete
+			// after it, both on the second listener and both inside this registration's window.
+			if err := deleting.deps.sessions.Delete(ctx, sessionID); err != nil {
+				t.Errorf("the second listener could not delete the record of %s: %v", sessionID, err)
+				return
+			}
+			if err := deleting.deps.consumers.deleteConsumer(ctx, deleting.deps, sessionID); err != nil {
+				t.Errorf("the delete the second listener made of %s's consumer: %v", sessionID, err)
+				return
+			}
+			if info, err := deleting.consumers.Info(ctx, sessionID); !errors.Is(err, bus.ErrSessionConsumerNotFound) {
+				t.Errorf("the consumer of %s once the second listener's delete was done: %+v, %v; want it gone, which is the window this registration repairs in",
+					sessionID, info, err)
+			}
+		})
+	}
+	registering.subscribe(t, consumerRegistration(sessionID, "epoch-1"))
+	registering.deps.consumers.afterRegisterFilter = nil
+
+	// The record the repair reads, from the bucket as the repair reads it: its start is below the
+	// floor, so the floor and not the record is what holds the session's position here.
+	entry, err := registering.harness.sessions.Refresh(ctx, sessionID)
+	if err != nil {
+		t.Fatalf("read the record %s's registration wrote: %v", sessionID, err)
+	}
+	if entry.ConsumerStart > floor {
+		t.Fatalf("the record of %s names consumer start %d, above the floor %d it has acked through: this row needs a start below that floor, which is the whole of what the repair's floor decides",
+			sessionID, entry.ConsumerStart, floor)
+	}
+
+	// The session is sent none of the frames it acked, and the consumer its own registration
+	// gave back delivers what is published next.
+	standIn.none(t, 2*time.Second)
+	next, _ := registering.storeEvent(t, agent)
+	requireFrames(t, standIn.collect(t, 1, 10*time.Second), next)
+}
+
 // A delete made while a registration holds the session's lock gives the consumer back with the
 // topics that registration stored, never with the ones it is replacing. The restore filters the
 // consumer it creates on the session's stored interest row (restoreRegistered), and a
