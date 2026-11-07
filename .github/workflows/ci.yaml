@@ -1938,7 +1938,7 @@ jobs:
       # families above: a push to main whose job succeeded and whose restore missed the key.
       # This is the one job that writes the bun family, and every other job's wrapper restores
       # what it wrote instead of downloading the release asset (.github/actions/setup-bun).
-      - if: github.event_name == 'push' && success() && steps.setup-bun.outputs.cache-hit != 'true'
+      - if: success() && steps.setup-bun.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.bun/bin

@@ -575,7 +575,7 @@ func TestTheStateListsTheHeldLifecycleRowBehindItsIssuesRunningOne(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	engine := workflow.New(records, workflow.Config{Project: project}, quietLogger())
+	engine := workflow.New(records, workflow.Config{Project: project, Steps: config.DesignGateRootIssues.Steps()}, quietLogger())
 	result, err := intake.ApplyFact(ctx, st.Pool(), "api", "retry:"+issue, intake.RetryOrEscalate{Issue: issue, Decision: intake.RetryDecision}, engine)
 	if err != nil || result.Refusal != nil {
 		t.Fatalf("apply the retry = %+v, %v; want it accepted", result.Refusal, err)
@@ -733,7 +733,7 @@ func TestTheStateNamesThePacedCatchUpWaitingOnItsOutboxRow(t *testing.T) {
 		if err := records.PutIssue(ctx, tx, root); err != nil {
 			return err
 		}
-		return workflow.QueueCatchUp(ctx, tx, records, config.DesignGateRootIssues, root, 1, now, due)
+		return workflow.QueueCatchUp(ctx, tx, records, config.DesignGateRootIssues.Steps(), root, 1, now, due)
 	}); err != nil {
 		t.Fatalf("record the running root and the catch-up its re-admission's start wrote: %v", err)
 	}
@@ -1315,7 +1315,7 @@ func TestAnIssueMovedWhileBootListsIsStillAdmitted(t *testing.T) {
 	key := cfg.Project + "-3"
 	var once sync.Once
 	dispatchServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if servedMapping(t, w, r, cfg.Project) {
+		if servedBootCall(t, w, r, cfg.Project) {
 			return
 		}
 		if r.Method == http.MethodGet && r.URL.Path == "/api/v1/issues/"+key {
@@ -1492,7 +1492,7 @@ func TestRunWaitsThroughADispatch503BeforeServing(t *testing.T) {
 	cfg := workflowConfig(t, natsURL)
 	var requests atomic.Int64
 	dispatchServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if servedMapping(t, w, r, cfg.Project) {
+		if servedBootCall(t, w, r, cfg.Project) {
 			return
 		}
 		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/issues" {
@@ -1537,7 +1537,7 @@ func TestRunWaitsForTheRepositoryMappingThroughADispatchOutage(t *testing.T) {
 			http.Error(w, "no healthy upstream", http.StatusServiceUnavailable)
 			return
 		}
-		if servedMapping(t, w, r, cfg.Project) {
+		if servedBootCall(t, w, r, cfg.Project) {
 			return
 		}
 		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/issues" {
@@ -1566,7 +1566,7 @@ func workflowConfig(t *testing.T, natsURL string) config.Config {
 	cfg := testConfig(t)
 	dispatchServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case servedMapping(t, w, r, cfg.Project):
+		case servedBootCall(t, w, r, cfg.Project):
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/issues":
 			w.Header().Set("Content-Type", "application/json")
 			if err := json.NewEncoder(w).Encode([]any{}); err != nil {
@@ -1643,11 +1643,22 @@ func (r *workflowTokenRecorder) InstalledOn(_ context.Context, role appauth.AppR
 	return !r.missing[key], nil
 }
 
-// servedMapping answers Dispatch's repository mapping, acme/widgets the default of project, and
-// its webhook App check, Dispatch's GitHub App installed on every repository, and reports whether
-// r asked for either.
-func servedMapping(t *testing.T, w http.ResponseWriter, r *http.Request, project string) bool {
+// servedBootCall answers the calls every boot makes of Dispatch, whatever the test is about:
+// the repository mapping, acme/widgets the default of project; the webhook App check, Dispatch's
+// GitHub App installed on every repository; the publish of the project's gated design steps,
+// which the boot queues for its own project (daemon.queueGatedStepsPublish) and the outbox's
+// first sweep sends; and the read of a gate's own document, which the boot's catch-up makes for
+// every root it reads (bindGateRequest through dispatch.Client.Approval). It reports whether it
+// answered r. A board that leaves one of these to its own default arm fails the test with an
+// unexpected request, which is what this helper exists to stop: none of them belongs to a test
+// here.
+func servedBootCall(t *testing.T, w http.ResponseWriter, r *http.Request, project string) bool {
 	t.Helper()
+	if r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/api/v1/projects/") &&
+		strings.HasSuffix(r.URL.Path, "/gated-steps") {
+		w.WriteHeader(http.StatusNoContent)
+		return true
+	}
 	if r.Method != http.MethodGet {
 		return false
 	}
@@ -1657,6 +1668,16 @@ func servedMapping(t *testing.T, w http.ResponseWriter, r *http.Request, project
 		body = []map[string]any{{"repo": "acme/widgets", "project": project, "default": true}}
 	case strings.HasPrefix(r.URL.Path, "/api/v1/github/app-installation/"):
 		body = map[string]bool{"installed": true}
+	case strings.HasPrefix(r.URL.Path, "/api/v1/artifacts/") &&
+		!strings.Contains(strings.TrimPrefix(r.URL.Path, "/api/v1/artifacts/"), "/"):
+		// The document itself, one segment: a path under it is a route no board here models and
+		// belongs to the caller's own default arm. A board seeds a gate's row and holds no review
+		// of its document, so the document reads as one nobody has asked to approve, and the
+		// catch-up applies nothing (bindGateRequest returns at an empty AskID). Only the approval
+		// is answered, because only the approval is read here: a reader that needs the issue, the
+		// slug or the role — register_gate's document check — meets the zero value and fails,
+		// which is the board telling it to model the document rather than guess at one.
+		body = map[string]any{"approval": map[string]any{"state": "draft", "latest_version": 1}}
 	default:
 		return false
 	}

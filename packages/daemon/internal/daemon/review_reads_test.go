@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -83,7 +84,7 @@ func reviewsStandInWith(t *testing.T, reviews func() string, reads *atomic.Int64
 // reviewReadRuntime is a workflow runtime over pool whose GitHub reads go to api, with the review
 // App's login set on the engine and the runtime as a boot sets both.
 func reviewReadRuntime(pool *pgxpool.Pool, api string) *workflowRuntime {
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE", Repositories: testRepositories, ReviewRoundCap: 10, ReviewAppLogin: reviewReadApp}, quietLogger())
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE", Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps(), ReviewRoundCap: 10, ReviewAppLogin: reviewReadApp}, quietLogger())
 	return &workflowRuntime{
 		pool: pool, records: projectRecords{Store: record.NewStore(), project: "CAPTURE"}, engine: engine, handlers: []intake.Handler{engine},
 		tokens: outboxTokens{}, dispatchProject: "CAPTURE", bootID: "test-boot", log: quietLogger(), githubAPI: api, reviewAppLogin: reviewReadApp, repositories: servedAcme(),

@@ -1098,6 +1098,7 @@ A process that finds it held tries again
 - The delivery reconcile (`delivery.ReconcileInterval`) and the architecture import (`architecture.SyncInterval`) run every 5 minutes through `duty.RunJittered`, the first pass after a random delay within one interval.
   The webhook redelivery sweep (Webhook redelivery, above; `redeliver.Interval`) runs every 2 minutes, its first sweep at start.
   Each waits the interval plus up to a tenth again after every pass (`duty.Jittered`), drawn afresh every period, so two processes' passes drift apart rather than ticking in step.
+  `DISPATCH_TEST_DELIVERY_RECONCILE_INTERVAL` replaces the delivery reconcile's 5 minutes for an end-to-end test, and a deployment never sets it.
   GitHub has no feed of what these three would miss.
   A reconcile pass re-reads the pull request heads first, whether or not the deployment has delivery settings and outside the deploy repository's permission check (`Reconcile.runOnce`), since a recorded result's currency is read in every deployment;
   every other step of the pass is gated on the settings and on that check, so a deployment with no settings runs the head pass and nothing else.
@@ -3270,8 +3271,9 @@ Each item below names a path with its method and identity, then its purpose.
   Any other file's kind is read from its bytes, never from the part's declared `Content-Type`:
   it is `image` only when its bytes are a PNG, JPEG, GIF or WebP, stored with `mime` the type its bytes are (a JPEG declared `image/png` is `image/jpeg`), and otherwise a `file` under its declared type, an SVG among them, so no client stores other bytes as an image.
   An upload's name finds the issue's artifact whose name or slug it is, so a name that is an artifact's slug (`plan-md` for `plan.md`) is that artifact's next version, never a second artifact the same reference would also name.
-  A document an issue first holds under `verification.md` or `plan.md` carries that role (`artifacts.role`, `verification` or `plan`), which the row keeps for good: a later upload of the same name is that document's next version, and no upload moves a role.
-  An issue holds at most one document of each role, and the issue read names both (`verification_artifact_id` and `plan_artifact_id`), as the Verification and Plan tabs find them.
+  A document an issue first holds under `verification.md`, `plan.md` or `decisions.md` carries that role (`artifacts.role`, `verification`, `plan` or `decisions`), which the row keeps for good: a later upload of the same name is that document's next version, and no upload moves a role.
+  An issue holds at most one document of each role, and the issue read names all three (`verification_artifact_id`, `plan_artifact_id` and `decisions_artifact_id`), as the Verification and Plan tabs find them and as the design gate's `decisions` step finds its own document.
+  A document stored under one of those names before its role existed carries no role, and a reader finds it by its slug instead; the next upload of that name sets the role on the row it already has.
   A role decides what a document is for: `POST /api/v1/artifacts/{id}/plan-reviews` takes only a `plan`, `POST /api/v1/artifacts/{id}/approval-requests` refuses one, and `--include-verification` and `GET .../results` read the `verification` document's `check` blocks.
   A version whose kind is not its artifact's is `400 ARTIFACT_KIND_MISMATCH`, naming the artifact's slug, name and kind.
   A name no artifact has yet is `400 INVALID_ARTIFACT`, naming the bound, when it, or the reference key `<owner>/<slug>` it gives the new artifact, is over 2692 bytes, the most a B-tree entry of `artifacts_ref_key_key` holds of incompressible text;

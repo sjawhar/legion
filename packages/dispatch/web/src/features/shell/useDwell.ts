@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef } from "react";
 
-/** How much of an element must be on screen, and for how long, before it counts as read. */
+/** How much of an element must be on screen, and for how long, before it counts as read. The
+ *  time is exported for the end-to-end specs, which spend that second on the page's own clock. */
 const DWELL_THRESHOLD = 0.75;
-const DWELL_MS = 1_000;
+export const DWELL_MS = 1_000;
 
 /** The visible shares at which the observer reports, every 5% (0.75 among them), so an element's
  *  share is read again as it scrolls rather than only as it crosses one line. */

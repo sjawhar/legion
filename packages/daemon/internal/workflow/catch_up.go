@@ -3,6 +3,7 @@ package workflow
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -10,7 +11,6 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/classify"
-	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -54,7 +54,7 @@ func (e *Engine) claimReady(ctx context.Context, tx pgx.Tx, fact intake.ClaimRea
 	if fact.Paced && e.cfg.Reserve != nil {
 		paced = e.cfg.Reserve(now)
 	}
-	return intake.Result{}, QueueCatchUp(ctx, tx, e.store, e.cfg.DesignGate, *root, fact.Launch, now, paced)
+	return intake.Result{}, QueueCatchUp(ctx, tx, e.store, e.cfg.Steps, *root, fact.Launch, now, paced)
 }
 
 // QueueCatchUp is the one composer of a root architect's catch-up, which both the ready
@@ -81,8 +81,8 @@ func (e *Engine) claimReady(ctx context.Context, tx pgx.Tx, fact intake.ClaimRea
 // releaseWaiting), and with now beside it (record.Notice.PacedFrom) it is the wait in the line
 // that wake writes when it runs (the daemon's wakeRan). The pair is written only where the
 // pacing reserved something: a catch-up it held to no moment reports no wait, having had none.
-func QueueCatchUp(ctx context.Context, tx pgx.Tx, store record.Store, gate config.DesignGate, root record.Issue, launch uint64, now, paced time.Time) error {
-	catchUp, awaiting, err := treeCatchUp(ctx, tx, store, gate, root)
+func QueueCatchUp(ctx context.Context, tx pgx.Tx, store record.Store, steps []record.DesignStep, root record.Issue, launch uint64, now, paced time.Time) error {
+	catchUp, awaiting, err := treeCatchUp(ctx, tx, store, steps, root)
 	if err != nil {
 		return err
 	}
@@ -96,7 +96,7 @@ func QueueCatchUp(ctx context.Context, tx pgx.Tx, store record.Store, gate confi
 	// claims (a start still queued keeps its own), and claims what it names in this transaction; its
 	// publish forgets those rows (the outbox's notice), and a catch-up a newer one supersedes hands
 	// them to a fresh catch-up (HandOverKept).
-	decided, kept, err := ParkedDecisionTask(ctx, tx, store, gate, root)
+	decided, kept, err := ParkedDecisionTask(ctx, tx, store, steps, root)
 	if err != nil {
 		return err
 	}
@@ -115,16 +115,16 @@ func QueueCatchUp(ctx context.Context, tx pgx.Tx, store record.Store, gate confi
 }
 
 // treeCatchUp is root's tree as the record holds it: whether a hand-over created the root at this
-// generation, and whether its old root's gate came with it, the design gate policy and the root's
-// gate, and every issue of the tree in key order. With it come the keys, in key order, of the
-// tree's issues waiting for the architect's acceptance: each in accepting and still in the
-// workflow. No worker runs in accepting, and the one phase-finished notice that moved an issue
-// there is ended undelivered when the architect's claim has failed (the outbox's notice), so a
-// retried architect learns of the wait from its catch-up alone; the reason names these keys so
-// that the catch-up, which a revived architect reads as the tree already running, says what is
-// the architect's own to do.
-func treeCatchUp(ctx context.Context, tx pgx.Tx, store record.Store, gate config.DesignGate, root record.Issue) (record.CatchUp, []string, error) {
-	catchUp := record.CatchUp{Generation: root.Generation, Gate: record.CatchUpGate{Policy: string(gate)}}
+// generation, and whether its old root's gate came with it, each design-gate step the root must
+// hold open and how it stands, and every issue of the tree in key order. With it come the keys,
+// in key order, of the tree's issues waiting for the architect's acceptance: each in accepting
+// and still in the workflow. No worker runs in accepting, and the one phase-finished notice that
+// moved an issue there is ended undelivered when the architect's claim has failed (the outbox's
+// notice), so a retried architect learns of the wait from its catch-up alone; the reason names
+// these keys so that the catch-up, which a revived architect reads as the tree already running,
+// says what is the architect's own to do.
+func treeCatchUp(ctx context.Context, tx pgx.Tx, store record.Store, steps []record.DesignStep, root record.Issue) (record.CatchUp, []string, error) {
+	catchUp := record.CatchUp{Generation: root.Generation}
 	handed, err := store.HandedOverRoot(ctx, tx, root.Key)
 	if err != nil {
 		return record.CatchUp{}, nil, err
@@ -132,12 +132,23 @@ func treeCatchUp(ctx context.Context, tx pgx.Tx, store record.Store, gate config
 	if handed != nil && handed.Generation == root.Generation {
 		catchUp.HandedOver, catchUp.Carried = true, handed.GateCarried
 	}
-	recorded, err := store.Gate(ctx, tx, root.Key)
+	gates, err := store.GatesOf(ctx, tx, root.Key)
 	if err != nil {
 		return record.CatchUp{}, nil, err
 	}
-	if recorded != nil {
-		catchUp.Gate.Artifact, catchUp.Gate.Version, catchUp.Gate.Open = recorded.ArtifactID, recorded.LatestVersion, classify.DesignGateOpen(*recorded)
+	required := classify.RequiredSteps(steps)
+	catchUp.Gates = make([]record.CatchUpGate, 0, len(required))
+	for _, step := range required {
+		stated := record.CatchUpGate{Step: step, Gated: slices.Contains(steps, step)}
+		if recorded, ok := gates[step]; ok {
+			stated.Artifact, stated.Version, stated.Open = recorded.ArtifactID, recorded.LatestVersion, classify.DesignGateOpen(recorded)
+			if recorded.ApprovedVersion != nil {
+				stated.Approved = *recorded.ApprovedVersion
+			}
+		} else {
+			stated.Unregistered = true
+		}
+		catchUp.Gates = append(catchUp.Gates, stated)
 	}
 	issues, err := store.TreeIssues(ctx, tx, root.Tree)
 	if err != nil {

@@ -313,7 +313,7 @@ func TestSettingsOfAKubernetesConfigurationNamesEveryKeyAndNoSecret(t *testing.T
 	projects := keysOf(t, top["projects"])
 	assertKeys(t, "settings.projects", projects, []string{"LEGION", "WIDGETS"})
 	assertKeys(t, "settings.projects.WIDGETS", keysOf(t, projects["WIDGETS"]), []string{
-		"merge_queue_role", "merge", "slack_channels", "memory", "production_check",
+		"merge_queue_role", "merge", "slack_channels", "memory", "production_check", "deploys",
 	})
 
 	// (c) Nothing planted reaches the wire, and no key of a credential's shape does either.

@@ -230,9 +230,9 @@ func (h *memoryHarness) readOwed(t *testing.T) owedBeforeStart {
 
 // drainBeforeStart leaves the database owing nothing the server about to start would do inside a
 // measured window. A fresh server arms the settlement of every row older than a minute at start
-// and every minute after (internal/dispatch/docs/resume.go:14,22) and indexes the blocks of every
-// document owed one, both of which read whole documents: left owed, either runs inside the next
-// window, and the peak measured there is that work's memory and not the request's.
+// and every minute after (docs.SettlementResumeInterval and settlementResumeAge) and indexes the
+// blocks of every document owed one, both of which read whole documents: left owed, either runs
+// inside the next window, and the peak measured there is that work's memory, not the request's.
 //
 // It does that work itself rather than waiting for it. Between one server's stop and the next
 // server's start no process in this test is settling anything, so a settlement a write left on a
@@ -249,7 +249,7 @@ func (h *memoryHarness) drainBeforeStart(t *testing.T, port string) {
 	}
 	// One service for both pieces of work, shut down before the server starts, so neither its
 	// compaction queue nor a lease of its own outlives this step. ServerURL is the port the test
-	// already holds, the one refs.ReindexOwedItem hands text.ExtractAt, so the index this writes
+	// already holds, the one refs.ReindexOwed hands text.ExtractAt, so the index this writes
 	// is the index the server would have written.
 	service := docs.New(docs.Deps{Store: h.database, Events: events.NewBroker(), ServerURL: "http://127.0.0.1:" + port})
 	defer service.Shutdown(context.Background())

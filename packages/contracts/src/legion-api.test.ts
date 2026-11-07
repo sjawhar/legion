@@ -958,9 +958,8 @@ test("the state golden names what every blocked issue waits on", () => {
 // tree — and each issue's `tree` names its own root, so a child is told from a root. The computed
 // golden carries a child: LEGION-209 stands in LEGION-208's tree, and all three live trees are
 // named while one issue alone holds a slot. Neither key is required: a daemon at this contract
-// strips both from the state it serves a caller whose pod's plugin is older than 51, and from the
-// one it serves a caller whose pod's claims it cannot read at all, which may be a pod at this
-// contract (`api.stateFor`, `withoutTrees`). So a body without them parses, and a reader of it
+// strips both from the state it serves a caller whose pod's plugin is older than 51
+// (`api.stateFor`, `withoutTrees`). So a body without them parses, and a reader of it
 // learns nothing about which trees run rather than losing the whole state; what is refused is a
 // `tree` that is no issue key. A daemon older than this plugin is kept away by the boot gate and
 // `legion probe-image`, not by this schema.

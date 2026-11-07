@@ -1,0 +1,5 @@
+kind: Changed
+body: The one-hour cap on a secret whose `requesters` annotation lists who may ask for it is replaced. An `admin` annotation, whose only value is `true`, marks a secret whose grant is an administrator's, and the cap now holds for an admin secret and for a `google-service-account` secret alone (`max-grant-required`); the `requesters-max-grant` refusal is gone, so a person's mail and Drive logins keep their tier and any grant length, or none. An admin secret must be human tier (`admin-tier`) and must list its requesters (`admin-requesters`), and a value other than `true` is refused (`admin-malformed`). The `requesters` list of a human-tier `google-service-account` secret may name registered services beside its one person owner, so a pod asks and the owner approves each request; an agent-tier one may not. `agent-secrets secret create` and `secret retag` take `--scopes LIST|none` and `--admin true|none`, refusing before the write what the broker would refuse after, and `secret show` prints both.
+time: 2026-11-07T04:01:41.72349128Z
+custom:
+    Issue: pr2909

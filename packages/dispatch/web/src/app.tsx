@@ -65,6 +65,7 @@ import { KeptWrites } from "./features/writes/KeptWrites";
 import { PendingWritesIndicator } from "./features/writes/PendingWritesIndicator";
 import { useKeyedWrite } from "./features/writes/useKeyedWrite";
 import { type Write, writesOf } from "./features/writes/write-store";
+import { FOOT_STATUS_INSET_PROPERTY, useFootInset } from "./hooks/useFootInset";
 import {
   backdrop50,
   badgeBlocking,
@@ -460,6 +461,13 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
   const mainRef = useRef<HTMLElement | null>(null);
   useKeyboardFit(mainRef, fillsViewport);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
+  // The status corner floats over the foot of the screen as the composers it sits above do, so
+  // it publishes its own reach the same way: a control floating at that foot - the
+  // Conversation's `Jump to latest` - rides above the whole corner rather than under the
+  // pending-writes indicator or the connection pill. An empty corner has no box, so it publishes
+  // nothing and the property is unset.
+  const statusCornerRef = useRef<HTMLDivElement>(null);
+  useFootInset(statusCornerRef, true, FOOT_STATUS_INSET_PROPERTY);
   const isFirstRender = useRef(true);
   const isCompactViewport = useMediaQuery(COMPACT_VIEWPORT_QUERY);
   const drawer = useDialog<HTMLElement>({
@@ -669,7 +677,10 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
             bottom bar. Only what it shows takes the pointer. A socket Dispatch refuses carries no
             status the page can read, so nothing in the pill is terminal: once reconnecting has
             gone on for two minutes it offers a reload, and the page keeps trying underneath. */}
-        <div className="pointer-events-none fixed right-4 bottom-[max(5rem,calc(var(--foot-composer-inset,0px)_+_1rem))] z-50 flex w-[min(28rem,calc(100vw-2rem))] flex-col items-end gap-2 xl:bottom-[calc(var(--foot-composer-inset,0px)_+_1rem)] *:pointer-events-auto">
+        <div
+          className="pointer-events-none fixed right-4 bottom-[max(5rem,calc(var(--foot-composer-inset,0px)_+_1rem))] z-50 flex w-[min(28rem,calc(100vw-2rem))] flex-col items-end gap-2 xl:bottom-[calc(var(--foot-composer-inset,0px)_+_1rem)] *:pointer-events-auto"
+          ref={statusCornerRef}
+        >
           <PendingWritesIndicator />
           {connection === "stuck" ? (
             <p

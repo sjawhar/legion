@@ -154,27 +154,27 @@ func personAct(act intake.Fact) (answer, other bool) {
 	return false, false
 }
 
-// gateArtifact is the document root's design gate is registered on, "" for no gate.
-func (e *Engine) gateArtifact(ctx context.Context, tx pgx.Tx, root record.Issue) (string, error) {
-	gate, err := e.store.Gate(ctx, tx, root.Key)
-	if err != nil || gate == nil {
-		return "", err
+// gateArtifacts is the document of each design gate root holds, empty when it holds none.
+func (e *Engine) gateArtifacts(ctx context.Context, tx pgx.Tx, root record.Issue) ([]string, error) {
+	gates, err := e.store.GatesOf(ctx, tx, root.Key)
+	if err != nil {
+		return nil, err
 	}
-	return gate.ArtifactID, nil
+	return gateDocuments(gates), nil
 }
 
 // answersWait says whether a person's act personAct named (answer, other) on the ask whose row is
 // now after answers a root waiting on that person, by the rule RootAsk.PersonActSeq reads: every
-// other act, and an answer unless the ask is an approval request of the gate's document.
+// other act, and an answer unless the ask is an approval request of a gate's document.
 func (e *Engine) answersWait(ctx context.Context, tx pgx.Tx, root record.Issue, after record.RootAsk, answer, other bool) (bool, error) {
 	if other || !answer {
 		return other, nil
 	}
-	artifact, err := e.gateArtifact(ctx, tx, root)
+	artifacts, err := e.gateArtifacts(ctx, tx, root)
 	if err != nil {
 		return false, err
 	}
-	return !after.GateRequestOf(artifact), nil
+	return !after.GateRequestOf(artifacts...), nil
 }
 
 // dispatchAskOpened opens the ask's mirror row on the person's turn, recording its kind, an
@@ -356,8 +356,8 @@ func (e *Engine) replyToAsk(ctx context.Context, tx pgx.Tx, fact intake.Dispatch
 		}
 		return e.declare(ctx, tx, *root, fact.Mark, "question "+fact.Ask+" handed back")
 	case inTree && fact.WaitingOn == "human":
-		gate, err := e.store.Gate(ctx, tx, root.Key)
-		if err != nil || !after.GateRequestOf(gateRequestArtifact(gate, e.armed())) || !change.handsTurn(before) {
+		gates, err := e.store.GatesOf(ctx, tx, root.Key)
+		if err != nil || !after.GateRequestOf(gateRequestArtifact(e.cfg.Steps, gates)) || !change.handsTurn(before) {
 			return err
 		}
 		return e.declare(ctx, tx, *root, fact.Mark, "approval request "+fact.Ask+" handed back")
