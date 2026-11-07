@@ -357,12 +357,17 @@ func TestProjectShowsTheReviewRoundsDecisionOnThePullRequest(t *testing.T) {
 }
 
 // An issue's open production check shows on its record as the check view: the repository, pull
-// request and merge commit, the looks and whether the latest is open, what woke it — absent
-// before a look wakes — the bound as the next wake, and whether the last look has started. An
-// issue the store lists no open check for, closed or never opened, shows none.
+// request and merge commit, the role the check records as the one that works it, the looks and
+// whether the latest is open, what woke it — absent before a look wakes — the next look as the
+// next wake, and whether the last look has started. The next wake is the time the checking agent
+// named for itself where one stands (LEGION-208's) and the check's bound where none does
+// (LEGION-209's, which has taken no look yet). An issue the store lists no open check for,
+// closed or never opened, shows none.
 func TestProjectShowsTheOpenProductionCheckOnItsIssue(t *testing.T) {
 	opened := projectedAt.Add(-2 * time.Hour)
 	woke := projectedAt.Add(-time.Hour)
+	bound := opened.Add(336 * time.Hour)
+	named := projectedAt.Add(6 * time.Hour)
 	store := projectionStore{
 		issues: []record.Issue{
 			{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Status: "done", Phase: phase.Done},
@@ -370,9 +375,10 @@ func TestProjectShowsTheOpenProductionCheckOnItsIssue(t *testing.T) {
 			{Key: "LEGION-210", Project: "LEGION", Tree: "LEGION-210", Status: "done", Phase: phase.Done},
 		},
 		checks: []record.ProductionCheck{
-			{Issue: "LEGION-208", Repo: "acme/widgets", Number: 42, MergeSHA: "merge-208", OpenedAt: opened, BoundAt: opened.Add(336 * time.Hour),
-				Looks: 2, LookOpen: true, LookWakeAt: &woke, LastWakeKind: "issue.deployed", LastWakeDetail: "run 7 completed 2026-09-22T23:00:00Z", LastWakeAt: &woke, Last: true},
-			{Issue: "LEGION-209", Repo: "acme/widgets", Number: 43, OpenedAt: opened, BoundAt: opened.Add(336 * time.Hour)},
+			{Issue: "LEGION-208", Repo: "acme/widgets", Number: 42, MergeSHA: "merge-208", OpenedAt: opened, BoundAt: bound,
+				Role: claim.RoleTester, Looks: 2, LookOpen: true, LookWakeAt: &woke, LastWakeKind: "issue.deployed",
+				LastWakeDetail: "run 7 completed 2026-09-22T23:00:00Z", LastWakeAt: &woke, WakeAt: &named, Last: true},
+			{Issue: "LEGION-209", Repo: "acme/widgets", Number: 43, OpenedAt: opened, BoundAt: bound, Role: claim.RoleImplementer},
 		},
 	}
 	got, err := Project(context.Background(), nil, store, "LEGION", []supervise.Claim{}, nil, projectedAt)
@@ -380,15 +386,16 @@ func TestProjectShowsTheOpenProductionCheckOnItsIssue(t *testing.T) {
 		t.Fatalf("Project: %v", err)
 	}
 	want := &api.CheckView{
-		Repo: "acme/widgets", PullRequest: 42, MergeCommit: "merge-208", OpenedAt: opened, Looks: 2, LookOpen: true,
+		Repo: "acme/widgets", PullRequest: 42, MergeCommit: "merge-208", OpenedAt: opened, Role: "tester", Looks: 2, LookOpen: true,
 		LastWake:   &api.CheckWakeView{Kind: "issue.deployed", Detail: "run 7 completed 2026-09-22T23:00:00Z", At: woke},
-		NextWakeAt: opened.Add(336 * time.Hour), Last: true,
+		NextWakeAt: named, Last: true,
 	}
 	if check := got.Issues["LEGION-208"].Check; !reflect.DeepEqual(check, want) {
 		t.Fatalf("LEGION-208's check = %+v, want %+v", check, want)
 	}
-	if check := got.Issues["LEGION-209"].Check; check == nil || check.LastWake != nil || check.MergeCommit != "" || check.Looks != 0 {
-		t.Fatalf("LEGION-209's check = %+v, want the check with no wake and no merge commit yet", check)
+	wantBound := &api.CheckView{Repo: "acme/widgets", PullRequest: 43, OpenedAt: opened, Role: "implementer", NextWakeAt: bound}
+	if check := got.Issues["LEGION-209"].Check; !reflect.DeepEqual(check, wantBound) {
+		t.Fatalf("LEGION-209's check = %+v, want the check with no wake and no merge commit yet, bound %+v", check, wantBound)
 	}
 	if check := got.Issues["LEGION-210"].Check; check != nil {
 		t.Fatalf("LEGION-210's check = %+v, want none", check)
