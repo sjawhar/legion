@@ -178,6 +178,12 @@ function AssistantMessage(): ReactNode {
   // The provider/model that produced this streamed turn (LEGION-548): absent for a reply sent
   // through Dispatch, and for a turn whose publishing host reported none.
   const model = useAuiState((state) => readDispatchMarks(state.message.metadata.custom).model);
+  // Whether the session is still writing this turn: assistant-ui's own message status, which
+  // `toThreadMessages` sets to `running` while a message streams and to `complete` once a frame
+  // settles it. A third selector returning a boolean, for the `Object.is` reason above. A turn
+  // that calls a tool shows the tool card's own `running…`; this is the mark every other turn
+  // has, including one that writes nothing but prose.
+  const running = useAuiState((state) => state.message.status?.type === "running");
   const turn = useTurnKey();
   if (fromDispatch) {
     return (
@@ -206,6 +212,11 @@ function AssistantMessage(): ReactNode {
           <TruncatedText>{model}</TruncatedText>
         </p>
       )}
+      {running ? (
+        <p className={`mb-1 text-xs ${textMutedOnCanvas}`} data-testid="agent-message-running">
+          writing…
+        </p>
+      ) : null}
       <MessagePrimitive.Parts
         components={{ Reasoning, Text: MarkdownText, tools: { Fallback: ToolCall } }}
       />

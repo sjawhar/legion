@@ -8,7 +8,6 @@ import { agentSubject } from "@legion/contracts"
 import { REPLAY_LEDGER_TTL_MS, type ReplaySnapshot } from "@legion/envoy-client/replay"
 import { createEnvoyClient, type EnvoyClient } from "@legion/envoy-client/transport"
 import {
-  CHANNEL_CAPABILITIES,
   type ChannelNotifier,
   type ChannelSessionOptions,
   startChannelSession,
@@ -16,7 +15,14 @@ import {
 import { createInboxNotifier, INBOX_CAPABILITIES } from "../src/legion-inbox"
 import { replayStateFile } from "../src/replay-state"
 import { SessionIdentity, sessionHandoffFile, writeSessionHandoff } from "../src/session-identity"
-import { FakeNats, scratchState, sessionOptions, settled, waitFor } from "./channel-session-harness"
+import {
+  FakeNats,
+  scratchState,
+  sessionOptions,
+  settled,
+  testCapabilities,
+  waitFor,
+} from "./channel-session-harness"
 import { isolatePaneEnvironment } from "./pane-environment"
 
 isolatePaneEnvironment()
@@ -175,12 +181,12 @@ function channelSink(refuse: (shown: Shown) => boolean = () => false): Sink {
   const shown: Shown[] = []
   return {
     shown,
-    capabilities: CHANNEL_CAPABILITIES,
+    capabilities: testCapabilities,
     notifier: {
       notification: async (notification) => {
         const entry = {
-          eventId: notification.params.meta["event_id"],
-          content: notification.params.content,
+          eventId: notification.eventId,
+          content: notification.content,
         }
         if (refuse(entry)) throw new Error("the MCP transport refused the write")
         shown.push(entry)
@@ -203,14 +209,14 @@ function holdingSink(eventId: string): HoldingSink {
   const gate = Promise.withResolvers<void>()
   return {
     shown,
-    capabilities: CHANNEL_CAPABILITIES,
+    capabilities: testCapabilities,
     holding: open.promise,
     release: () => gate.resolve(),
     notifier: {
       notification: async (notification) => {
         const entry = {
-          eventId: notification.params.meta["event_id"],
-          content: notification.params.content,
+          eventId: notification.eventId,
+          content: notification.content,
         }
         if (entry.eventId === eventId) {
           open.resolve()
@@ -245,7 +251,7 @@ async function inboxSink(directory: string): Promise<Sink> {
   await new Promise<void>((listening) => server.listen(path, listening))
   return {
     shown,
-    capabilities: INBOX_CAPABILITIES,
+    capabilities: () => INBOX_CAPABILITIES,
     notifier: createInboxNotifier(path),
     close: () => {
       for (const socket of sockets) socket.destroy()
@@ -413,7 +419,7 @@ const SUBJECTS = [
 ] as const
 
 const SINKS = [
-  { name: "the channel notification", make: async (_directory: string) => channelSink() },
+  { name: "the write into the conversation", make: async (_directory: string) => channelSink() },
   { name: "the Legion bridge inbox", make: inboxSink },
 ] as const
 
@@ -764,12 +770,12 @@ test("a live frame that arrived behind a slow delivery before a stream recreatio
   const shown: Shown[] = []
   const sink: Sink = {
     shown,
-    capabilities: CHANNEL_CAPABILITIES,
+    capabilities: testCapabilities,
     notifier: {
       notification: async (notification) => {
         const entry = {
-          eventId: notification.params.meta["event_id"],
-          content: notification.params.content,
+          eventId: notification.eventId,
+          content: notification.content,
         }
         if (entry.eventId === slow.eventId) {
           held = true

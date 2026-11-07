@@ -1350,15 +1350,23 @@ export class DispatchClient {
   /**
    * `POST /api/v1/{messages|comments}/{id}/reply` as the session a targeted delivery reached: its
    * reply to that delivery attempt, or why it could not honour it (`postDeliveryReply`, whose
-   * body names the session as `actor` and the `attempt`).
+   * body names the session as `actor` and the `attempt`). `followUp` is `messageReply`'s own
+   * option: the attempt is settled by the first reply Dispatch takes, so a second answer to it -
+   * the output a waiting reply promised - is posted only when it asks (`?follow_up=true`).
    */
   async deliveryReply(
     resource: "message" | "comment",
     id: string,
-    input: Readonly<Record<string, unknown>>
+    input: Readonly<Record<string, unknown>>,
+    options: { readonly followUp?: boolean } = {}
   ): Promise<void> {
     const collection = resource === "message" ? "messages" : "comments";
-    await this.#json("POST", ["api", "v1", collection, id, "reply"], input);
+    await this.#json(
+      "POST",
+      ["api", "v1", collection, id, "reply"],
+      input,
+      options.followUp === true ? { follow_up: "true" } : undefined
+    );
   }
 
   async getMessage(issue: string, id: string): Promise<MessageRead> {

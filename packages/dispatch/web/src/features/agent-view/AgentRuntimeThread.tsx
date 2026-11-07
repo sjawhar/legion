@@ -11,7 +11,12 @@ import { compareTimestamps } from "../../lib/timestamps";
 import type { SessionSends } from "../conversation/useSessionSends";
 import { isViewer } from "../refs/actor";
 import { AgentThread } from "./AgentThread";
-import { type AgentConversation, dispatchTurns, toThreadMessages } from "./conversation";
+import {
+  type AgentConversation,
+  dispatchTurns,
+  toThreadMessages,
+  turnSaysBody,
+} from "./conversation";
 import {
   type DispatchAuthor,
   dispatchMetadata,
@@ -89,7 +94,9 @@ export function AgentRuntimeThread({
     // naming whoever wrote it. An untagged one is returned unchanged and its stored copy is never
     // taken, so it shows twice (`packages/pi-envoy/AGENTS.md` says which turns go untagged). Any
     // bus client can publish a tag, so only a person's stored message can be one, and only a
-    // streamed message saying exactly what that person sent replaces its stored copy.
+    // streamed message saying exactly what that person wrote - beside what the stream names of
+    // what the message carried, such as a picture's `[image]` - replaces its stored copy
+    // (`turnSaysBody`).
     const byID = new Map(
       storedMessages
         .filter((message) => message.author.kind === "user")
@@ -100,7 +107,8 @@ export function AgentRuntimeThread({
     const streamed = toThreadMessages(conversation).map((message) => {
       const turn = turns.get(message.id ?? "");
       const source = byID.get(turn?.dispatchMessageId ?? "");
-      if (turn === undefined || source === undefined || turn.text !== source.body) return message;
+      if (turn === undefined || source === undefined || !turnSaysBody(turn, source.body))
+        return message;
       taken.add(source.id);
       // The streamed turn keeps the key the stored copy would have had, so it is one turn under
       // one key for `useLiveFollow` whether the reader sees this frame or, after a rebuild that

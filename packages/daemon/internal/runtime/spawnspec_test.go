@@ -68,7 +68,7 @@ func TestValidateSpawnSpecRefusesWhatNoRuntimeCouldHonour(t *testing.T) {
 		{"an architect on Claude Code", func(s *SpawnSpec) {
 			s.Role, s.Claim, s.Backend = claim.RoleArchitect, "legion-omp-legion-43-architect", BackendClaude
 		}, "spawn legion-omp-legion-43-architect: the architect does not run on claude (Claude Code), which runs only planner, implementer, tester, reviewer, merger: " +
-			"an architect is woken by notices on its Envoy role topic and the controller by its own, and Claude Code's print mode delivers no channel notification"},
+			"the architect's loop and the controller's are proven only on Oh My Pi, and Claude Code runs the phase workers, whose loops Legion's live proofs cover"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			spec := spawnSpec()
@@ -146,7 +146,7 @@ func TestValidateSpawnSpecHoldsTheControllersLaunchToItsOwnShape(t *testing.T) {
 			"spawn legion-omp-controller: Env carries ANTHROPIC_API_KEY, a credential-shaped name; a secret travels in Secrets, as a file"},
 		{"on Claude Code", func(s *SpawnSpec) { s.Backend = BackendClaude },
 			"spawn legion-omp-controller: the controller does not run on claude (Claude Code), which runs only planner, implementer, tester, reviewer, merger: " +
-				"an architect is woken by notices on its Envoy role topic and the controller by its own, and Claude Code's print mode delivers no channel notification"},
+				"the architect's loop and the controller's are proven only on Oh My Pi, and Claude Code runs the phase workers, whose loops Legion's live proofs cover"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			spec := controllerSpec()

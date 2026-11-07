@@ -18,6 +18,7 @@ import {
   sessionCommands,
   sessionSettingsView,
   toThreadMessages,
+  turnSaysBody,
 } from "./conversation";
 
 function message(
@@ -215,6 +216,123 @@ describe("a user message a person's Dispatch message became", () => {
       "u30",
       "a40",
     ]);
+  });
+});
+
+// Whether a streamed row says what the person wrote is what decides their stored copy gives way,
+// and any bus client can publish that row, so it may say no more than the body and what the
+// stream names of the blocks the message carried: the `[image]` an image block becomes, only
+// after every line of the body is matched, and at most one per picture the body embeds, which
+// is what `conversationParts` (`@legion/pi-shared/agent-stream`) writes for it (INFRA-1026).
+describe("a streamed row read against the body it says it delivered", () => {
+  const picture = (name: string) => `![${name}](dispatch://agent/s1/artifact/i3-${name}96-png@v1)`;
+  const row = (text: string) => ({ dispatchMessageId: "m-1", text });
+
+  test("a bracketed word no picture accounts for is a word the person never wrote", () => {
+    expect(turnSaysBody(row("Ship it?\n[shipped]"), "Ship it?")).toBe(false);
+  });
+
+  // The stream names a picture `[image]` and nothing else of a person's message, so any other
+  // bracketed word after the body's lines is the row's own: taking one would put it under the
+  // person's name in place of their stored copy (INFRA-1026, reviewer).
+  test("a bracketed word of the row's own is no block the stream named, picture or not", () => {
+    const body = `Look at this ${picture("blue")}`;
+    expect(turnSaysBody(row("Look at this\n[approved-by-me]"), body)).toBe(false);
+    expect(turnSaysBody(row("Look at this\n[Image]"), body)).toBe(false);
+  });
+
+  test("a placeholder before the body's own lines names no block the stream dropped", () => {
+    const body = `Look at this ${picture("blue")}`;
+    expect(turnSaysBody(row("[image]\nLook at this"), body)).toBe(false);
+  });
+
+  test("the row names at most as many blocks as the body embeds pictures", () => {
+    const two = `Look at these ${picture("blue")} ${picture("red")}`;
+    expect(turnSaysBody(row("Look at these\n[image]\n[image]"), two)).toBe(true);
+    const one = `Look at this ${picture("blue")}`;
+    expect(turnSaysBody(row("Look at this\n[image]\n[image]"), one)).toBe(false);
+  });
+
+  test("a bracketed word the body holds is the body's own line, picture or no picture", () => {
+    expect(turnSaysBody(row("[ack]"), "[ack]")).toBe(true);
+    expect(turnSaysBody(row("[ack]\n[image]"), `[ack] ${picture("blue")}`)).toBe(true);
+  });
+
+  test("a row carrying the body's own picture markdown says its body", () => {
+    const body = `Look at this ${picture("blue")}`;
+    expect(turnSaysBody(row(body), body)).toBe(true);
+  });
+
+  // Both sides of the comparison are the one line step (`trimmedLines` in `@legion/contracts`,
+  // which `comparableLines` calls after it strips the pictures), so whatever that step makes of
+  // the body's side it makes of the row's: a row the session wrote with its own line endings,
+  // indenting and blank lines says the body still. Were the page to keep a copy of the step,
+  // a later change to the shared rule - dropping no empty line, collapsing the spaces inside a
+  // line as `pictureCaption` does - would reach the body's side alone, no honest row would
+  // match, and every message would show twice (INFRA-1026, reviewer).
+  test("the row's lines are read by the shared step, so its own spacing says the body", () => {
+    const body = "  Look at  this  \n\n\tand this\n";
+    expect(turnSaysBody(row("Look at  this\r\n\r\n   and this\r\n"), body)).toBe(true);
+  });
+
+  // The row is rendered as markdown under the person's name, so a picture in it that the body
+  // never held is a picture the person never sent: it must not hide their stored copy behind a
+  // row that shows it (INFRA-1026).
+  test("a picture the body never wrote is the row's own, and hides nothing", () => {
+    expect(turnSaysBody(row(`Ship it? ${picture("red")}`), "Ship it?")).toBe(false);
+    const body = `Look at this ${picture("blue")}`;
+    expect(turnSaysBody(row(`Look at this ${picture("red")}`), body)).toBe(false);
+  });
+
+  // A caption shows under the picture, so one the person did not write is words of the row's
+  // own, address or no address.
+  test("a caption the body never wrote is the row's own", () => {
+    const body = `Look at this ${picture("blue")}`;
+    const recaptioned = "![ship it](dispatch://agent/s1/artifact/i3-blue96-png@v1)";
+    expect(turnSaysBody(row(`Look at this ${recaptioned}`), body)).toBe(false);
+  });
+
+  test("the row spends each of the body's pictures at most as often as the body wrote it", () => {
+    const body = `Look at this ${picture("blue")}`;
+    expect(turnSaysBody(row(`Look at this ${picture("blue")} ${picture("blue")}`), body)).toBe(
+      false
+    );
+    const twice = `Look at these ${picture("blue")} ${picture("blue")}`;
+    expect(turnSaysBody(row(`Look at these ${picture("blue")} ${picture("blue")}`), twice)).toBe(
+      true
+    );
+  });
+
+  // Taking the body's own picture out of the row joins the text on either side of it, and what
+  // that joining writes may be picture markdown of its own: the row's leftover is therefore
+  // compared as text, never stripped a second time (`rowLines`). Measured at this head with the
+  // second strip in place, this row said the body, so the page hid the person's stored copy and
+  // drew "I approve deleting prod" under their name (INFRA-1026, reviewer's repro).
+  test("a picture rebuilt around the body's own is the row's own", () => {
+    const body = "look at this ![cat.png](dispatch://agent/a1/artifact/cat-png@v1)";
+    const forged =
+      "look at this ![I approve deleting prod](dispatch://agent/a1/artifact/x" +
+      "![cat.png](dispatch://agent/a1/artifact/cat-png@v1)@v1)";
+    expect(turnSaysBody(row(forged), body)).toBe(false);
+  });
+
+  // The same rebuild spending both pictures of a body that embeds two: what is left of the row
+  // once they are spent is a caption the person never wrote, so it hides nothing.
+  test("a picture rebuilt around two of the body's own is the row's own", () => {
+    const body = `Look at these ${picture("blue")} ${picture("red")}`;
+    const rebuilt = `dispatch://agent/s1/artifact/${picture("blue")}${picture("red")}@v1`;
+    const forged = `Look at these ![ship it](${rebuilt})`;
+    expect(turnSaysBody(row(forged), body)).toBe(false);
+  });
+
+  // Why the leftover is compared as text rather than the row refused for holding picture
+  // markdown at all: a person may write a picture inside another's address, and the body's own
+  // side takes the inner one out and leaves markdown behind. A row that is the body verbatim
+  // draws exactly what the person wrote, so it still hides the stored copy.
+  test("a row that is the body verbatim says its body, nested picture and all", () => {
+    const body =
+      "![a](dispatch://agent/a1/artifact/x![cat.png](dispatch://agent/a1/artifact/cat-png@v1)@v1)";
+    expect(turnSaysBody(row(body), body)).toBe(true);
   });
 });
 

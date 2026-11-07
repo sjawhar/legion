@@ -7,7 +7,7 @@
  * names to the model as image blocks within the limits below.
  */
 
-import { type PictureType, pictureCaption } from "@legion/contracts";
+import { type PictureType, pictureCaption, pictureSyntax } from "@legion/contracts";
 
 /** The most bytes one upload carries: Dispatch refuses a larger file. */
 export const PICTURE_UPLOAD_MAX_BYTES = 25 * 1024 * 1024;
@@ -97,14 +97,10 @@ export function withPictureLines(text: string, lines: readonly string[]): string
   return head === "" ? lines.join("\n") : `${head}\n\n${lines.join("\n")}`;
 }
 
-// The image syntax with a Dispatch address that names a version: escaped characters inside the
-// caption, and an optional quoted title after the address.
-const PICTURE_SYNTAX =
-  /!\[(?:\\.|[^\\\]])*\]\((dispatch:\/\/[^\s()]+@v[1-9][0-9]*)(?:\s+"(?:\\.|[^\\"])*")?\)/g;
-
-/** The Dispatch addresses of the pictures `text` shows, in the order they appear. */
+/** The Dispatch addresses of the pictures `text` shows (`pictureSyntax`), in the order they
+ *  appear. */
 export function pictureAddresses(text: string): string[] {
-  return [...text.matchAll(PICTURE_SYNTAX)].map((match) => match[1] as string);
+  return [...text.matchAll(pictureSyntax())].map((match) => match[1] as string);
 }
 
 /** One shown text and when it was written. */

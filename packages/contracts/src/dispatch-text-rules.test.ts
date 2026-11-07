@@ -1,11 +1,14 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  comparableLines,
   isSessionId,
   MAX_REFERENCE_TARGET_BYTES,
   pictureCaption,
+  pictureSyntax,
   referenceTargetFits,
   SESSION_ID_PATTERN,
+  trimmedLines,
   utf8Bytes,
 } from "./dispatch-text-rules";
 
@@ -93,5 +96,87 @@ describe("pictureCaption", () => {
       "shot \\[v2\\] \\`final\\`\\\\draft.png"
     );
     expect(pictureCaption("two\twords\r\nmore  here.png")).toBe("two words more here.png");
+  });
+});
+
+// The caption and title bounds, which keep a reader from rescanning a body of many `![` from
+// every one of them: a picture written the ordinary way still reads, and one whose caption or
+// title runs past its bound is no picture at all.
+describe("pictureSyntax", () => {
+  const address = "dispatch://LEGION-1/artifact/shot-png@v1";
+
+  test("reads the pictures a text shows, each address its first group", () => {
+    const text = `Here ![shot.png](${address}) and ![a\\]b.png](${address} "the shot").`;
+    expect([...text.matchAll(pictureSyntax())].map((match) => match[1])).toEqual([
+      address,
+      address,
+    ]);
+  });
+
+  test("reads a caption and a title that fill their bound", () => {
+    const text = `![${"c".repeat(512)}](${address} "${"t".repeat(256)}")`;
+    expect([...text.matchAll(pictureSyntax())].map((match) => match[1])).toEqual([address]);
+  });
+
+  test("reads no picture whose caption or title runs past its bound", () => {
+    const longCaption = `![${"c".repeat(513)}](${address})`;
+    const longTitle = `![shot.png](${address} "${"t".repeat(257)}")`;
+    expect([...longCaption.matchAll(pictureSyntax())]).toEqual([]);
+    expect([...longTitle.matchAll(pictureSyntax())]).toEqual([]);
+  });
+
+  // A line break ends a picture in markdown, so a caption that crosses one is text, not a
+  // caption: the picture on the second line still reads.
+  test("reads no caption across a line break", () => {
+    const text = `![shot\n.png](${address})\n![two.png](${address})`;
+    expect([...text.matchAll(pictureSyntax())].map((match) => match[1])).toEqual([address]);
+  });
+});
+
+// The one rule the Claude Code plugin tags a streamed row by and the Agents page reads a stored
+// body by, so a person's message shows once (INFRA-1026).
+describe("comparableLines", () => {
+  const address = "dispatch://agent/s1/artifact/i3-blue96-png@v1";
+
+  test("takes out the pictures, trims each line and drops the empty ones", () => {
+    expect(comparableLines(`  Look at this ![blue](${address})  \n\n  and this  \n`)).toEqual([
+      "Look at this",
+      "and this",
+    ]);
+  });
+
+  test("leaves a line that is a bracketed word of the person's own", () => {
+    expect(comparableLines(`[ack]\n\n![blue](${address})`)).toEqual(["[ack]"]);
+  });
+
+  test("leaves text that only looks like a picture, which is no picture at all", () => {
+    expect(comparableLines("![shot.png](https://example.test/shot.png)")).toEqual([
+      "![shot.png](https://example.test/shot.png)",
+    ]);
+  });
+
+  test("is the exported line step applied to the text its pictures are out of", () => {
+    const text = `  Look at this ![blue](${address})  \n\n  and this  \n`;
+    expect(comparableLines(text)).toEqual(trimmedLines(text.replace(pictureSyntax(), "")));
+  });
+});
+
+// The line step both sides of the Agents page's comparison share: the body's through
+// `comparableLines`, the streamed row's through `rowLines`, which strips the row's pictures its
+// own way first (INFRA-1026).
+describe("trimmedLines", () => {
+  const address = "dispatch://agent/s1/artifact/i3-blue96-png@v1";
+
+  test("trims each line and drops the empty ones, whatever the line endings", () => {
+    expect(trimmedLines("  Look at this  \r\n\r\n\tand this\n")).toEqual([
+      "Look at this",
+      "and this",
+    ]);
+  });
+
+  test("takes no picture out: that step is `comparableLines`'s own", () => {
+    expect(trimmedLines(`Look at this ![blue](${address})`)).toEqual([
+      `Look at this ![blue](${address})`,
+    ]);
   });
 });

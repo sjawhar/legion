@@ -49,8 +49,8 @@ var Backends = map[Backend]BackendInfo{
 	BackendClaude: {
 		Name:  "Claude Code",
 		Roles: []claim.Role{claim.RolePlanner, claim.RoleImplementer, claim.RoleTester, claim.RoleReviewer, claim.RoleMerger},
-		Why: "an architect is woken by notices on its Envoy role topic and the controller by its own, " +
-			"and Claude Code's print mode delivers no channel notification",
+		Why: "the architect's loop and the controller's are proven only on Oh My Pi, " +
+			"and Claude Code runs the phase workers, whose loops Legion's live proofs cover",
 		Runtimes:   []string{"tmux", "kubernetes"},
 		PromptPart: "claude-mechanics.md",
 	},

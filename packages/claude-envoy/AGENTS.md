@@ -1,16 +1,19 @@
 # Claude Envoy Plugin Package
 
-Claude Code channel plugin package for Legion's Envoy subsystem.
+Claude Code plugin package for Legion's Envoy subsystem.
 
 ## Overview
 
-One MCP stdio process is the channel ingress. It subscribes NATS directly to the session's
+One MCP stdio process is the Envoy ingress.
+It subscribes NATS directly to the session's
 `notifications.agent.<session_id>` subject and every topic the session follows — the lane receipts,
 the live team topics and the core fallback ride those subscriptions, not the session's messages,
 which come from the relay below. It renders each
-envelope through `@legion/envoy-client/delivery`, then writes a supported
-`notifications/claude/channel` notification. A core-NATS direct delivery gets its empty receipt
-when the server enqueues the notification; that means adapter-accepted, not processed by Claude.
+envelope through `@legion/envoy-client/delivery`, then writes it into the session's own
+conversation through the mod (`src/mod-session.ts`), or, in a Legion pane, through the bridge's
+inbox.
+A core-NATS direct delivery gets its empty receipt
+when the server enqueues the write; that means the server took it, not that the model read it.
 There is no Monitor and no native Claude messaging socket path. The server's tools are the
 `envoyToolSpecs` alone, the ten `envoy_*` tools and `slack_post`: agents reach Dispatch through the
 `dispatch` command, which `bin/dispatch` puts on the Bash tool's `PATH`.
@@ -28,8 +31,10 @@ as it decodes, goes to the same write queue a live frame takes, and is answered 
 notifier resolved its write and the ledger recorded it (`deliverRelayed`), at once for a frame
 skipped, already shown or a late BTW, which is passed over. In a Legion pane the notifier
 resolves when `legion claude-bridge` answers its inbox, which it does once Claude Code re-emits
-the delivery as the user message it took (`--replay-user-messages`); in channel mode it resolves
-when the MCP notification write does, the last signal Claude Code gives there. A write that fails
+the delivery as the user message it took (`--replay-user-messages`); in a terminal session it
+resolves once the mod has stored the row, and while the session is idle the card is a prompt
+instead and the write resolves on the row Claude Code writes for that prompt (`show`). A write
+that fails
 answers `nak`, and from the frame's third delivery `done` with a notice naming it; a frame that
 arrives after a `/clear` moved the session to another id is answered `nak`. The core copies of
 those subjects answer only a lane's receipt (`relaysCoreTopic`), and the replay engine makes no
@@ -50,8 +55,8 @@ from Envoy's notification stream through its listener (`POST /v1/replay`) with t
 `@legion/envoy-client/replay`, which pi-envoy uses too (its rules are "Missed messages" in
 `packages/pi-envoy/AGENTS.md`). A sweep runs at channel start (a resume included), on each nats.js
 `reconnect` status, on every heartbeat and after a new follow, and shows each stored frame the
-session was not shown, once, through the same path a live frame takes (the channel notification,
-or the Legion bridge's inbox), with a last line saying when it was published while the
+session was not shown, once, through the same path a live frame takes (the mod's write into the
+conversation, or the Legion bridge's inbox), with a last line saying when it was published while the
 connection was down (`replayedText`, worded by the engine, as are the notices, which its
 `envoyNoticeText` renders in TOON as every live card is); a frame there runs nothing. On this
 path, role messages and team or other ad-hoc topics are not recovered. The live path records
@@ -89,18 +94,19 @@ ping interval left a frozen path for up to 6 minutes. Every registration names t
 directory the bundle runs from (`…/plugins/cache/<marketplace>/<plugin>/<version>/`, the npm
 version Claude Code installed, since the marketplace entry is an `npm` source;
 `installedPluginVersion` in
-`src/claude-channel.ts`), or `source` for a bundle outside the plugin cache (a checkout,
+`src/installed-build.ts`), or `source` for a bundle outside the plugin cache (a checkout,
 `--plugin-dir`); a checkout's `package.json` `version` names no release and is never sent.
 
-A session advertises the delivery modes its deliveries' path can honour, never `btw`, and none at
-all when its deliveries are channel notifications Claude Code did not load (`src/claude-channel.ts`;
-a Legion pane's go to the bridge's inbox instead, so the gate does not apply to it). One whose
-deliveries are channel notifications advertises `aside` alone (`CHANNEL_CAPABILITIES`): Claude Code
-queues a notification for the model's next turn, so a `steer` cannot be honoured. A Legion pane
-whose deliveries go to `legion claude-bridge`'s inbox advertises `aside` and `steer`
-(`INBOX_CAPABILITIES` in `src/legion-inbox.ts`): the bridge starts a turn with a delivery when
-Claude Code is idle and sends it as the next user message of the running turn otherwise. `btw`
-remains intentionally unsupported until there is a server-owned pending-delivery/reply-ack design.
+A session advertises what it can take now, read again at every registration
+(`sessionCapabilities` in `src/envoy-channel-server.ts`). A terminal session reaches the model
+only through its mod (`hooks/mod.ts`, `src/mod-session.ts`), so it advertises nothing until the
+mod connects and `aside`, `btw` and `steer` once it has; it registers again as soon as the link
+hears from the mod, by its hello or by its first poll, since a mod says hello once per Claude
+Code process and a server Claude Code starts again inside that process hears only polls.
+A Legion pane whose deliveries go to `legion claude-bridge`'s inbox advertises
+`aside` and `steer` (`INBOX_CAPABILITIES` in `src/legion-inbox.ts`) whether or not the mod is
+there — the bridge starts a turn with a delivery when Claude Code is idle and sends it as the
+next user message of the running turn otherwise — and gains `btw` with the mod.
 Permission relay is also intentionally absent: without a sender-authenticated reply path and
 reply-ack design, declaring it would allow an Envoy input to decide Claude Code permissions.
 Dispatch asks stay on Dispatch.
@@ -118,18 +124,17 @@ Dispatch asks stay on Dispatch.
 | Hook command | `hooks/hooks.json`, `hooks/session-hook.ts`, `hooks/session-title-hook.ts` | Two bundles. `dist/session-hook.js` takes its mode as an argument — `open-asks`, `dispatch-first` or `answers`, plus `answers-refresh`, which only the `answers` mode starts and hooks.json never names; an argument naming none of them throws — and each mode is a hook of its own, because Claude Code caps each hook's output at 10,000 characters. `open-asks` (every `SessionStart`) names the `dispatch` command's host and hands on the session's envoy.json in `CLAUDE_ENV_FILE`, records the current session id per Claude process, records the session's chosen title and injects the open-asks summary; always exits 0. For a Legion pane (`LEGION_STATE_DIR` set) it writes the pane's jj attribution overlay under that directory too, and keeps exactly one `export JJ_CONFIG='<chain>'` line in `CLAUDE_ENV_FILE`: the line replaces an earlier one in its place rather than joining it, since a resume or a compaction of the same session id runs the hook again over the file it already wrote and the chain it resolves can differ; when no overlay could be written the file is left as it is, no line written and none removed, since `CLAUDE_ENV_FILE` is one file per session id (`<config>/session-env/<session id>/sessionstart-hook-<n>.sh`, read on the pinned 2.1.311) — a `/clear` gets a new and empty one, and a line already there names this same session's own overlay, still on disk and still correct. `dispatch-first` (every `SessionStart`, and every `SubagentStart`, since a subagent runs the same `dispatch` command) injects the `dispatch-first` skill as `hookSpecificOutput.additionalContext` under the input's `hook_event_name` when Dispatch is configured, reading `${CLAUDE_PLUGIN_ROOT}/skills/dispatch-first/SKILL.md` at run time and exiting non-zero naming it when it is missing. On a resume or fork Claude Code adds a SessionStart hook's context only when the transcript does not already hold the same text (measured on 2.1.283), so a resumed session keeps one copy and one opened without the skill gets it; the hook itself checks nothing. `answers` (every `SessionStart`, and every `SubagentStart`) injects what people wrote to the session in the last 72 hours as `hookSpecificOutput.additionalContext`: `readSessionAnswers` from `@legion/envoy-client/session-answers` for the input's `session_id` (at `SubagentStart` the parent's, which `tests/answers-claude.test.ts` checks on the real binary), the list pi-envoy puts on every model request, or its failure line naming why when a read failed and no list read before has an item to show, and nothing when there is nothing to show, Dispatch answered its own `404 NOT_FOUND` "no route for …" (`isNoAnswersRoute`, which `dispatch answers` cannot read past either; the hook then writes the read's `notice`, naming that Dispatch, to stderr, one line per process), or Dispatch is not configured; a proxy's 404 page or a 200 that is no answers list is a failed read. Its bound is counted from its process's start, Bun's start-up included: it prints by `ANSWERS_BY_MS` (800 ms, `SESSION_ANSWERS_DEADLINE_MS`), or `ANSWERS_LEAST_WAIT_MS` (150 ms) after its code begins when the start-up took longer, carrying the last list read from `answers.json` in the session's Dispatch state directory (`readSessionAnswers` works it out from `env`) when Dispatch has not answered, then waits on `sessionAnswersSettled` for `ANSWERS_SETTLE_MS` (50 ms) more so a read that answered late still writes that file for the next hook, and calls `process.exit(0)` whatever happened, a malformed input included (stderr names why), so nothing still in flight holds it. Dispatch is resolved with `commands: "kept"` first; a fresh process has kept no `!` command's outcome, so when that resolution is off with an error the mode starts the refresher: this bundle again (`process.execPath`, `Bun.main`) in mode `answers-refresh` with the session id and project directory, detached (its own session, so a signal to the hook's process group does not reach it), stdio ignored (so it holds none of the hook's pipes) and `unref()`ed, unless `answers-refresh.lock` in the session's state directory names a live refresher (its pid; a lock older than 30 s, or whose pid is gone, is stale). The refresher takes that lock (`wx`; a second one exits at once, so a burst of `SubagentStart` hooks runs the command once), resolves Dispatch with commands run, so `envoy-config`'s run of the command ends in its own process with its own clean-up (the group killed at the 10 s timeout, the stdout file's directory removed), reads with a 12 s deadline (which writes `answers.json`), writes `{finished_at, dispatch_url, text, notice}` to `answers-refresh.json` and removes the lock. The hook polls that file every 20 ms until its print deadline and carries its `text`, and reports its `notice` on stderr, when it finished after the hook started; otherwise it carries the last list read from the Dispatch URL envoy.json names now (`sessionDispatchUrl`, resolved before the wait without reading the token, passed as `readSessionAnswers`' `dispatchUrl`; a list another Dispatch answered never stands in) or the failure line naming that the command had not finished, and exits, so the next hook carries the list the refresher read. Its `timeout` is 5. Measured with Dispatch hanging: about 870 ms wall from spawn to exit; healthy, about 220 ms. `dist/session-title-hook.js` (every `UserPromptSubmit`, no argument) records the payload's `session_title` — the name a person gave the session, which Claude Code hands a hook and the plugin nowhere else — under `${CLAUDE_PLUGIN_DATA}/titles/`, and removes that file when the field is absent or blank, which is how a rename is undone. It writes nothing to stdout and exits 0 whatever happens, a payload that is not JSON included (`open-asks` and `dispatch-first` still fail loudly on one), because Claude Code adds a `UserPromptSubmit` hook's stdout to the model's context and reads its exit code 2 as a block of the prompt, and a cosmetic title may do neither; a failure goes to stderr. Claude Code blocks the user's prompt on it, so it is a bundle apart from the other two and keeps zod, the Dispatch client and `session-settings` out of its import graph (`src/session-state.ts` holds the file helpers for that reason, `src/session-identity.ts` imports zod and is not reachable from here): 5 kB and ~68 ms against the shared bundle's 811 kB and ~165 ms, the latter all but 3 ms of it bare `bun` start-up. It checks the payload itself — a non-empty string `session_id`, an optional string `session_title` — rather than carry a schema library. Its `timeout` is 5, not the 20 the `open-asks` and `dispatch-first` hooks carry. |
 | Real Claude Code test | `tests/answers-claude.test.ts`, `/.claude-code-pin`, `/.github/actions/install-claude-code` | The `answers` hook on the real binary: Claude Code runs with this package as `--plugin-dir`, an isolated HOME and `CLAUDE_CONFIG_DIR`, and one stand-in as its Messages endpoint (`ANTHROPIC_BASE_URL`, server-sent events as the API streams them) and Dispatch (`DISPATCH_URL`); each case reads the list off the Messages request after the moment: startup (`claude -p --session-id`), `--resume <id>`, `/compact` sent in stream-json as `legion claude-bridge` sends turns, and a subagent (the stand-in answers with an `Agent` tool call, the API name of Claude Code's Task tool). `LEGION_TEST_CLAUDE` names the binary; the test skips without it, except on GitHub Actions, where the claude-envoy job installs the release `.claude-code-pin` pins (`bun add` into the runner's temp directory). A pin bump that changes a request shape is fixed in that file. |
 | Inbound channel server | `src/envoy-channel-server.ts`, `src/envoy-off.ts` | MCP capability, notification queue, NATS registration, session-id handoff, role persistence, rejected-frame replies, and the Envoy tools, on the envoy.json Claude Code's rule picks (`@legion/envoy-client/session-settings`); why a section is off, and that inbound messages are off, goes to stderr once as `envoy-channel: <notice>`. `runEnvoyChannelServer` chooses between that server and the two reduced modes of `src/envoy-off.ts`. With Envoy off it runs `serveEnvoyOff` instead: an MCP server that lists no tool, refuses every call with `Envoy is off for this session: <why>` (the section's notice or error), opens no NATS connection and calls no listener, and exits 0 when stdin ends or on SIGTERM, SIGINT or SIGHUP. With Envoy on and inbound messages off (`inbound.off`: no NATS server, from `envoy.natsUrls` or `ENVOY_NATS_URL`, or its seed refused), it serves the tools on `inboundOffChannelSession`: no NATS connection, nothing registered with the listener, an empty inbox, `envoy_subscribe` refused naming why, and a role `envoy_role_set` claims still persisted. |
-| Channel gate | `src/claude-channel.ts` | Whether Claude Code loaded this server as a channel, which it never tells the server: the command line of the nearest ancestor whose program is `claude` (`claudeCommandLine`; Claude Code may run the server through a shell prefix or a `bun` shim), read from `/proc` (exact, with its stdout's terminal and its directory) or `ps` (split on whitespace), against Claude Code's own gate as of 2.1.301: a `plugin:claude-envoy@…` entry when `CLAUDE_PLUGIN_ROOT` says it runs as a plugin, any `server:` entry from a bare config; `--channels` entries before development ones; `--dangerously-load-development-channels` only in an interactive session (`asksForPrintMode`, the arguments skipped as Claude Code's scanner skips them, and a terminal on stdout where `/proc` shows it); the marketplace it is loaded from (`loadedMarketplace`: `inline` for `--plugin-dir`, else the cache's, compared after Claude Code's cache-name sanitizing); for `--channels`, `allowedChannelPlugins` (object or `plugin@marketplace` entries, each invalid one dropped alone) from the managed source that owns it (`remote-settings.json`, else `managed-settings.json` with its non-dot drop-ins; under `managedSourcesBehavior: "merge"` the highest that sets it). Not loaded, the session registers `capabilities: []`. `ENVOY_CHANNEL_LOADED=1`/`0` overrides it. A command line it cannot read, or no `claude` ancestor, counts as loaded, and so does one Node overwrote with `process.title = "claude"` (on Linux, the title alone followed by NUL padding, whatever the executable's name; elsewhere one word from a program named `node…`). |
+| A person's message | `src/user-turn-router.ts`, `src/mod-session.ts`, `src/user-turn-state.ts`, `src/claude-rows.ts` | What a frame from Dispatch's Agents page becomes (INFRA-1026). The accept step is `acceptUserTurn` (`@legion/pi-shared/accept-user-turn`), the one step both Envoy plugins take — this router and `acceptedUserTurn` in `packages/pi-envoy/extensions/envoy.ts` — so a fix to the rule lands in both: a candidate frame (`isUserTurnCandidate`), an attempt this session has not handled, the attempt recorded **before** Dispatch is asked (a 404 included), the accept, and the stored body it answers — never the frame's own text. This host supplies the record, the Dispatch client, the session id and the wording of each refusal. The record lives in `turns/<url-encoded session id>.json` and outlives the process, so no restart spends an attempt twice; it also maps each delivered row to the Dispatch message it is, which tags that row on the live view. A row is matched to a message by the shared line rule (`comparableLines`, `@legion/contracts`), which the Agents page reads a stored body by too, so the two cannot drift and show a person's message twice. A terminal session takes the body through the mod (`$.session.append` during a turn, `$.prompt.submit({asUser:true})` while idle, one submit in flight at a time, and one plain submit at a row the turn never read); a pane's goes to the bridge's inbox, with its pictures as `blocks`. That plain submit carries each unread message's own words and its Dispatch id and never points at the row (`unreadRowPrompt`): driven live, a prompt saying "Read the message above" was answered `I don't see an actual Dispatch message content above` and `it looks like an injection and I'm not going to act on it`. A `/` message runs through `$.command.run` and its output is the reply — the result's `text`, else its `context` entries, which is where a terminal `/context` puts its table and the only place it puts it, else the `<local-command-stdout>` row Claude Code wrote for that run (`src/claude-rows.ts`, which the live view parses the same rows with), waited for two seconds since the row and the result reach this process on separate posts and cross — with a waiting reply after ten seconds, and a reply saying so when the command printed nothing, since `typedInputReply` has nothing to say for an empty output; `/model` and `/effort` are picks (`$.config.set`, `set-effort`), answered with `typedInputReply`'s text once the settings frame is refreshed; a BTW is `$.model.fork`. A row of the `command` door is a run's by when it arrives and by nothing else: a run claims the first echo row to arrive inside one second of its own answer (`runsCommandRow`), and the `<local-command-stdout>` row directly behind that claimed echo is that run's output, while an echo no run claimed — and the output row behind it — is a command the person typed at their own terminal and belongs to no run. Never by the command the row names: Claude Code runs `/cost` as `/usage` and `/model anthropic/haiku` as `/model haiku`. `origin` separates nothing, measured on live Claude Code 2.1.310 (INFRA-1026): a `/model haiku` this session ran answered at 08:14:06.839 and wrote its caveat (`{"kind":"plugin"}`, `isMeta`) at .844, its echo (`{"kind":"plugin"}`) at .858 and its stdout (`{"kind":"engine"}`) at .888, a `/config` a person typed at a terminal wrote its echo and its stdout with `{"kind":"engine"}` too, and a Dispatch `/cost` whose dialog waited for the person had written no row of its own when that `/config` arrived 36 seconds later. The live view draws nothing of a claimed echo row — the person's own line reaches the page as the message Dispatch stored beside the stream — and nothing of any row Claude Code marks `isMeta`, such as the `<system-reminder>` naming the session that a terminal `/rename` leaves behind its own two rows. |
 | Session identity | `src/session-identity.ts`, `src/session-state.ts`, `src/claude-session.ts` | `SessionIdentity` is the one mutable id holder; handoff file `sessions/<claude-pid>/session-id`; role file `roles/<url-encoded session id>.json` (`readPersistedRole`, `writePersistedRole`; the suffix is what keeps a session id of `.` or `..` inside `roles/`, since `encodeURIComponent` leaves a dot alone). `CLAUDE_CODE_SESSION_ID`, or explicit `ENVOY_SESSION_ID` for QA. `src/session-state.ts` holds what the state files share and nothing that imports zod: `writeAtomicStateFile`, and `pruneStateDirectory(directory, isStale)`, the one ENOENT-tolerant sweep behind all three of them — handoffs by liveness (a `sessions/<pid>` whose Claude process is gone, anything else there left alone), titles and roles by age (`writtenLongAgo`, `STATE_FILE_MAX_AGE_MS`, thirty days). The role sweep exists because exactly one path removes a role file by hand — a soft `setRole` the listener refuses with a holder that is **not** the predecessor the claim named, which says that predecessor no longer holds the role. A refusal naming the predecessor itself keeps the file, since that record belongs to the live holder, which may be another process sharing this state directory. The handoff sweep cannot reach either, keyed as it is by session id with no process left to ask about. All three run at startup in `startChannelSession`, each under its own `.catch` that logs and swallows: the heartbeat timer is not armed yet, so housekeeping must never cost a session its channel. |
 | Session title | `src/session-title.ts`, `src/session-state.ts` | The title every registration sends, which Dispatch's Agents page shows in place of the id: `ENVOY_SESSION_TITLE` on one line when it holds a character that shows; else the name the person running the session gave it (`claude -n`, `--name`, `/rename`), alone, with no short id after it, since a name a person chose needs nothing to tell it apart; else a name and the current id's first eight characters (a function of the id, so it follows a `/clear` handoff, and keeps two sessions in one tmux window apart). The chosen name is read, through `readChosenTitleSync`, from the `titles/<url-encoded session id>.txt` file the hooks write under `CLAUDE_PLUGIN_DATA` (keyed by id, like the role file, so `claude --resume <id>` finds it and a `/clear`'s new id starts without one; the suffix keeps a session id of `.` or `..` inside `titles/`, since `encodeURIComponent` leaves a dot alone), and every writer and reader goes through `sessionTitleFile` so the file the hook writes is the file the server reads; that read is synchronous and swallows every error, because a cosmetic title must leave the session on its fallback rather than fail the registration carrying it, and the name goes through the same `oneLine`/`visible` pair the other sources do, so a blank or invisible one falls through to the fallback while a multi-line one is put on one line and kept. The fallback's name is the pane's tmux name (`TMUX` and `TMUX_PANE`, one bounded `tmux -u -S <socket> display-message` at startup, used only when the answering server's pid is the one in `TMUX` and the pane's process is one of this process's ancestors (`isAncestor`); `session:window` when the window's `automatic-rename` is off, else the session, never a window index; for grouped sessions the group's name), else the project directory's name (outside tmux, a refused or missing answer, or a session named only by digits in a window nobody named). That name is worked out once as the server starts; the chosen name is asked for on every call instead, so a rename reaches the page on the session's next prompt plus a heartbeat, with no watcher anywhere. `pruneStaleSessionTitles` drops title files untouched for thirty days at startup, through the sweep the handoff and role prunes share and under the same best-effort guard, since nothing else deletes a file keyed by a session id. The listener replaces the stored title on every registration, and `register` also stamps it (`stampTitle`: `writeSessionTitle` in the session's Dispatch state directory) once per id, where the `dispatch` command reads it for the `session_title` on its writes; with inbound messages or Envoy off, nothing registers, so `runEnvoyChannelServer` stamps it once for the starting id (a `/clear` there leaves the new id unstamped); nothing is stamped when the session starts with Dispatch off or under `ENVOY_SESSION_ID`. |
 | NATS topic consumer | `src/channel-forwarder.ts` | Dedupe through the shared `createDeliveryDedupe`: a re-send by its `dedupe_key` (never by `event_id` alone, which the listener mints fresh for every send, so a Dispatch Retry would pass as new), and a second copy of one publish arriving on overlapping subscriptions by its `event_id`; surface the envelope's topic, and drain safely at shutdown. The promise the dedupe keeps is stated on `DELIVERY_DUPLICATE_WINDOW_MS` in `packages/contracts`. |
 | Consumer delivery | `src/envoy-channel-server.ts` (`openRelay`, `deliverRelayed`, `renewRelayEpoch`, `relaysCoreTopic`), `src/replay-state.ts` (the `consumer` part of `replay-<session id>.json`), `../envoy-client/src/consumer-delivery.ts`, `../../scripts/e2e/envoy-session-delivery.sh` | The listener's relay of the session's durable consumer ("Overview"): the relay subscription and epoch, each frame's `received`, `done` and `nak`, and the persisted resume point. The repository's `scripts/e2e/envoy-session-delivery.sh` is the live proof under `legion claude-bridge` (`scripts/e2e/README.md`). |
 | Outbound transport | `src/envoy-client.ts`, `bin/envoy-send.ts` | Envoy listener HTTP client for `envoy-send`, which sends to the listener and with the bearer `envoySettings` resolves over the envoy.json `envoyConfigPath("command")` chooses. |
 | Send CLI parsing | `src/send-arguments.ts` | Validates destination and message arguments. |
-| Manual channel smoke | `scripts/smoke-channel.sh` | Real smoke, unattended (answers every startup dialog, captures the pane); documented and deliberately excluded from CI. |
 | Manual `/clear` smoke | `scripts/smoke-clear-rebind.sh` | Real `/clear` against the live listener with the build in `CLAUDE_PLUGIN_DIR` (default: a `--out` build of this tree in the smoke's scratch directory); checks the registry entry moves to the new id without the old direct subject. Sends no prompt to the model; excluded from CI. |
 | Manual session-title smoke | `scripts/smoke-session-title.sh` | Real nats-server, a listener built from this tree, and the `dist/` of its own `--out` build of this tree for both the hook and the channel server: a chosen name registers, a rename replaces it, taking the name away restores the folder-and-short-id fallback, and the `dispatch` command's stamp carries the same name, each read back through the listener's `GET /v1/sessions`; the base revision's committed bundle is the negative control. Claude Code is not installed in an issue pod's image, though it runs there from `bunx --package @anthropic-ai/claude-code@<version> claude`, as `scripts/e2e/envoy-session-delivery.sh` runs it; this smoke writes the two hook payloads to their documented shape instead. Excluded from CI. |
 | NATS stall test | `tests/envoy-channel-stall.test.ts`, `../envoy-client/test/stall-proxy.ts`, `../envoy-client/test/envoy-stack.ts`, `../envoy-client/test/stall-scenario.ts` | Runs only with `LEGION_E2E_ENVOY_STACK=1` (CI's `envoy-session-stall` job), and needs `go` on `PATH` to build natsd and the listener from `packages/envoy`: with the gate set, a missing `go` or a failed build fails it rather than skipping it. The real channel server process registers against that listener (its row shows `plugin` `@sjawhar/claude-envoy` and `plugin_version` `source`), which answers `consumer`, and the proxy freezes its NATS path. Within 60 s the connection nats.js dials in place of the frozen one subscribes the relay subject again (natsd's `/connz`), the session registers a new epoch (its `envoy_sessions` entry), and the message sent during the freeze and one sent after it are each handed over once, neither as a replay: the freeze and what it checks are `runFreezeScenario`, which pi-envoy's stall row runs too. |
-| Legion phase worker on Claude Code | `src/legion-claim.ts`, `src/legion-tool.ts`, `src/legion-inbox.ts`, `src/legion-phase-hook.ts` | Active only when `legion claude-bridge` launched the pane (`LEGION_BOOT_TOKEN_FILE`, `LEGION_DAEMON_URL`, `CLAUDE_CONFIG_DIR` set). The claim waits for the session transcript, then boots through the claim boot `@sjawhar/pi-legion` shares (`bootLegionClaim`, `@legion/pi-shared/legion-claim-core`): registers with the daemon, claims the issue's Envoy role soft and calls ready, again on every `onRoleRegained`. The `legion` MCP tool is the phase ops `@sjawhar/pi-legion`'s tool serves too (`@legion/pi-shared/legion-phase-ops`: one schema, one executor, and the shared description template with its `read_record` and `request_backward_move` sentences, naming `mcp__legion__envoy_publish`). `src/legion-phase-hook.ts` is the endless phase reminder's Claude Code host (the section below). With `LEGION_CLAUDE_INBOX` set, deliveries go to the bridge's socket instead of channel notifications. `package.json` `legion.daemonApiVersion` is pinned by `tests/daemon-api-version.test.ts`. |
+| Legion phase worker on Claude Code | `src/legion-claim.ts`, `src/legion-tool.ts`, `src/legion-inbox.ts`, `src/legion-phase-hook.ts` | Active only when `legion claude-bridge` launched the pane (`LEGION_BOOT_TOKEN_FILE`, `LEGION_DAEMON_URL`, `CLAUDE_CONFIG_DIR` set). The claim waits for the session transcript, then boots through the claim boot `@sjawhar/pi-legion` shares (`bootLegionClaim`, `@legion/pi-shared/legion-claim-core`): registers with the daemon, claims the issue's Envoy role soft and calls ready, again on every `onRoleRegained`. The `legion` MCP tool is the phase ops `@sjawhar/pi-legion`'s tool serves too (`@legion/pi-shared/legion-phase-ops`: one schema, one executor, and the shared description template with its `read_record` and `request_backward_move` sentences, naming `mcp__legion__envoy_publish`). `src/legion-phase-hook.ts` is the endless phase reminder's Claude Code host (the section below). With `LEGION_CLAUDE_INBOX` set, deliveries go to the bridge's socket instead of the mod's `$.session.append`. `package.json` `legion.daemonApiVersion` is pinned by `tests/daemon-api-version.test.ts`. |
 | Generated Legion plugin | `legion/`, `scripts/build.ts` | Never edit by hand, and never committed (convention below): `scripts/build.ts` stages pi-legion's skills, converts `packages/pi-legion/agents` (tool names mapped to Claude Code's, `glob`/`grep`/`todo` dropped) and writes the phase reminder's five hook entries (`LEGION_HOOKS` → `legion/hooks/hooks.json`, the section below). `scripts/verify-build.sh` builds the tree twice and fails when the two builds differ, so the release publishes what the source builds to; `tests/dist-fresh.test.ts`, `tests/legion-plugin-fresh.test.ts` and `tests/build-out.test.ts` build fresh and read no file of the package. `tests/legion-pane-mcp.test.ts` runs a Legion pane's server end to end against stand-ins. |
 | The phase reminder on the real Claude Code binary | `tests/legion-phase-hook-claude.test.ts` | The one check that Claude Code arms the generated `legion/hooks/hooks.json` entries at all: it runs the real binary under Legion's own agent command (`claudelaunch.Argv`, `--debug` added for the log it reads), with a fresh `scripts/build.ts --out` build of this tree — its generated `legion/` tree, and its `dist/envoy-channel.js` as the `legion` MCP server — against stand-ins for the Anthropic API, the daemon, the listener and NATS. `LEGION_TEST_CLAUDE` names the binary — in a worker pod, the one installed from `packages/daemon/docker/claude-code/package-lock.json`, at `node_modules/@anthropic-ai/claude-code-linux-x64/claude` (the `node_modules/.bin/claude` symlink is a `.exe` shim that does not exec on Linux): `cd packages/claude-envoy && LEGION_TEST_CLAUDE=<that path> bun test tests/legion-phase-hook-claude.test.ts`. A run without it skips the file, and nothing in CI installs the binary. |
 
@@ -232,10 +237,13 @@ above says how to run it).
 
 - `renderInbound` from `@legion/envoy-client/delivery` is the sole inbound renderer. Never add an
   adapter-specific renderer or emit raw envelope bytes.
-- Each channel meta key must contain only letters, digits, and underscores and every value must be
-  a string. `producer`, `topic`, `event_id`, `dedupe_key`, `urgency`, `from_session`,
-  `expects_reply`, and `in_reply_to` are the current contract. Never emit a `source` key: Claude
-  Code stamps its own `source="plugin:claude-envoy:envoy"` attribute on the `<channel>` tag.
+- A frame's identity fields are `event_id`, `dedupe_key`, `source`, `source_event_id` and
+  `topic` (`deliveryIdentity` in `src/channel-forwarder.ts`), each parsed on its own and kept
+  only when valid, so one field the rule refuses still leaves its sibling able to recognise a
+  repeat.
+  Nothing else of an envelope leaves the renderer: what reaches the session is the rendered
+  text, and, where a line carries more than text (a person's pictures), Claude Code's own
+  content blocks for it.
 - Subscribe NATS before registering the self-subscribed session route — on startup, on a session-id
   handoff (new direct subject first, then deregister the old id, drop the old subject, register,
   move the role by soft claim; a handoff that fails before the id switch drops the new subject
@@ -272,18 +280,106 @@ above says how to run it).
 - Pass a `ChannelInboundMessage` built field by field; a nats.js `Msg` exposes `subject`, `data`, and
   `reply` through prototype getters that an object spread silently drops. The forwarder decodes
   `data` once into `raw`; downstream code reads `raw`, never re-decodes.
-- Register the capabilities the delivery path honours, never `btw`: `CHANNEL_CAPABILITIES`
-  (`["aside"]`) for channel notifications, which queue for the next turn, so a steer at the next
-  tool boundary cannot be honoured, and none when Claude Code did not load the channel;
-  `INBOX_CAPABILITIES` (`["aside", "steer"]`) when `LEGION_CLAUDE_INBOX` routes deliveries to the
-  bridge, which needs no channel. Dispatch refuses a targeted delivery in a mode the session does
+- Register what the session can take now, never a constant: `sessionCapabilities`
+  (`src/envoy-channel-server.ts`) reads whether this is a pane and whether the mod is connected,
+  and `ChannelSession.capabilitiesChanged()` registers again when that changes. Dispatch refuses
+  a targeted delivery in a mode the session does
   not advertise, and a message with no command goes in the mode the addressed sessions take
   (`plainDelivery`), as a broadcast does (`broadcastDelivery`).
-  The direct NATS receipt occurs immediately after notification enqueue; it cannot imply model
-  processing because Claude Code does not acknowledge channel notifications. A relayed frame's
-  `done` waits for the write instead: the resolved notification write in channel mode, which is
-  the last signal Claude Code gives there, and the bridge's inbox answer in a Legion pane, which
-  comes once Claude Code re-emits the delivery (`--replay-user-messages`).
+  The direct NATS receipt occurs immediately after the write is enqueued; it cannot imply model
+  processing, because nothing in the mod protocol says the model read a row.
+  A relayed frame's `done` waits for the write instead: the mod's write into the conversation in
+  a terminal session, and the bridge's inbox answer in a Legion pane, which comes once Claude
+  Code re-emits the delivery (`--replay-user-messages`).
+- Write every message into a terminal session through the one call `hooks/mod.ts` serves,
+  whether a person sent it or Envoy delivered it: `session.message` hands the mod the message,
+  and the mod decides what it becomes — the prompt of a new turn while nothing is running
+  (`$.prompt.submit`), a row of the turn running (`$.session.append`), and one prompt of its own
+  quoting such a row in full when the turn ends without a request having read it
+  (`unreadRowPrompt`, `hooks/mod-protocol.ts`). The mod decides because the mod is the one
+  process where the turn's events and this plugin's writes arrive in one order; three review
+  rounds found a race in deciding it in the server, each from two posts whose order was not the
+  order the session saw (INFRA-1026 review, rounds nine to eleven). An appended row starts
+  nothing, so a card appended to an idle session would wait for the person to type and one
+  appended after a turn's last request is never read at all. A person's message goes with
+  `asUser`, so Claude Code frames it as their own words; a card goes without it, so Claude Code
+  frames it as the plugin speaking, since nobody at the session typed it.
+- Put a card in front of the model once. While the session is idle the card is the prompt
+  itself and nothing is stored for it — no `$.session.append`, and no second prompt quoting
+  one — since a row beside a prompt that quotes it is the same message twice (INFRA-1026,
+  handoff v6: rows 8 and 10 of session 225642d4 carried the one card, and two subtests of the
+  `envoy-session-stall` lane read it twice). A card that arrives during a turn keeps the row
+  and the unread-row prompt behind it.
+- Answer a card's Envoy frame on the row the mod answers with, and on nothing else: the row is
+  the proof the session has the message. Nothing else is: a `$.prompt.submit` can wait for a
+  turn already running before the engine takes it, and a request handed to a poll is a write
+  into a socket buffer that a SIGSTOPped process never reads (INFRA-1026 review, round eleven,
+  repro `R-A`). `show` waits up to `SHOW_TIMEOUT_MS` and rejects without an answer, which leaves
+  the frame unanswered and has the listener send the card again. Driven live (INFRA-1026, k7's
+  second clause — Claude Code SIGSTOPped, an Envoy message sent to it, then SIGKILL and `claude
+  --resume <id>`), a branch that answered on the submit held that message zero times in the
+  resumed conversation. A person's message is the same, except that a prompt the session
+  *dropped* reaches them as a reply on Dispatch (`failed`): their own words were refused, and
+  Dispatch is where they are waiting.
+- Make the mod's write idempotent by the Envoy event id, since the server is at-least-once.
+  Every card request carries its `eventId`; before it appends or submits, the mod looks that id
+  up in `$.store` and answers a copy it already wrote with the recorded row, writing nothing
+  (`writeOnce`, `hooks/mod.ts`). The store has no compare-and-set — two `get`s of an unset key
+  both answered undefined, 0 ms and 2 s apart, in one session and across two
+  (`/legion/scratch/tmp/infra-1026-store`) — so the mod chains the look-up and the write per
+  event id, which holds inside the one process, and the store covers what crosses a restart:
+  `set` had written the file before it resolved, and a later session on the same configuration
+  directory read it back after a `kill -9` taken at that moment. Keep the record capped and
+  evicted (`CARD_RECORD_MAX`, `keys()` in insertion order): every call parses the whole file,
+  so at 3.9 MiB a `get` cost 7–20 ms and a `set` 44 ms against about 1 ms on an empty store, and
+  `set` refuses past 4 MiB outright. Only this process ending between the write and the record
+  can still show a card twice, the crash case
+  `docs/site/src/content/docs/dispatch/envoy.md` states.
+- Report from the mod every row the mod itself appends: Claude Code does not re-enter a mod's
+  own `session.append` hook for such a row (measured in the issue's spike —
+  `logs/mod3-q1q3q5.jsonl:36,64`, two calls whose uuids no hook ever carried), so a card
+  delivered during a turn reached no mapper and the live view drew nothing for it. `hooks/mod.ts`
+  sends an `append` event built from what `$.session.append` answered (`{message, uuid}`), by
+  the `note` door under a `plugin` origin naming this plugin (`MOD_PLUGIN_NAME`), and the
+  server ignores an `append` event whose row id it has already read
+  (`AGENT_STREAM_SEEN_ROWS_MAX`, `src/agent-stream-runner.ts`) in case a host fires the hook as
+  well.
+- Claim every row of the conversation this session wrote by its uuid, never by what the row says
+  (`src/mod-session.ts`, `appendedRow`, `runsUnreadPrompt`, `runsCommandRow`). Draw a row
+  Claude Code marks `isMeta` only where this session appended it: the engine marks every row
+  `$.session.append` writes, so a card delivered during a turn — which is that row and nothing
+  else — is the one `isMeta` row the page must show, while a terminal `/rename`'s
+  `<system-reminder>` and the `<local-command-caveat>` row of a run stay model-facing and are
+  drawn nothing for. The claim rides on the stamp the mod puts on the row's own event
+  (`ModEvent`'s `wrote`: `message` for the row a message became, `pointer` for the prompt at
+  unread rows), never on the answer of the call that wrote the row — the two cross, since the
+  mod holds an event behind a post already in flight while a result goes out on a fetch of its
+  own, and a claim made from the answer landed after the view had read the row and dropped it
+  (INFRA-1026 k2, measured live on 2.1.310). The server hands the session every event before the
+  view records it (`src/envoy-channel-server.ts`), so the stamp is in place for the row being
+  drawn. The stamp is the whole signal: another installed mod's appends reach this mod's hook
+  under a `plugin` origin of their own, so a rule on the origin drew another mod's context as
+  the person's words. Of the two prompts this plugin submits without `asUser`, the card an idle
+  session took is drawn, because it is the card, and the prompt at unread rows is not, because
+  it quotes rows the view has already drawn — told apart by the stamp, since a card may quote
+  that prompt's own words.
+- Keep the mod's socket where only its own user can create anything: `resolveModSocketPath`
+  (`hooks/mod-protocol.ts`) puts `claude-envoy/ce-<hash of the session id>.sock` under
+  `XDG_RUNTIME_DIR`, else Claude Code's own configuration directory (`CLAUDE_CONFIG_DIR`, else
+  `$HOME/.claude`), the way ssh's `ControlPath` and gpg-agent place theirs. `TMPDIR` and `/tmp`
+  are no bases: no co-user can get into a home or a run directory to bind the path first, which
+  is why the mod needs no owner check — and could make none, since `$.fs.stat` answers
+  `{kind, size, mtimeMs, isLink, realPath?}` and carries neither owner nor mode. `startModLink`
+  still refuses a directory that is not this user's own `0700` one rather than binding in it. A
+  session with no base of its own gets no link, the reason on stderr. The whole path has 100
+  bytes (Claude Code's bound on `HttpInit.socketPath`), which is why the name is the id's hash:
+  a macOS `/Users/<name>/.claude` makes 62 bytes and a Legion pane's `CLAUDE_CONFIG_DIR` 78,
+  while the id spelled out passed 100 on a macOS temp directory. A path past the bound is
+  refused with that reason, never served out of a shared base.
+- One link serves one mod: the first instance to name itself in `MOD_INSTANCE_HEADER` holds it
+  and every other post is refused with `MOD_STATUS_TAKEN`, which stops that mod. Two Claude Code
+  processes can boot on one session id (`claude -c`, `claude --resume <id>` in a second
+  terminal), and the one that got there first owns the session's live view and its Send.
 - Preserve the held role at `${CLAUDE_PLUGIN_DATA}/roles/<session-id>.json` (keyed by session id so
   `claude --resume <id>` finds it); soft-reclaim it with its `previous_session_id` after
   registration, then reassert it on each registration heartbeat. The listener grants such a claim
@@ -304,12 +400,13 @@ above says how to run it).
   dropped — never shown to the model.
 - `envoy_inbox` is bounded to 50 metadata-only entries. Keep full payloads in neither the tool
   output nor plugin data.
-- Deployment is `--channels plugin:claude-envoy@legion-plugins` under managed settings
-  (`channelsEnabled`, `allowedChannelPlugins`); `--dangerously-load-development-channels` is for
-  entries outside the allowlist and cannot be combined with any `--channels` entry naming the same
-  plugin: Claude Code matches the `--channels` entry first, which then needs the allowlist and its
-  own marketplace. `claude -p` has no interactive plan approval, multiple-choice,
-  or consent surfaces; workers need pre-approved configuration.
+- Deployment needs nothing enabled on the machine: Claude Code 2.1.310 or newer loads the mod
+  from the plugin's `hooks.json`.
+  A session takes no message and shows no conversation when its Claude Code is older, when it
+  starts with `--bare` or `--safe-mode`, or when settings turn mods off (`disableAllHooks`, or
+  `allowManagedModsOnly` or `allowManagedHooksOnly` in managed settings).
+  `claude -p` has no interactive plan approval, multiple-choice, or consent surfaces; workers
+  need pre-approved configuration.
 - Nothing commits `dist/` or `legion/`, and `.gitignore` names both. `release.yaml`'s
   `claude_envoy_build` builds them after each merge that bumps this plugin's version, packs them
   into the tarball with the rest of the package, and the `publish` job uploads that tarball to

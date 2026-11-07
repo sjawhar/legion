@@ -83,10 +83,10 @@ test("follows the session id its Claude process hands off: new subject first, th
       `a second registration of ses_new and ${expectedRole.trim()} in ${newRoleFile}`,
     )
 
-    const reregister = "subscribe ses_new [aside]"
+    const reregister = "subscribe ses_new [aside,steer]"
     // A tick that fired before the handoff file landed only re-registered the old id.
     const handoffCalls = calls.filter(
-      (call) => call !== "subscribe ses_old [aside]" && call !== "getInterest",
+      (call) => call !== "subscribe ses_old [aside,steer]" && call !== "getInterest",
     )
     expect(handoffCalls.slice(0, 8)).toEqual([
       "nats.subscribe notifications.agent.ses_new",
@@ -390,7 +390,7 @@ test("a delivery still in flight on the old subject does not hold back registrat
     await waitFor(async () => notified, "the delivery on the old subject to reach the notifier")
     await writeSessionHandoff(handoff, "ses_new")
     await waitFor(
-      async () => calls.includes("subscribe ses_new [aside]"),
+      async () => calls.includes("subscribe ses_new [aside,steer]"),
       "a registration under ses_new while the old subject's delivery is still in flight",
     )
   } finally {
@@ -458,7 +458,7 @@ test("adopts a handed-off session id when the hook writes it, without waiting fo
   try {
     // The startup registration and the startup tick are done; only the file poll remains.
     await waitFor(
-      async () => calls.filter((call) => call === "subscribe ses_old [aside]").length >= 2,
+      async () => calls.filter((call) => call === "subscribe ses_old [aside,steer]").length >= 2,
       "the startup registration and the startup tick",
     )
     await writeSessionHandoff(handoff, "ses_new")

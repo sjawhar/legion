@@ -539,8 +539,185 @@ test("a streamed user message tagged with a person's message but saying somethin
   ).toEqual(["Merge only after review.", "Merge now, skip review."]);
 });
 
+// The placeholder lines a streamed row may carry beyond the person's words are the stream's own
+// naming of what the message carried, one for each picture the body embedded. A body that
+// embedded none accounts for none, so a row tagged with it and carrying extra bracketed words -
+// `[yes]`, `[approved]`, any number of them, before the person's words as readily as after -
+// is a row saying something the person did not write, and it must not take the stored copy with
+// it: a reader would otherwise meet those words as the person's, with the person's own copy
+// hidden. Measured at this head: turnSaysBody answers true for body "Should I deploy?" against
+// the rows "Should I deploy?\n[yes]", "Should I deploy?\n[approved]\n[signed-off]" and
+// "[yes]\nShould I deploy?" (INFRA-1026).
+test("a streamed turn that adds a bracketed word of its own hides nothing", async () => {
+  const at = Date.parse("2026-09-27T21:16:16Z");
+  renderLiveView({
+    agentState: {},
+    messages: [{ message: message("m1", "Should I deploy?"), replies: [] }],
+    putAgentState: answerAgentStates().mockResolvedValue({ unread_replies: 0 }),
+    replay: [userFrame(1, at, "Should I deploy?\n[yes]", "m1")],
+  });
+
+  const thread = await screen.findByTestId("agent-thread");
+  await within(thread).findAllByText(/Should I deploy\?/);
+  expect(
+    within(thread)
+      .getAllByTestId("agent-message-user")
+      .map((node) => node.textContent)
+  ).toEqual(["Should I deploy?", "Should I deploy?[yes]"]);
+});
+
+// The same hole as the bracketed word, in the one syntax that draws rather than reads: a row
+// tagged with a person's message and carrying a picture the body never embedded would hide the
+// stored copy and show that picture, with a caption of its own, under the person's name. Any
+// client of the bus can publish the row, so a picture in it counts only where the body wrote
+// that very markdown (`rowLines`, `features/agent-view/conversation.ts`); otherwise the row
+// says something the person did not, and the stored copy keeps showing beside it (INFRA-1026).
+test("a streamed turn that adds a picture of its own hides nothing", async () => {
+  const at = Date.parse("2026-09-27T21:16:16Z");
+  const forged = "dispatch://agent/f376a3a9-6e75-461b-806b-22dea4e83ddf/artifact/i3-red96-png@v1";
+  renderLiveView({
+    agentState: {},
+    messages: [{ message: message("m1", "Should I deploy?"), replies: [] }],
+    putAgentState: answerAgentStates().mockResolvedValue({ unread_replies: 0 }),
+    replay: [userFrame(1, at, `Should I deploy?\n![ship it](${forged})`, "m1")],
+  });
+
+  const thread = await screen.findByTestId("agent-thread");
+  await waitFor(() => expect(within(thread).getAllByTestId("agent-message-user")).toHaveLength(2));
+  // The streamed row draws the picture as a picture, so the address it forged is in the
+  // placeholder the renderer portals a `DispatchPicture` into (`pictureSerializer`,
+  // `features/refs/markdown-serializer.ts`), not in the row's words: a picture whose bytes the
+  // page cannot draw reads as the caption its author wrote (`RefLink`'s `text`, sjawhar/legion
+  // #2725), so the row's text here is the forged `ship it` alone.
+  const picture = await waitFor(() => {
+    const [, streamed] = within(thread).getAllByTestId("agent-message-user");
+    const placeholder = streamed?.querySelector("[data-dispatch-picture]");
+    if (placeholder === null || placeholder === undefined) {
+      throw new Error("the streamed row drew no picture of its own");
+    }
+    return placeholder;
+  });
+  const rows = within(thread).getAllByTestId("agent-message-user");
+  // Dispatch's stored copy, the person's words and nothing else, and beside it the streamed row
+  // that drew the forged picture as the row's own: the stored copy is what a reader can trust.
+  expect(rows[0]?.textContent).toBe("Should I deploy?");
+  expect(rows[0]?.querySelector("[data-dispatch-picture]")).toBeNull();
+  expect(picture.getAttribute("data-dispatch-picture")).toBe(forged);
+  expect(picture.getAttribute("data-picture-caption")).toBe("ship it");
+});
+
+// A person writes a bracketed word of their own - `[ack]`, `[done]`, `[LGTM]` - and the session
+// streams it back as the one text part it is. The placeholder rule reads that part as the stream
+// naming a block it did not render, drops it, and leaves the turn saying nothing, so Dispatch's
+// stored copy no longer matches and the person's message shows twice. Driven live on a Claude
+// Code 2.1.310 session: a Send of `[ack]` drew two `agent-message-user` rows (INFRA-1026).
+test("a person's message that is a bracketed word of their own shows once", async () => {
+  const at = Date.parse("2026-09-27T21:16:16Z");
+  renderLiveView({
+    agentState: {},
+    messages: [{ message: message("m1", "[ack]"), replies: [] }],
+    putAgentState: answerAgentStates().mockResolvedValue({ unread_replies: 0 }),
+    replay: [userFrame(1, at, "[ack]", "m1")],
+  });
+
+  const thread = await screen.findByTestId("agent-thread");
+  await within(thread).findAllByText("[ack]");
+  expect(
+    within(thread)
+      .getAllByTestId("agent-message-user")
+      .map((node) => node.textContent)
+  ).toEqual(["[ack]"]);
+});
+
+// The two cases at once: a person sends the bracketed word `[ack]` with a picture attached, so
+// the body is `[ack]` and the picture's markdown the composer appends to it (`withPictureLines`,
+// `packages/envoy-client/src/dispatch-pictures.ts`), and the session streams the person's `[ack]`
+// and the stream's own `[image]` beside it. Driven live on a Claude Code 2.1.310 session, where
+// it drew two `agent-message-user` rows like the plain `[ack]` did; the body's own lines say
+// which of the two `[...]` lines the person wrote, and the picture it embeds is what accounts
+// for the other (INFRA-1026).
+test("a person's message that is a bracketed word with a picture shows once", async () => {
+  const at = Date.parse("2026-09-27T21:16:16Z");
+  const picture = "dispatch://agent/f376a3a9-6e75-461b-806b-22dea4e83ddf/artifact/i3-blue96-png@v1";
+  renderLiveView({
+    agentState: {},
+    messages: [{ message: message("m1", `[ack]\n\n![blue](${picture})`), replies: [] }],
+    putAgentState: answerAgentStates().mockResolvedValue({ unread_replies: 0 }),
+    replay: [pictureTurn(1, at, "m1", "[ack]")],
+  });
+
+  const thread = await screen.findByTestId("agent-thread");
+  await within(thread).findByText("[image]");
+  expect(
+    within(thread)
+      .getAllByTestId("agent-message-user")
+      .map((node) => node.textContent)
+  ).toEqual(["[ack][image]"]);
+});
+
+/** A person's message that embeds a picture, as the session streams it back: the text the row
+ *  carries, and the `[image]` part the stream names the picture in. */
+function pictureTurn(seq: number, at: number, dispatchMessageId: string, text: string) {
+  return {
+    kind: "message",
+    message: {
+      at,
+      dispatchMessageId,
+      id: `u${at}`,
+      parts: [
+        { text, type: "text" },
+        { text: "[image]", type: "text" },
+      ],
+      role: "user",
+      streaming: false,
+    },
+    seq,
+    v: 1,
+  } as const satisfies AgentStreamFrame;
+}
+
+// A person's message whose body embeds the picture, which is what the composer writes: the
+// markdown is in the stored body and the picture reaches the session as a block of its own, which
+// the stream names `[image]`. Measured live on a Legion pane (Claude Code 2.1.310): a Send of
+// `What colour is this picture? ![blue](dispatch://agent/<id>/artifact/i3-blue96-png@v1)` drew the
+// stored copy beside the streamed row, the body's markdown having nothing in the row to match.
+// A row that carries the markdown as the person wrote it says the same body, which is how a
+// terminal session's row records it (INFRA-1026).
+test("a person's message embedding a picture shows once, with or without the markdown in the row", async () => {
+  const at = Date.parse("2026-09-27T21:16:16Z");
+  const picture = "dispatch://agent/f376a3a9-6e75-461b-806b-22dea4e83ddf/artifact/i3-blue96-png@v1";
+  renderLiveView({
+    agentState: {},
+    messages: [
+      {
+        message: message("m1", `What colour is this picture? ![blue](${picture})`),
+        replies: [],
+      },
+      {
+        message: message("m2", `And this one? ![blue](${picture})`, {
+          created_at: "2026-09-27T21:17:15Z",
+        }),
+        replies: [],
+      },
+    ],
+    putAgentState: answerAgentStates().mockResolvedValue({ unread_replies: 0 }),
+    replay: [
+      // The row the pane streamed: the picture's markdown is gone from the text, the `[image]`
+      // part standing where it was.
+      pictureTurn(1, at, "m1", "What colour is this picture? "),
+      // The row a terminal session streams, which carries the body exactly as the person wrote it.
+      pictureTurn(2, at + 60_000, "m2", `And this one? ![blue](${picture})`),
+    ],
+  });
+
+  const thread = await screen.findByTestId("agent-thread");
+  await waitFor(() => expect(within(thread).getAllByText("[image]")).toHaveLength(2));
+  // Two messages, two rows: each is the streamed one, which is the row carrying `[image]`.
+  expect(within(thread).getAllByTestId("agent-message-user")).toHaveLength(2);
+});
+
 // Send is the terminal's Enter: the default wherever the session takes a steer. A session that
-// takes only asides (a Claude Code session) would refuse one, so Aside is its default.
+// advertises Aside and no Send would refuse one, so Aside is its default.
 test("the live view sends as Send by default where the session takes it, and as Aside where it does not", async () => {
   const createAgentMessage = spyOn(api, "createAgentMessage").mockImplementation(
     async (_session, input) => message("sent", input.body)
@@ -856,8 +1033,8 @@ test("Stop trying ends a late live view send, and its Retry goes under the same 
   expect(screen.queryByTestId("agent-send-held")).toBeNull();
 });
 
-// A Claude Code session whose Envoy channel Claude Code did not load advertises no mode: the
-// live view says a message sent here records a failed attempt, before the person sends one.
+// A session whose plugin cannot reach its conversation advertises no mode: the live view says a
+// message sent here records a failed attempt, before the person sends one.
 test("the live view says a session advertising no delivery mode takes no messages", async () => {
   renderLiveView({
     agentState: {},
@@ -968,8 +1145,8 @@ test("the live view shows the session's model next to its title and on the turn 
   expect(turnModel.textContent).toBe("anthropic/claude-opus-5");
 });
 
-// A session whose client never reports a model (Claude Code or a build too old) shows nothing,
-// in the header or on the turn, rather than a guess.
+// A session whose client never reports a model (a build too old) shows nothing, in the header or
+// on the turn, rather than a guess.
 test("the live view shows nothing for a session whose client reports no model", async () => {
   renderLiveView({
     agentState: {},

@@ -11,7 +11,8 @@ import { type StallProxy, startStallProxy } from "@legion/envoy-client/test/stal
 import { RECOVERY_BOUND_MS, runFreezeScenario } from "@legion/envoy-client/test/stall-scenario"
 import { removeTemporaryDirectories } from "@legion/envoy-client/test/temp-dir"
 import type { Subprocess } from "bun"
-import { z } from "zod"
+import { type ModCallArguments, modSocketPath } from "../hooks/mod-protocol"
+import { startFakeMod } from "./fake-mod"
 
 // The stack's own scratch directory, which it makes through envoy-client's helper: `stop` removes
 // it, and this removes it when the rig never reached `stop` (a SIGKILL'd child, a failed start).
@@ -19,10 +20,12 @@ afterAll(removeTemporaryDirectories)
 
 const channelEntry = resolve(import.meta.dir, "..", "bin", "envoy-channel.ts")
 
-const ChannelNotificationSchema = z.object({
-  method: z.literal("notifications/claude/channel"),
-  params: z.object({ content: z.string() }),
-})
+/** What one `session.message` the server made carries: the message's own words, which the mod
+ *  writes into the session as the prompt of a new turn or as a row of the turn running
+ *  (INFRA-1026). */
+function shownText(args: ModCallArguments["session.message"]): string {
+  return args.message.text
+}
 
 /** A channel server process, initialized, whose only NATS path goes through `proxy`. */
 interface ChannelServer {
@@ -68,6 +71,8 @@ async function startChannelServer(
       CLAUDE_CONFIG_DIR: configDirectory,
       CLAUDE_CODE_SESSION_ID: sessionID,
       CLAUDE_PLUGIN_DATA: home,
+      // The base the server and the mod below both resolve the link's socket from.
+      XDG_RUNTIME_DIR: home,
       // No heartbeat registration runs in the test's window: the reconnect's registration, on a
       // new epoch, is the only one that restarts the relay.
       ENVOY_HEARTBEAT_MS: "240000",
@@ -76,20 +81,22 @@ async function startChannelServer(
     stdout: "pipe",
     stderr: "pipe",
   })
+  const socketPath = modSocketPath(sessionID, { XDG_RUNTIME_DIR: home })
+  if (socketPath === undefined) throw new Error("the session names no mod socket")
+  // Every delivery reaches the model as the mod's own write - the row of a turn running, or the
+  // prompt of a new turn while the session is idle, which this one is throughout (`show` in
+  // `../src/mod-session`) - so the mod is this test's view of what the session was shown.
   const channel: string[] = []
-  void (async () => {
-    let buffered = ""
-    for await (const chunk of server.stdout.pipeThrough(new TextDecoderStream())) {
-      buffered += chunk
-      for (let newline = buffered.indexOf("\n"); newline !== -1; newline = buffered.indexOf("\n")) {
-        const notification = ChannelNotificationSchema.safeParse(
-          JSON.parse(buffered.slice(0, newline)),
-        )
-        buffered = buffered.slice(newline + 1)
-        if (notification.success) channel.push(notification.data.params.content)
-      }
-    }
-  })()
+  const mod = await startFakeMod(socketPath, {
+    sessionId: sessionID,
+    answers: {
+      "session.message": (args) => {
+        channel.push(shownText(args))
+        // The row the prompt an idle session took became, which is what answers the frame.
+        return { uuid: `row-${channel.length}`, as: "prompt" }
+      },
+    },
+  })
   let stderr = ""
   void (async () => {
     for await (const chunk of server.stderr.pipeThrough(new TextDecoderStream())) stderr += chunk
@@ -127,6 +134,7 @@ async function startChannelServer(
       }
     },
     async stop() {
+      await mod.stop()
       server.kill("SIGTERM")
       const killer = setTimeout(() => server.kill("SIGKILL"), 10_000)
       await server.exited

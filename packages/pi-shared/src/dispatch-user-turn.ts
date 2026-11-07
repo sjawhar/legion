@@ -1,42 +1,21 @@
-import type { DispatchDelivery, RenderInboundResult } from "@legion/envoy-client/delivery";
 import type { UserInputResult } from "@legion/pi-shared/pi-types";
-import { z } from "zod";
 
 /**
  * A person's direct message from Dispatch's Agents page, delivered as the session's own user turn
  * (LEGION-394): the message a person types at the terminal, not an Envoy card. The frame that says
  * a person wrote it is not proof of that: the listener takes an envelope's source from whoever
- * sends it, and every session holds that token. So a frame is only a candidate
- * (`isUserTurnCandidate`), and the session takes the turn only once Dispatch records that this
- * session accepted that very attempt (`POST /api/v1/messages/{id}/deliveries/{attempt}/accept`):
- * only that accept's success makes a turn, and it answers the body Dispatch stored, which is what
- * the session injects (`turnFromAccept`). The session's own checks can only keep a card: it rules
- * out frames no person's direct message could be, and never accepts an attempt it already
- * delivered, as a card or as a turn (`handledAttempts`). Anything else keeps today's card, which
- * is the delivery.
+ * sends it, and every session holds that token. So the session takes the turn only once Dispatch
+ * records that this session accepted that very attempt
+ * (`POST /api/v1/messages/{id}/deliveries/{attempt}/accept`): only that accept's success makes a
+ * turn, and it answers the body Dispatch stored, which is what the session injects. Those steps
+ * and their order are `acceptUserTurn`'s (`./accept-user-turn`), written once for every host.
+ *
+ * What this file holds is what a host keeps of its own and hands to that step or says after it:
+ * the attempts it already delivered, as a card or as a turn (`HANDLED_ATTEMPT_ENTRY`,
+ * `handledAttemptKey`, `handledAttempts`), and what it answers a person on Dispatch for their
+ * typed text (`typedInputReply`). A frame the accept does not make a turn keeps today's card,
+ * which is the delivery.
  */
-
-/**
- * Whether a frame could be a person's direct Send or Aside, worth asking Dispatch to accept: a
- * Dispatch `message.created` delivery (renderInbound builds a message delivery for no other event)
- * on no issue, whose actor is a person, in aside or steer, and that names no broadcast. An issue
- * message and a comment mention keep their envelope, since their flow replies on the issue; a BTW
- * is a side turn; a broadcast keeps its envelope and its reply counts, and a frame that falsely
- * claims one only yields the card. It rules frames out and never in: Dispatch decides the rest.
- */
-export function isUserTurnCandidate(
-  rendered: RenderInboundResult
-): rendered is RenderInboundResult & { readonly delivery: DispatchDelivery } {
-  const { delivery } = rendered;
-  return (
-    rendered.envelope?.source === "dispatch" &&
-    delivery?.resource === "message" &&
-    delivery.issueKey === null &&
-    delivery.broadcastId === undefined &&
-    rendered.dispatchActor?.kind === "user" &&
-    (delivery.mode === "aside" || delivery.mode === "steer")
-  );
-}
 
 /** What an accepted attempt becomes: the body Dispatch stored, sent as Send (steer) or Aside,
  *  and the message it delivers, which tags its turn on the live stream. */
@@ -44,24 +23,6 @@ export interface AcceptedUserTurn {
   readonly messageId: string;
   readonly body: string;
   readonly mode: "aside" | "steer";
-}
-
-/** The fields of the accept's answer the session injects and tags, and nothing else. */
-const AcceptedDeliverySchema = z.object({
-  message_id: z.string(),
-  body: z.string(),
-  delivery: z.enum(["aside", "steer"]),
-});
-
-/**
- * The turn Dispatch's 200 from the accept route says to inject: the message's stored body in the
- * stored attempt's mode, never the frame's text or mode. The answer is JSON off the network, so
- * one without that shape injects nothing.
- */
-export function turnFromAccept(accepted: unknown): AcceptedUserTurn | undefined {
-  const parsed = AcceptedDeliverySchema.safeParse(accepted);
-  if (!parsed.success) return undefined;
-  return { body: parsed.data.body, messageId: parsed.data.message_id, mode: parsed.data.delivery };
 }
 
 /**
@@ -117,7 +78,7 @@ export function typedInputReply(text: string, outcome: TypedInputOutcome): strin
   if ("hostVersion" in outcome) {
     return typed === undefined
       ? undefined
-      : `${typed} was not run: this session's Oh My Pi ${outcome.hostVersion} cannot run commands sent from Dispatch; nothing was sent.`;
+      : `${typed} was not run: this session's agent, version ${outcome.hostVersion}, cannot run commands sent from Dispatch; nothing was sent.`;
   }
   if (outcome.handled === "terminal-only") {
     return `${command} runs only in the session's own terminal; nothing was sent.`;

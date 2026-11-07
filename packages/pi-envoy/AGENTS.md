@@ -148,7 +148,7 @@ side turn still running when the handler that subscribed the agent subject (`ses
 session switch, or a Legion handler re-establishing through the claim bridge) reaches the host's
 30 s handler budget is aborted, and Dispatch gets the abort as the reply's error.
 A card whose text embeds Dispatch pictures (`RenderInboundResult.pictures`) carries them as image
-blocks after the text (`src/delivery-pictures.ts`, the same bounds as `dispatch read`), and so does
+blocks after the text (`@legion/pi-shared/delivery-pictures`, the same bounds as `dispatch read`), and so does
 a person's turn (below): `sendUserMessage` takes the blocks with the text, and `sendUserInput`, which
 takes text alone, gets them from the extension's own `input` handler when the host asks for that
 input's images (`source: "extension"`), as a picture pasted at the terminal reaches it. A typed
@@ -169,17 +169,20 @@ them, and the turn's admission goes once `sendUserInput` answers that the input 
 every handler having run.
 
 A person's direct Send or Aside from Dispatch's Agents page (Send is the dashboard's name for a
-steer) becomes the user's own turn (`src/dispatch-user-turn.ts`). A frame is only a candidate
-(`isUserTurnCandidate`: Dispatch's `message.created` on no issue, a person as actor, aside or
-steer, naming no broadcast), since the listener takes a frame's source from whoever sends it; any
-other frame keeps its card with no call to Dispatch. For a candidate the extension asks Dispatch,
-with its own Dispatch bearer, to accept that attempt
+steer) becomes the user's own turn through the accept step both Envoy hosts take,
+`acceptUserTurn` (`@legion/pi-shared/accept-user-turn`). A frame is only a candidate
+(Dispatch's `message.created` on no issue, a person as actor, aside or steer, naming no
+broadcast), since the listener takes a frame's source from whoever sends it; any other frame
+keeps its card with no call to Dispatch. For a candidate the step asks Dispatch, with this
+extension's own Dispatch bearer, to accept that attempt
 (`POST /api/v1/messages/{id}/deliveries/{attempt}/accept`; its conditions are that route's row in
 `packages/envoy/cmd/dispatch/AGENTS.md`, in short a person's own fresh Send or Aside to this
-session), and only on that 200 runs the stored body the accept answers with (`turnFromAccept`),
-never the frame's text, in the accepted attempt's mode. Only the accept's success makes a turn;
-the extension's own checks can only keep a card. Besides the candidate filter, it never accepts an
-attempt it already delivered, as a card or as a turn: before either goes out it writes a
+session), and only on that 200 runs the stored body the accept answers with, never the frame's
+text, in the accepted attempt's mode. Which frames are candidates and how that body is read are
+the step's own rules, exported to nobody: only an accept the step made reaches them. Only the
+accept's success makes a turn; the extension's own checks can only keep a card. Besides the
+candidate filter, it never accepts an attempt it already delivered, as a card or as a turn:
+before either goes out it writes a
 transcript entry (`envoy-dispatch-handled-attempt`, `{message_id, attempt}`), rebuilt from every
 entry of the session file (`sessionManager.getEntries()`) on each restore, and a frame naming a
 recorded attempt is a card with no accept call. So a replay, a frame forged inside the minute for
@@ -307,7 +310,9 @@ Send is a card and never a turn, and under Dispatch's key it is not shown at all
 not written yet spends each later retry of the message the same way. A forged frame's own text is
 never a turn, so this is the class of the accept route's self-claimed actor, which already lets
 any bearer spend a session's acceptance. Why the record is kept even when the accept answers 404
-is `acceptedUserTurn`'s comment (`extensions/envoy.ts`).
+is stated where the accept step is written, `acceptUserTurn` in
+`@legion/pi-shared/accept-user-turn`, which this extension and the Claude Code plugin both call
+(`acceptedUserTurn`, `extensions/envoy.ts`, supplies this host's record, Dispatch and logging).
 
 Role claims are routed by the listener: this extension receives a receipt-backed request on its
 direct agent subject instead of subscribing to a role subject itself. The agent pump replies the

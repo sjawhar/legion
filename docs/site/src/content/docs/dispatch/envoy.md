@@ -230,13 +230,14 @@ registration naming a port above 0 is refused `400` naming the `port` field, and
   session therefore still takes live, on its own NATS connection; and anything published on a
   topic before the session followed it.
 - **When a message counts as delivered:** an Oh My Pi session answers once the message is in its
-  session file. A Claude Code session under Legion's bridge answers once Claude Code took the
-  message as a user message. A Claude Code session in channel mode answers once Claude Code
-  accepted the channel notification, the last signal Claude Code gives there, so a notification it
-  drops after that (a channel it did not load) is not sent again.
+  session file.
+  A Claude Code session answers once its plugin has put the message into the session's
+  conversation: the row the plugin's mod added to the turn running, the prompt it submitted while
+  the session was idle, or, under Legion's bridge, once Claude Code took the message as a user
+  message.
 - **Nothing runs late:** a BTW delivered before, or published before the session's connection
   began, starts no side turn: an Oh My Pi session shows it as one inert notice, and a Claude Code
-  session passes it over.
+  session passes it over, since the question was asked while the session was not taking messages.
 
 Both plugins ping NATS every 10 seconds and drop a connection that leaves two pings unanswered, so
 a connection that stops answering without closing, as when the network path under it freezes, is
@@ -275,8 +276,7 @@ session reads its own consumer (`dispatch://INFRA-771`), and nothing should be b
   shown as a message only, since a person's input run late could act on an old instruction. The
   session does not take it as the person's turn and does not answer a BTW. A BTW that comes back
   starts no turn at all: an Oh My Pi session shows it as one inert notice once it is idle (a turn
-  running when it comes back ends first), and a Claude Code session, which is never sent a BTW,
-  passes it over.
+  running when it comes back ends first), and a Claude Code session passes it over.
 - **Once:** the session records what it was shown, in its transcript (Oh My Pi) or in a state
   file per session (Claude Code), so a restart or resume does not show a message again (up to
   20,000 messages shown in 72 hours). An Oh My Pi session counts a message shown only once its
@@ -285,6 +285,12 @@ session reads its own consumer (`dispatch://INFRA-771`), and nothing should be b
   between showing a message and recording it can show that message twice; it is never lost. A
   message the session fails to show three times is replaced by one notice naming it and saying
   how to read it.
+- **A person's message once:** a Claude Code session records each attempt it has handled in
+  `${CLAUDE_PLUGIN_DATA}/turns/<session id>.json`, written before it asks Dispatch to accept the
+  attempt and kept across a restart, so a frame that names a recorded attempt arrives as a card
+  and no restart spends an attempt twice.
+  The same file maps each delivered row of the conversation to the Dispatch message it is, which
+  is what shows a person's own message once in the live view.
 
 The listener reads the stream with one NATS permission,
 `$JS.API.STREAM.MSG.GET.ENVOY_NOTIFICATIONS`, which reads one stored message at a time and can

@@ -119,20 +119,34 @@ function dispatchReplyPath(resource: DispatchDelivery["resource"], id: string): 
  * instead of waiting on a reply that never comes). A write through `DispatchClient`, so it
  * carries a key of its own, is asked again under it while Dispatch gives no definitive answer,
  * and throws Dispatch's refusal as a `DispatchServiceError`.
+ *
+ * `followUp` is the ask that a second answer to an attempt already settled by the first is
+ * posted rather than handed back (`?follow_up=true`). It travels as the route's query parameter,
+ * never in the body, which the route decodes strictly.
  */
 export async function postDeliveryReply(
   config: Pick<ActiveDispatchConfig, "url" | "credential">,
   sessionId: string,
   delivery: DispatchDelivery,
-  result: { readonly body?: string; readonly error?: string }
+  result: {
+    readonly body?: string;
+    readonly error?: string;
+    readonly followUp?: boolean;
+  }
 ): Promise<void> {
+  const { followUp, ...reply } = result;
   const client = new DispatchClient(config.url, config.credential);
-  await client.deliveryReply(delivery.resource, delivery.id, {
-    actor: { kind: "session", id: sessionId },
-    attempt: delivery.attempt,
-    ...delivery.replyFields,
-    ...result,
-  });
+  await client.deliveryReply(
+    delivery.resource,
+    delivery.id,
+    {
+      actor: { kind: "session", id: sessionId },
+      attempt: delivery.attempt,
+      ...delivery.replyFields,
+      ...reply,
+    },
+    followUp === undefined ? {} : { followUp }
+  );
 }
 
 /**

@@ -21,8 +21,9 @@ export interface AgentStreamState {
    *  (`use-live-follow.ts`), so this has to count every rebuild, not only a reconnect. */
   readonly replays: number;
   /** Whether the session answers the relay on its control subject; `undefined` until it says.
-   *  `false` is a session that cannot stream - an older plugin, or one no longer running - and
-   *  it can turn true on a later replay without this viewer reconnecting. */
+   *  `false` is a session that is not answering the live view - an older plugin, one started
+   *  without its plugin, or one no longer running - and it can turn true on a later replay
+   *  without this viewer reconnecting. */
   readonly responding: boolean | undefined;
 }
 

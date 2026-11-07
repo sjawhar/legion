@@ -173,6 +173,10 @@
     {
       "script": "verifiers-staging-token.sh",
       "needs": "a projected service-account token the staging EKS cluster minted, and its own Postgres and NATS containers"
+    },
+    {
+      "script": "with-managed-settings.sh",
+      "needs": "a host whose kernel grants an unprivileged user and mount namespace (unshare -rm), and a command to run in it; it is a harness another proof runs, not a proof of its own, and it judges nothing"
     }
   ]
 }

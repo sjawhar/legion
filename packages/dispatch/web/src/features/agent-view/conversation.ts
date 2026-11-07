@@ -8,7 +8,10 @@ import {
   type AgentStreamSettings,
   type AgentStreamSettingsReported,
   type AgentStreamToolResult,
+  comparableLines,
   isTypableCommandName,
+  pictureSyntax,
+  trimmedLines,
 } from "@legion/contracts";
 import { dispatchMetadata, type KeyedMessage } from "./dispatch-marks";
 
@@ -286,8 +289,8 @@ export function toThreadMessages(state: AgentConversation): KeyedMessage[] {
 
 /**
  * The model the session is currently running, for the live view's header: the most recent
- * assistant turn's own report, whatever it is. A session whose client never reports one (Claude
- * Code) shows nothing here rather than a guess. `state.messages` is kept sorted ascending by `at`
+ * assistant turn's own report, whatever it is. A session whose client never reports one shows
+ * nothing here rather than a guess. `state.messages` is kept sorted ascending by `at`
  * (`applyFrame`), so walking from the end finds the newest assistant entry first;
  * `Array.prototype.findLast` would read the same way but needs ES2023, past this package's ES2022
  * `lib`.
@@ -334,9 +337,10 @@ export type SessionSettingsView =
  * A picker is offered only where the session lists the built-in a pick runs (`model`, `effort`)
  * and runs it from Dispatch, since a pick is a person's Send of `/model <id>` or `/effort <level>`.
  *
- * A session that is not answering the live view (a Claude Code session, an older plugin, or one
- * no longer running) gets no notice, since the empty transcript's own text already says why; nor
- * does one whose replay has not arrived yet, since the replay is where the frame would be.
+ * A session that is not answering the live view (an older plugin, one started without its plugin,
+ * or one no longer running) gets no notice, since the empty transcript's own text already says
+ * why; nor does one whose replay has not arrived yet, since the replay is where the frame would
+ * be.
  */
 export function sessionSettingsView(
   state: AgentConversation,
@@ -382,23 +386,132 @@ export function sessionSettingsView(
   };
 }
 
+/**
+ * The part the stream writes for a picture a person's message carried. `conversationParts`
+ * (`@legion/pi-shared/agent-stream`) writes `[${part.type}]` for a block it renders no other
+ * way, and what a person's message reaches the session as is text blocks and image blocks
+ * alone (`ContentBlock` in `@legion/pi-shared/pi-types`), so `[image]` is the only one of
+ * these the publisher writes for such a message.
+ *
+ * A person writes a bracketed word too - `[ack]`, `[done]`, `[LGTM]` - and the bus is open to
+ * any client, so no other bracketed word reads as the stream naming a block: a row that put
+ * `[approved-by-me]` after the text of a body that embeds a picture would otherwise hide the
+ * person's stored copy and show that word under their name. Even this literal reads as the
+ * stream's only where it follows every line of the person's own body and a picture that body
+ * embeds is left to account for it (`turnSaysBody`), which is where the publisher writes one,
+ * one part per block and after the person's text.
+ */
+const PICTURE_PLACEHOLDER = "[image]";
+
 /** One streamed user message a person's Dispatch message became: the Dispatch message it says it
- *  delivered, and what it says, its text parts joined as the session sent them. */
+ *  delivered, and what the session sent, its text parts joined in the order they arrived. */
 export interface DispatchTurn {
   readonly dispatchMessageId: string;
   readonly text: string;
 }
 
 /**
+ * The pictures a body embeds, each by the markdown that wrote it and how many times it wrote
+ * it: what a streamed row may carry of a person's own pictures and no more (`rowLines`).
+ */
+function bodyPictures(body: string): Map<string, number> {
+  const written = new Map<string, number>();
+  for (const [markdown] of body.matchAll(pictureSyntax())) {
+    written.set(markdown, (written.get(markdown) ?? 0) + 1);
+  }
+  return written;
+}
+
+/**
+ * A streamed row's lines as they are compared with the body's, the pictures it carries spent
+ * against `spare` (the body's own, by `bodyPictures`); undefined for a row carrying a picture
+ * the body does not hold, or holding one more time than the body wrote it.
+ *
+ * This is the page's own claim-checking, not the shared rule (INFRA-1026). The bus is open to
+ * any client, and the row is rendered as markdown under the person's name, so a row stripped of
+ * picture markdown the way the body is would let a frame add `![any caption](dispatch://…@v1)`
+ * to the words the person wrote, still "say" the body, hide the stored copy, and show a picture
+ * and a caption the person never sent. Each picture the row carries must therefore be one the
+ * body wrote, verbatim and address and caption alike, and may be spent only as many times as
+ * the body wrote it. A row that carries the markdown as the person wrote it - which is how a
+ * terminal session's row records it - spends exactly the body's own and says its body still.
+ *
+ * The body's pictures are spent once, and what is left is compared as text by the line step
+ * `comparableLines` shares (`trimmedLines` in `@legion/contracts`), its strip of the pictures
+ * left out. Taking a picture out joins the text on either side of it, and the join may write
+ * picture markdown that neither the body nor the row held before it. A second strip would take
+ * that one out too, which is how
+ * `look at this ![I approve deleting prod](dispatch://agent/a1/artifact/x<the body's own
+ * picture>@v1)` said a body of `look at this <that picture>` and drew its caption under the
+ * person's name (INFRA-1026). Nothing honest is lost by comparing the leftover whole: for a row
+ * that is the body verbatim, both sides have had each of the body's pictures taken out exactly
+ * once, so both end with the same text.
+ */
+function rowLines(text: string, spare: Map<string, number>): string[] | undefined {
+  let ownPictures = true;
+  const written = text.replace(pictureSyntax(), (markdown) => {
+    const left = spare.get(markdown) ?? 0;
+    if (left === 0) {
+      ownPictures = false;
+      return markdown;
+    }
+    spare.set(markdown, left - 1);
+    return "";
+  });
+  if (!ownPictures) return undefined;
+  return trimmedLines(written);
+}
+
+/**
+ * Whether a streamed turn says exactly what the person wrote, so Dispatch's stored copy of that
+ * message gives way to the streamed row (INFRA-1026). The turn's lines are read against the
+ * body's own lines in order: the body's side is the shared rule (`comparableLines` in
+ * `@legion/contracts`, which the Claude Code plugin tags its rows by), the row's side the
+ * body's own pictures spent against what it carries and what is left read by the shared rule's
+ * own line step (`trimmedLines`), never stripped of pictures a second time (`rowLines`). Each
+ * line must be the body line that comes next, and only once every one of them is matched may a
+ * line be the picture placeholder instead, at most as many of those as the body embeds
+ * pictures. The bus is open to any client, so a streamed row is a claim: the only placeholder
+ * the publisher writes for a person's own message is the one an image block becomes, one per
+ * picture and after the person's text (`PICTURE_PLACEHOLDER`), so a row that puts a bracketed
+ * word of its own anywhere, or the placeholder before the person's lines or more often than
+ * the body has pictures, says words the person never wrote and hides nothing. A message
+ * carrying a picture, which reaches the session as the person's text and the picture beside
+ * it, says its body still: the `[image]` is the stream's, the markdown the body held is no
+ * line of the body's side, and the picture it stood as is what accounts for that line. A body
+ * that is the bracketed word `[ack]` says itself, picture or no picture, because the body has
+ * that line of its own.
+ */
+export function turnSaysBody(turn: DispatchTurn, body: string): boolean {
+  const lines = comparableLines(body);
+  const spare = bodyPictures(body);
+  let pictures = 0;
+  for (const count of spare.values()) pictures += count;
+  const said = rowLines(turn.text, spare);
+  if (said === undefined) return false;
+  let next = 0;
+  for (const line of said) {
+    if (line === lines[next]) {
+      next += 1;
+      continue;
+    }
+    if (next < lines.length || pictures === 0 || line !== PICTURE_PLACEHOLDER) return false;
+    pictures -= 1;
+  }
+  return next === lines.length;
+}
+
+/**
  * The Dispatch message each streamed user message delivered, by streamed message id: a person's
  * direct message the session took as its own user turn is tagged with its Dispatch id, and the
- * view stops showing Dispatch's stored copy of it once the text is the same. A turn the session
- * left untagged is not in the map, so its stored copy keeps showing beside it
- * (`packages/pi-envoy/AGENTS.md` says which turns go untagged). The bus is open to
- * any client, so a tag counts only as the publisher's contract puts it, a string on a user
+ * view stops showing Dispatch's stored copy of it once the turn says what the person wrote
+ * (`turnSaysBody`). A turn the session left untagged is not in the map, so its stored copy keeps
+ * showing beside it (`packages/pi-envoy/AGENTS.md` says which turns go untagged). The bus is open
+ * to any client, so a tag counts only as the publisher's contract puts it, a string on a user
  * message; any other is ignored rather than taking the message with it, since a message shown
  * twice beats one lost. The text is read from the frame's own parts, which on a user message are
- * text alone (`isRenderableFrame`).
+ * text alone (`isRenderableFrame`), every one of them: which of its lines the person wrote and
+ * which the stream named is for `turnSaysBody` to tell, against the stored body.
  */
 export function dispatchTurns(state: AgentConversation): Map<string, DispatchTurn> {
   const turns = new Map<string, DispatchTurn>();

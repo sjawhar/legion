@@ -266,7 +266,34 @@ Each item below names a script, then what it proves.
   — agent sends and Dispatch messages, comments on a followed Dispatch issue (in their publish order), role publishes through the listener and core role publishes through the role lane
   — also when it was published while the session was killed and resumed, its NATS connection was cut, either of two listeners was killed, or Dispatch was SIGKILLed right after its writes, all built from the checkout and run in an issue pod;
   with `--build-from` an earlier revision's listener and plugins show the losses under a session restart.
-  Manual, never CI
+  Manual, never CI.
+
+  `--serve` runs the same stack and leaves it up instead of driving the windows, which is how a check that drives a browser gets a live stack to open.
+  It builds Dispatch's web app from the checkout and serves that build, gives both sessions a Dispatch-enabled `envoy.json` naming the run's own Dispatch and its agent token (a person's Send from the page becomes that person's own turn only after the session's plugin asks Dispatch to accept the delivery attempt), and prints the Dispatch URL, the Agents page, both session ids, the Claude Code session's `CLAUDE_CONFIG_DIR` and transcript, and the evidence directory, then holds until it is stopped.
+  Dispatch runs with `DISPATCH_IDENTITY=header:X-Dispatch-User` and `DISPATCH_IDENTITY_HEADER_TRUSTED=1`, so the header alone signs a browser in:
+  every request it makes must carry `X-Dispatch-User: live-delivery`, which Playwright sends as `extraHTTPHeaders`.
+  `--log-model-requests`, which only `--serve` takes, puts a logging proxy in front of the model gateway `ANTHROPIC_BASE_URL` names and gives both sessions that proxy, so what a turn asks the model is evidence:
+  one JSON line per request in `logs/model-requests.jsonl` under the evidence directory, holding the request's header names, its model and its thinking configuration, and never a header value or a message.
+
+  The browser those checks drive is Playwright's own, kept on the issue's own volume rather than on the container's disk, which is small enough that filling it evicts the pod.
+  From `packages/dispatch`, once per pod:
+
+  ```sh
+  PLAYWRIGHT_BROWSERS_PATH="$TMPDIR/ms-playwright" bunx playwright install chromium
+  ```
+
+  That installs Chrome Headless Shell 156.0.8078.4 under that directory, and a run that exports the same `PLAYWRIGHT_BROWSERS_PATH` launches it with no `executablePath` of its own.
+  No script CI runs downloads it
+
+- `with-managed-settings.sh`
+
+  runs a command with a managed-settings file at `/etc/claude-code/managed-settings.json`, on a machine whose `/etc` this account cannot write, which is what a proof of a Claude Code guard that only managed settings seat needs.
+  It copies every entry of `/etc` this account can read into a directory of its own, writes the file the caller names under it as `claude-code/managed-settings.json`, and runs the command in a user and mount namespace where that directory is bound over `/etc` and a nested mapping gives the command the caller's own uid back, which Claude Code requires.
+  It judges nothing: it is a harness another proof runs, and its exit status is the command's.
+
+  ```sh
+  bash scripts/e2e/with-managed-settings.sh --settings channels-on.json -- claude --version
+  ```
 
 - `TestRealGitHubCredentialSurface`
 
@@ -4191,7 +4218,8 @@ Everything is built from the checkout:
 - an Oh My Pi session, `omp --mode rpc --no-extensions -e <pi-envoy>`, the plugin packed by [`lib/pack-plugin.sh`](#libpack-pluginsh);
 
 - a Claude Code session, `legion claude-bridge -- claude -p --input-format stream-json
-  --output-format stream-json --verbose --replay-user-messages …`, configured as `packages/daemon/internal/runtime/tmux/claude.go` configures a Legion pane:
+  --output-format stream-json --verbose --replay-user-messages --thinking-display summarized …`,
+  configured as `packages/daemon/internal/runtime/tmux/claude.go` configures a Legion pane:
   an MCP config that runs claude-envoy's `dist/envoy-channel.js`, both plugin directories, `LEGION_CLAUDE_INBOX` from the bridge.
   The claude-envoy plugin is the run's own copy, built from this checkout into its work directory (`packages/claude-envoy/scripts/build.ts --out`), since a pull request's tree carries no fresh `dist/` or `legion/`.
   Claude Code is `bunx --package @anthropic-ai/claude-code@<version> claude`.
@@ -4284,7 +4312,7 @@ The role lane falls back to the machine groups, since that grant carries no shar
 | `ANTHROPIC_BASE_URL` | unset | when set, passed to Oh My Pi and Claude Code only, beside the key: a model gateway whose key the key file holds; an issue pod has no Anthropic key of its own; its `ANTHROPIC_BASE_URL` names its model gateway, and `/var/run/model-gateway-key/key` holds that gateway's key |
 | `SESSION_DELIVERY_OMP` | `omp` on `PATH`, else `/opt/omp/bin/omp` | the Oh My Pi to run |
 | `SESSION_DELIVERY_MODEL` | `claude-haiku-4-5` | both sessions' model (Oh My Pi gets `anthropic/<model>`) |
-| `SESSION_DELIVERY_CLAUDE_CODE` | `2.1.311` | the Claude Code version `bunx` runs |
+| `SESSION_DELIVERY_CLAUDE_CODE` | the worker image's pin (`packages/daemon/docker/claude-code/package.json`) | the Claude Code version `bunx` runs |
 | `SESSION_DELIVERY_HEARTBEAT_MS` | `10000` | the sessions' `ENVOY_HEARTBEAT_MS` |
 | `SESSION_DELIVERY_SETTLE_S`, `SESSION_DELIVERY_HOLD_S` | `60`, `15` | the per-window waits above; window e waits 60 s longer, the outbox's claim window |
 | `SESSION_DELIVERY_EVIDENCE_DIR` | a fresh directory under `TMPDIR` | kept and printed: `table.txt`, `events.jsonl` (each event's marker, window, kind, the publisher's answer and the expected count), `logs/` (the builds, natsd, both listeners, Dispatch, the proxies and each port's keeper, `keep-<server>.log`), `ports/` (the keepers' port files and sockets) and `sessions/<pi\|cc>/` (each launch's RPC output and stderr, and the transcripts) |

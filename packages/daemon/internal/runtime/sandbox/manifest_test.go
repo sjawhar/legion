@@ -2310,6 +2310,7 @@ func TestAClaudePodsAgentCommandIsClaudeCodeUnderTheBridge(t *testing.T) {
 		"/opt/legion/bin/legion", "claude-bridge", "--", claude(spec.Generation),
 		"-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
 		"--replay-user-messages",
+		"--thinking-display", "summarized",
 		"--permission-mode", "bypassPermissions",
 		"--strict-mcp-config", "--mcp-config", generationDir(spec.Generation) + "/claude-mcp.json",
 		"--plugin-dir", "/opt/legion/claude-envoy",

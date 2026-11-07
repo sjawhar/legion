@@ -5,16 +5,15 @@
 // followed). Claude Code can resume a session at any later time, so no sweep prunes these files;
 // each holds only cursors, followed subjects, a resume point and at most 72 hours of ledger,
 // since the engine drops older ledger entries before every write.
-import { readFile } from "node:fs/promises"
 import { join } from "node:path"
 import {
   type ConsumerDeliverySnapshot,
   ConsumerDeliverySnapshotSchema,
 } from "@legion/envoy-client/consumer-delivery"
-import { hasErrnoCode } from "@legion/envoy-client/errors"
 import { type ReplaySnapshot, ReplaySnapshotSchema } from "@legion/envoy-client/replay"
 import type { z } from "zod"
 import { writeAtomicStateFile } from "./session-state"
+import { readStateFile } from "./state-file"
 
 /**
  * A session's file: the replay snapshot, and the consumer delivery snapshot once the session had
@@ -39,22 +38,7 @@ export function replayStateFile(stateDirectory: string, sessionId: string): stri
  * holds no replay snapshot throws.
  */
 export async function readReplayState(file: string): Promise<ReplayStateFile> {
-  let text: string
-  try {
-    text = await readFile(file, "utf8")
-  } catch (error) {
-    if (hasErrnoCode(error, "ENOENT")) return { ledger: [] }
-    throw error
-  }
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(text)
-  } catch {
-    throw new Error(`${file} is not JSON`)
-  }
-  const snapshot = ReplayStateFileSchema.safeParse(parsed)
-  if (!snapshot.success) throw new Error(`${file} holds no replay state`)
-  return snapshot.data
+  return await readStateFile(file, ReplayStateFileSchema, { ledger: [] }, "holds no replay state")
 }
 
 /** Replaces the session's file by rename, mode 0600, as every other state file is written. */

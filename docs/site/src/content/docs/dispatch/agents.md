@@ -98,38 +98,42 @@ How a message reaches the agent depends on its mode:
 | **BTW** | Answers it in a side turn, without adding it to its main conversation, and the answer is posted back as its reply. |
 
 A message is a Send unless you start it with `/aside ` or `/btw `, or the session does not take
-Send. Each session takes only the modes it advertises. A Claude Code session, for example, takes
-Aside but not Send, so a message you write to it without a prefix goes as an Aside, and the message
-box says "Sending as Aside". If you write in a mode the session does not take, the message box warns
-you and suggests a prefix it does take.
+Send.
+Each session takes only the modes it advertises, and what it advertises can change while it runs.
+A Claude Code session at a terminal advertises no mode until the plugin's mod has connected to it,
+and Send, Aside and BTW once it has.
+A Claude Code session in a Legion pane advertises Send and Aside from the start, and gains BTW
+when the mod connects.
+If you write in a mode the session does not take, the message box warns you and suggests a prefix
+it does take.
 
 A session that advertises no mode takes no message: its card says **Takes no messages**, and a
-message sent to it is recorded as a failed attempt. A Claude Code session advertises none when it
-was started without its Envoy channel (`claude --channels plugin:claude-envoy@legion-plugins`, or
-`--dangerously-load-development-channels` with the same entry where the channel is not
-allowlisted); Claude Code would not show it the message.
+message sent to it is recorded as a failed attempt.
+A Claude Code session advertises none while its plugin cannot reach its conversation: its Claude
+Code is older than 2.1.310, it was started with `--bare` or `--safe-mode`, or its settings turn
+mods off (`disableAllHooks`, or `allowManagedModsOnly` or `allowManagedHooksOnly` in managed
+settings).
+Such a session shows no conversation in the live view either.
 
-A Claude Code session started for the first time on a new profile (a fresh `~/.claude`, or a new
-`CLAUDE_CONFIG_DIR`) can come up without its channel: its terminal says `--channels ignored` and
-"Channels are not currently available". It still says it takes Aside, so a message you send it is
-recorded as sent but never reaches the agent. Whoever started it restarts Claude Code with the same
-`--channels` flag, and again while the terminal still says the channel is ignored; the channel is
-loaded when it says "Channels (experimental) messages from plugin:claude-envoy@legion-plugins
-inject directly in this session". A first launch may instead say "waiting for your organization's
-policy … Messages are dropped until it loads" and keep saying it after the policy has loaded;
-messages reach the agent anyway.
+A message sent while a session is restarting or has briefly lost its connection is kept, and
+reaches the session once it is back.
+Envoy counts a message to a Claude Code session as delivered once the plugin has put it into the
+session's conversation: the row the mod added to the turn running, the prompt it submitted while
+the session was idle, or, in a Legion pane, the message the bridge handed over.
 
-A message sent while an Oh My Pi or Claude Code session is restarting or has briefly lost its
-connection is kept, and reaches the session once it is back. Envoy counts a message to a Claude
-Code session in channel mode as delivered once Claude Code accepts its channel notification, the
-last signal Claude Code gives, so a message Claude Code drops after that, as it does while its
-channel is ignored, is not sent again.
+Your Send or Aside arrives as your own message in the session's conversation, and the agent
+answers there.
+A Send or Aside that starts with `/` runs as the session's terminal would run it.
+A command that prints output, such as `/session` or `/compact`, posts that output as the session's
+**Reply via Dispatch**.
+On an Oh My Pi session, one that runs only in the session's own terminal says it did not run.
+On a Claude Code session, one that waits for the turn in progress or for an answer at the terminal
+replies after ten seconds that it is still running, and its output follows in another reply.
+Watch either result in the [live view](#the-live-view).
 
-On an Oh My Pi session, your Send or Aside arrives as your own message in its conversation, and the
-agent answers there. A Send or Aside that starts with `/` runs as the session's terminal would run
-it. A command that prints output, such as `/session` or `/compact`, posts that output as the
-session's **Reply via Dispatch**; one that runs only in the session's own terminal says it did not
-run. Watch either result in the [live view](#the-live-view).
+A picture in your message reaches an Oh My Pi session and a Claude Code session in a Legion pane.
+It does not reach a Claude Code session at a terminal, which gets the message's text alone:
+Claude Code gives a plugin no way to put a picture into a terminal session.
 
 ## Broadcasts
 
@@ -147,13 +151,12 @@ A broadcast sends one message to many agents.
    example `Broadcast to 3 of 4 selected`, and each selected agent is a chip you can remove.
 3. Type the message, pick the mode if you want another, and choose **Send to N**.
 
-Until you pick a mode, a broadcast goes as a BTW, or as an Aside when every agent you selected that
-takes any mode takes Aside and one of them does not take BTW (a Claude Code session, for example).
-The box then says "Sending as Aside" and names that agent. Select a Claude Code session together
-with an agent that takes only BTW, and the broadcast stays a BTW and leaves the Claude Code session
-out. An agent that does not take the mode the broadcast goes in is left out, and its chip says why;
-once you pick a mode, Dispatch never switches it to another. One broadcast reaches at most 100
-agents.
+Until you pick a mode, a broadcast goes as a BTW, or as an Aside when every agent you selected
+that takes any mode takes Aside and one of them does not take BTW.
+The box then says "Sending as Aside" and names that agent.
+An agent that does not take the mode the broadcast goes in is left out, and its chip says why;
+once you pick a mode, Dispatch never switches it to another.
+One broadcast reaches at most 100 agents.
 
 Your selection is what you ticked, not what the filters show. Narrowing the filters after you tick
 does not drop anyone; the count beside the checkbox says how many selected agents are outside the
@@ -231,18 +234,24 @@ links to its conversation as it happens, at `/agents/<session>/live`.
 - When the header shows less, it says why: "This session does not report its model and thinking
   level. Restart it on a newer pi-envoy to show and switch them here." (it shows the last turn's
   model instead), "This session's Oh My Pi does not tell Dispatch its model and thinking level.",
-  or "This session switches its model and thinking level only at its own terminal." A model with
-  no adjustable thinking shows `no adjustable thinking`, and a level the model decides shows
-  `model default`. Claude Code sessions don't publish their model or thinking level, so their
-  header is unchanged.
+  or "This session switches its model and thinking level only at its own terminal."
+  A model with no adjustable thinking shows `no adjustable thinking`, and a level the model
+  decides shows `model default`.
+  A Claude Code session publishes its model and thinking level, so its header shows them and its
+  pickers work.
 - The agent's turns stream in while the page is open. They are relayed, not stored.
 - Your messages to the agent, and its replies through Dispatch, are stored and shown in the same
   thread. A reply through Dispatch is labelled **Reply via Dispatch**.
-- The message box at the bottom sends to the agent. **Send as** picks the mode, from the modes the
-  session takes. When this is **Send** or **Aside** and the session publishes a command list, type
-  `/` to choose from its commands. The list marks commands that only the session's terminal runs;
-  their reply says they did not run. Use the arrow keys to choose, **Tab** or **Enter** to pick, and
-  **Escape** to close the list. BTW offers no commands.
+- The message box at the bottom sends to the agent.
+  **Send as** picks the mode, from the modes the session takes.
+  When this is **Send** or **Aside** and the session publishes a command list, type `/` to choose
+  from its commands.
+  The list marks commands that only the session's terminal runs; their reply says they did not
+  run.
+  On a Claude Code session it marks none, because Claude Code does not say which of its commands
+  open a dialog at the terminal.
+  Use the arrow keys to choose, **Tab** or **Enter** to pick, and **Escape** to close the list.
+  BTW offers no commands.
 - **Send** works while the agent is in the middle of a turn, and while earlier messages of yours
   are still on their way or were refused. Each press sends at once, as its own message, and the
   session takes it as its mode says ([Send, Aside, and BTW](#send-aside-and-btw)). **Enter** sends
@@ -255,8 +264,60 @@ links to its conversation as it happens, at `/agents/<session>/live`.
 - What you type for one agent stays with that agent: moving to another agent's live view shows that
   agent's own box, and coming back finds your text. Leaving the live view drops it.
 
-Some sessions cannot stream their conversation, such as Claude Code sessions. The live view says
-so, and still shows your messages and their replies.
+A session whose plugin does not stream its conversation shows none of it here.
+The live view says so, and still shows your messages and their replies.
+
+### A Claude Code session in the live view
+
+A Claude Code session on Claude Code 2.1.310 or newer streams its conversation here, like any
+other session: each prompt, the agent's text as it is written, its thinking where Claude Code
+keeps it, and each tool call with its arguments and its result, a failed one marked failed.
+Ten things it shows differently, or cannot show at all:
+
+- **Thinking text at a terminal.**
+  A terminal session sends the words the model thought only when its settings have
+  `showThinkingSummaries: true`.
+  Without that, the turn's reasoning reads "Claude Code hides what the model thought here: it
+  sends the thinking text only when the terminal session turns on the showThinkingSummaries
+  setting."
+
+- **The thinking level before the first request.**
+  Claude Code reports the level a request ran under, so the header shows a thinking level from
+  the session's first request on, and none at all for a model that has no effort level.
+
+- **Which commands only the terminal can finish.**
+  The `/` list cannot mark them, because Claude Code does not say which of its commands open a
+  dialog there.
+
+- **A model pick at a terminal.**
+  It is stored as the default for new sessions, exactly as `/model` typed at that terminal is.
+
+- **A thinking pick at a terminal.**
+  It applies to the session's own requests from then on, but Claude Code's `/effort` at the
+  terminal still shows the level Claude Code has saved.
+
+- **A picture in your message at a terminal.**
+  It does not reach the session; Claude Code gives a plugin no way to send one.
+  A session in a Legion pane does get it.
+
+- **The summary of a compaction.**
+  It can be missing.
+  Claude Code hides it from a mod on a machine with managed settings, and in one measured
+  `/compact` in a terminal session without managed settings it did not reach the mod either.
+
+- **A session whose Claude Code cannot load the mod.**
+  It shows no conversation and takes no message: its Claude Code is older than 2.1.310, it was
+  started with `--bare` or `--safe-mode`, or its settings turn mods off (`disableAllHooks`, or
+  `allowManagedModsOnly` or `allowManagedHooksOnly` in managed settings).
+
+- **An image in the conversation.**
+  It shows as `[image]`, as it does for an Oh My Pi session.
+
+- **A resumed session.**
+  The view holds the conversation since the session's process started, as an Oh My Pi session's
+  does.
+  Claude Code hands a mod no row ids for anything before that, so `claude --resume` starts the
+  view empty and it fills from the next turn on.
 
 ## How Dispatch shows an agent
 

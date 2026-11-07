@@ -5,9 +5,9 @@ import type { ChannelNotification, ChannelNotifier } from "./envoy-channel-serve
 
 /**
  * The variable `legion claude-bridge` exports to Claude Code, and so to this server, naming its
- * inbox socket (`packages/daemon/internal/claudebridge/inbox.go`): Claude Code's print mode never
- * delivers a `notifications/claude/channel`, so in a Legion pane each Envoy delivery goes there and
- * the bridge sends it to Claude Code as a user turn.
+ * inbox socket (`packages/daemon/internal/claudebridge/inbox.go`): in a Legion pane each Envoy
+ * delivery goes there and the bridge sends it to Claude Code as a user turn, which is what makes
+ * a person's own message a turn of the pane's own conversation.
  */
 export const INBOX_VARIABLE = "LEGION_CLAUDE_INBOX"
 
@@ -35,12 +35,15 @@ interface InboxAnswer {
 /**
  * A notifier that writes each delivery to the bridge's inbox at `socketPath`, one JSON line
  * `{id, content}` (the envelope's `event_id`, else a fresh id; the rendered content), and resolves
- * once the bridge answers `{id, ok: true}`. The bridge answers `ok` only when Claude Code re-emits
- * that user message (`--replay-user-messages`), that is once it took the delivery into a step, and
- * an error when Claude Code never takes it: a relayed frame is answered `done` on the one and `nak`
- * on the other. An answer with an error, a closed socket or an answer for another id rejects. The
- * bridge answers one connection's lines in order, so one connection, opened on first use and again
- * after it closes, carries every delivery.
+ * once the bridge answers `{id, ok: true}`. A line whose delivery carries more than its text - a
+ * person's own message and the pictures it embeds - also carries `blocks`, Claude Code's own
+ * content blocks for it (INFRA-1026); `content` stays the text, so a bridge that does not know
+ * the field delivers the message as it always did. The bridge answers `ok` only when Claude Code
+ * re-emits that user message (`--replay-user-messages`), that is once it took the delivery into a
+ * step, and an error when Claude Code never takes it: a relayed frame is answered `done` on the
+ * one and `nak` on the other. An answer with an error, a closed socket or an answer for another
+ * id rejects. The bridge answers one connection's lines in order, so one connection, opened on
+ * first use and again after it closes, carries every delivery.
  */
 export function createInboxNotifier(socketPath: string): ChannelNotifier {
   let socket: Socket | undefined
@@ -100,10 +103,18 @@ export function createInboxNotifier(socketPath: string): ChannelNotifier {
 
   return {
     notification(notification: ChannelNotification): Promise<void> {
-      const id = notification.params.meta["event_id"] ?? randomUUID()
+      const id = notification.eventId ?? randomUUID()
       const settle = Promise.withResolvers<void>()
       waiting.push({ id, settle })
-      connected().write(`${JSON.stringify({ id, content: notification.params.content })}\n`)
+      // `blocks` is additional: `content` is the message's text whatever a reader makes of the
+      // blocks, so a bridge that does not know the field delivers the message as it always did.
+      connected().write(
+        `${JSON.stringify({
+          id,
+          content: notification.content,
+          ...(notification.blocks === undefined ? {} : { blocks: notification.blocks }),
+        })}\n`,
+      )
       return settle.promise
     },
   }

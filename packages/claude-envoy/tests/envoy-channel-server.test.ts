@@ -7,14 +7,17 @@ import { nkeys } from "nats"
 import marketplace from "../../../.claude-plugin/marketplace.json" with { type: "json" }
 import plugin from "../.claude-plugin/plugin.json" with { type: "json" }
 import ompPlugin from "../.omp-plugin/plugin.json" with { type: "json" }
+import type { ModCallArguments, ModCallName, ModCallResults } from "../hooks/mod-protocol"
 import pkg from "../package.json" with { type: "json" }
 import {
+  type ChannelNotifier,
   createChannelDelivery,
   enqueueChannelMessage,
   MCP_SERVER_INFO,
-  sanitizeChannelMetadata,
+  sessionCapabilities,
   startChannelSession,
 } from "../src/envoy-channel-server"
+import { modSession } from "../src/mod-session"
 import { roleStateFile, SessionIdentity } from "../src/session-identity"
 import {
   deliveryRaw,
@@ -27,6 +30,7 @@ import {
   scratchState,
   sessionOptions,
   settled,
+  waitFor,
 } from "./channel-session-harness"
 import { FakeNatsServer } from "./fake-nats-server"
 import { isolatePaneEnvironment } from "./pane-environment"
@@ -50,7 +54,7 @@ const roleForwardRaw = JSON.stringify({
   payload_summary: "Review please",
 })
 
-test("emits each Envoy envelope as the exact Claude channel notification", async () => {
+test("writes each Envoy envelope into the session as the rendered card that names its sender", async () => {
   const notifier = new FakeNotifier()
   const delivery = createChannelDelivery({
     identity: new SessionIdentity("ses_claude", "/tmp"),
@@ -62,63 +66,11 @@ test("emits each Envoy envelope as the exact Claude channel notification", async
 
   expect(notifier.notifications).toEqual([
     {
-      method: "notifications/claude/channel",
-      params: {
-        content:
-          'envoy:\n  to: you (ses_claude)\n  from: ses_sender\n  at: "2025-10-09T08:53:20Z"\n  id: evt-42\n  urgency: high\n  reply_with:\n    tool: envoy_send\n    args:\n      session_id: ses_sender\n      in_reply_to: evt-42\n      message: ...\n  summary: Use the channel',
-        meta: {
-          producer: "agent",
-          topic: directSubject,
-          event_id: "evt-42",
-          dedupe_key: "delivery-42",
-          urgency: "high",
-          from_session: "ses_sender",
-        },
-      },
+      content:
+        'envoy:\n  to: you (ses_claude)\n  from: ses_sender\n  at: "2025-10-09T08:53:20Z"\n  id: evt-42\n  urgency: high\n  reply_with:\n    tool: envoy_send\n    args:\n      session_id: ses_sender\n      in_reply_to: evt-42\n      message: ...\n  summary: Use the channel',
+      eventId: "evt-42",
     },
   ])
-})
-
-test("presents an ad-hoc topic's forward on the agent subject with the topic it was published to", async () => {
-  const notifier = new FakeNotifier()
-  const delivery = createChannelDelivery({
-    identity: new SessionIdentity("ses_claude", "/tmp"),
-    notifier,
-    configFile: sessionConfigFile("claude", process.env),
-  })
-  // The publish route forwards an ad-hoc topic's envelope, unchanged, to each self-subscribed
-  // session's agent subject, and that copy can arrive before the one on the topic itself.
-  const adHocForward = JSON.stringify({
-    event_id: "evt-team-3",
-    dedupe_key: "publish.0123456789abcdef0123456789abcdef",
-    source: "agent",
-    source_session: "ses_sender",
-    topic: "notifications.team.deploy-squad",
-    issued_at: 1_760_000_000_000,
-    payload_summary: "Deploy done",
-  })
-
-  await delivery.enqueue({ subject: directSubject, raw: adHocForward })
-
-  expect(notifier.notifications).toHaveLength(1)
-  expect(notifier.notifications[0]?.params.meta).toEqual({
-    producer: "agent",
-    topic: "notifications.team.deploy-squad",
-    event_id: "evt-team-3",
-    dedupe_key: "publish.0123456789abcdef0123456789abcdef",
-    from_session: "ses_sender",
-  })
-})
-
-test("strips unsafe channel meta keys before notifying Claude Code", () => {
-  expect(
-    sanitizeChannelMetadata({
-      producer: "envoy",
-      "from-session": "ses_sender",
-      "1bad": "dropped",
-      event_id: "evt-1",
-    }),
-  ).toEqual({ producer: "envoy", event_id: "evt-1" })
 })
 
 test("enqueues a forwarded role-lane event before publishing its adapter receipt", async () => {
@@ -251,7 +203,7 @@ test("a Dispatch Retry the listener re-sends under the same dedupe key reaches C
     await settled()
 
     expect(notifier.notifications).toHaveLength(1)
-    expect(notifier.notifications[0]?.params.meta["event_id"]).toBe("evt-attempt")
+    expect(notifier.notifications[0]?.eventId).toBe("evt-attempt")
   } finally {
     await session.shutdown()
     await rm(stateDirectory, { recursive: true, force: true })
@@ -272,7 +224,7 @@ test("a send whose notification failed is delivered when it is sent again", asyn
             failNext = false
             throw new Error("the MCP transport refused the write")
           }
-          delivered.push(String(notification.params.meta["event_id"]))
+          delivered.push(String(notification.eventId))
         },
       },
     }),
@@ -290,6 +242,115 @@ test("a send whose notification failed is delivered when it is sent again", asyn
     // did see the second, so the third is one.
     expect(delivered).toEqual(["evt-retry"])
   } finally {
+    await session.shutdown()
+    await rm(stateDirectory, { recursive: true, force: true })
+  }
+})
+
+// The tester's test `a card whose submit entered the session is not submitted again when Envoy
+// resends it` stood here until round eleven (INFRA-1026). It pinned the guarantee that a card
+// Envoy sends again reaches the model one time, under the rule of the time: the server kept the
+// event ids of the cards that entered and answered a resend itself. That rule is gone — a
+// request the mod never answered now leaves its frame unanswered on purpose, so Envoy sends it
+// again, and the mod's own write is what makes the repeat safe (`../hooks/mod`, `writeOnce` over
+// `$.store` keyed by the session id and the event id). The retired test held a submit pending and
+// asserted that no second write went out, which the new rule contradicts by construction, so no
+// code can satisfy both. The guarantee it pinned is kept where it now lives: `the same event id
+// handed over twice is written once, at once or later` in `./mod.test.ts`, driven against the
+// real mod, and `a card the mod never answered is written again when Envoy resends it` below,
+// which is the server's half of it. The architect approved the swap; the tester judges it.
+
+// What replaces the server's record of the cards it has (INFRA-1026 review, round eleven): the
+// server is at-least-once and re-hands the event, and the mod's write is idempotent by the
+// Envoy event id, so the engine sees the one message once. Both copies are therefore handed
+// over, each carrying `evt-42`, and the inbox names the message once. The mod's own half of
+// this is driven against the real `$` in `./mod.test.ts`.
+test("a card Envoy sends again is handed over again, under the one event id", async () => {
+  const notifier = new FakeNotifier()
+  const delivery = createChannelDelivery({
+    identity: new SessionIdentity("ses_claude", "/tmp"),
+    notifier,
+    configFile: sessionConfigFile("claude", process.env),
+  })
+
+  expect(await delivery.enqueue({ subject: directSubject, raw: deliveryRaw })).toBe(true)
+  expect(await delivery.enqueue({ subject: directSubject, raw: deliveryRaw })).toBe(true)
+
+  expect(notifier.notifications.map(({ eventId }) => eventId)).toEqual(["evt-42", "evt-42"])
+  // One message, named once: the inbox lists the card, not every frame carrying it.
+  expect(delivery.inbox().map(({ event_id }) => event_id)).toEqual(["evt-42"])
+})
+
+// Repro `R-A` (INFRA-1026 review, round eleven) at the server: a mod that never answers — a
+// SIGSTOPped Claude Code, one that polls for nothing, one that is gone — leaves the frame
+// unanswered, so Envoy sends the card again and this server writes it to the session again. The
+// message is never lost to keep it from arriving twice, and what keeps it from arriving twice is
+// the mod's record of its Envoy event id (`../hooks/mod.ts`, `writeOnce`), not a record here.
+test("a card the mod never answered is written again when Envoy resends it", async () => {
+  const nats = new FakeNats()
+  const written: string[] = []
+  const holding: Array<() => void> = []
+  const claude = modSession({
+    link: {
+      connected: () => true,
+      request: <N extends ModCallName>(
+        call: N,
+        args: ModCallArguments[N],
+        options?: { readonly timeoutMs?: number },
+      ): Promise<ModCallResults[N]> => {
+        if (call !== "session.message") {
+          return Promise.reject(new Error(`the card path made an unexpected mod call: ${call}`))
+        }
+        written.push((args as ModCallArguments["session.message"]).message.text)
+        // A mod that answers nothing: the caller's own bound ends the wait, as the link's does.
+        const held = Promise.withResolvers<ModCallResults[N]>()
+        const timer = setTimeout(
+          () =>
+            held.reject(
+              new Error(`the mod did not answer ${call} within ${options?.timeoutMs ?? 0} ms`),
+            ),
+          options?.timeoutMs ?? 0,
+        )
+        timer.unref()
+        holding.push(() => {
+          clearTimeout(timer)
+          held.reject(new Error("the session ended"))
+        })
+        return held.promise
+      },
+    },
+    showMs: 40,
+    warn: () => undefined,
+  })
+  const notifier: ChannelNotifier = {
+    notification: async ({ content, blocks, eventId }) => {
+      await claude.show({
+        content: blocks ?? [{ text: content, type: "text" }],
+        text: content,
+        ...(eventId === undefined ? {} : { eventId }),
+      })
+    },
+  }
+  const stateDirectory = await scratchState()
+  const session = await startChannelSession(
+    sessionOptions(new SessionIdentity("ses_claude", "/tmp"), stateDirectory, {
+      connection: nats,
+      notifier,
+    }),
+  )
+
+  try {
+    nats.emit(directSubject, deliveryRaw)
+    await waitFor(async () => written.length === 1, "the card's first write")
+    // Past the bound: a real wait, since the channel server's own startup and heartbeat waits
+    // need real time and no fake clock reaches this bound through the live pipeline.
+    await Bun.sleep(80)
+    nats.emit(directSubject, deliveryRaw)
+    await waitFor(async () => written.length === 2, "the resent card's own write")
+
+    expect(written).toHaveLength(2)
+  } finally {
+    for (const stop of holding.splice(0)) stop()
     await session.shutdown()
     await rm(stateDirectory, { recursive: true, force: true })
   }
@@ -344,7 +405,7 @@ test("registers no delivery mode for a session whose channel Claude Code did not
   const session = await startChannelSession(
     sessionOptions(new SessionIdentity("ses_claude", "/tmp"), stateDirectory, {
       client,
-      capabilities: [],
+      capabilities: () => [],
     }),
   )
 
@@ -389,7 +450,7 @@ test("registers aside capability and soft-reclaims the role persisted for a resu
       expect.objectContaining({
         sessionID: "ses_claude",
         topics: [directSubject],
-        capabilities: ["aside"],
+        capabilities: ["aside", "steer"],
         selfSubscribed: true,
         plugin: { name: "@sjawhar/claude-envoy", version: "afe10b2f3e1b" },
       }),
@@ -1017,3 +1078,10 @@ test("a refused NATS seed leaves the listener tools on, opens no NATS connection
     await rm(home, { recursive: true, force: true })
   }
 }, 20_000)
+
+test("a Legion pane takes Aside and Send from the start and gains BTW when its mod connects", () => {
+  // The pane's messages go through the bridge's inbox, which needs no mod; the side turn a BTW
+  // is does. A terminal session's own rule is driven end to end in `envoy-channel-mcp.test.ts`.
+  expect(sessionCapabilities({ pane: true, mod: false })).toEqual(["aside", "steer"])
+  expect(sessionCapabilities({ pane: true, mod: true })).toEqual(["aside", "steer", "btw"])
+})

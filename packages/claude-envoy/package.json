@@ -2,7 +2,7 @@
   "name": "@sjawhar/claude-envoy",
   "version": "1.0.0",
   "license": "Apache-2.0",
-  "description": "Claude Code channel plugin for Legion's Envoy bus",
+  "description": "Claude Code plugin for Legion's Envoy bus",
   "type": "module",
   "files": [
     ".claude-plugin/**",

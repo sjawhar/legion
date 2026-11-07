@@ -29,8 +29,8 @@ export function newestAttempt(
 /** The delivery a reply into this exchange inherits: the agent, in the mode of the exchange's
  *  most recent attempt across the root and every delivered reply. Where that is a Send the agent
  *  does not take, or there is none (a reply to the agent's own message), it is a Send where the
- *  agent takes it, else a BTW where it takes that, else its plain mode - an Aside to a Claude Code
- *  session, which takes neither. */
+ *  agent takes it, else a BTW where it takes that, else its plain mode - an Aside to an agent
+ *  that takes neither. */
 export function exchangeDelivery(
   agent: Agent,
   read: MessageRead

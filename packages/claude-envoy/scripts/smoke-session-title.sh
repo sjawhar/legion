@@ -20,7 +20,7 @@
 # with a real listener. It does not prove that Claude Code sends the field; that rests on Claude
 # Code's own documentation.
 #
-# Like smoke-channel.sh and smoke-clear-rebind.sh, this is a manual smoke and never a CI step.
+# Like smoke-clear-rebind.sh, this is a manual smoke and never a CI step.
 #
 #   bash packages/claude-envoy/scripts/smoke-session-title.sh
 #

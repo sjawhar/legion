@@ -263,9 +263,24 @@ dependency in its body. For the image-pin comparison and `/healthz` deployment e
   the session has accepted the attempt with Dispatch, so the live view shows it from the stream,
   where the session took it. When the stream tags it with its Dispatch id (`dispatchTurns` in
   `features/agent-view/conversation.ts`), the view hides Dispatch's stored copy only when the
-  streamed text equals it, and still names its author when that is not the viewer. A turn the
-  stream missed shows twice, as the streamed message and stored copy; so does a prompt template or
-  file command whose streamed message is its expansion rather than the stored `/name …`.
+  streamed row says what the person wrote (`turnSaysBody`: each of the row's lines is the body's
+  next line, the body's side read by the rule it shares with the Claude Code plugin
+  (`comparableLines` in `@legion/contracts`, the pictures taken out, each line trimmed, the
+  empty ones dropped) and the row's side the body's own pictures spent once against what the
+  row carries and what is left trimmed the same way, never stripped of pictures again
+  (`rowLines`, since taking a picture out joins the text on either side of it and that join may
+  write picture markdown neither side held before); only after every one of the body's lines is
+  matched may the row add a bracketed word naming a block it did not render, such as a
+  picture's `[image]`, at most one per picture the body embeds; a bracketed word of the row's
+  own, before those lines or past that count, leaves the stored copy showing. The bus is open
+  to any client, so a picture the row carries counts only where the body wrote that very
+  markdown, caption and address alike, and only as often as the body wrote it, since the row is
+  drawn as markdown under the person's name and a picture of the row's own would otherwise show
+  there with their stored copy hidden), and still names its author when that is
+  not the viewer.
+  A turn the stream missed shows twice, as the streamed message and stored copy;
+  so does a prompt template or file command whose streamed message is its expansion rather than
+  the stored `/name …`.
   `packages/pi-envoy/AGENTS.md` says which turns the session leaves untagged. The live view's
   composer offers the modes the session advertises in `MODE_ORDER` (Send, Aside, BTW), so it opens
   on Send wherever the session takes a steer and on Aside otherwise. In Send or Aside, the
@@ -275,8 +290,8 @@ dependency in its body. For the image-pin comparison and `/healthz` deployment e
   rows last, caps it at 50, and writes a picked item as `/name `. On `/agents`, only an attempt
   whose `accepted_as` is `user_turn` reads `Delivered to <session>'s conversation` with no retry
   row, even after a later `failed` (`takenAsUserTurn` in
-  `features/conversation/TargetedMessageCard.tsx`); every other attempt, a Claude Code session's
-  or an older plugin's included, keeps today's states. The page refreshes on `message.accepted`.
+  `features/conversation/TargetedMessageCard.tsx`); every other attempt, an older plugin's
+  included, keeps today's states. The page refreshes on `message.accepted`.
   A pick in the live view's header (INFRA-195, `SessionSettings.tsx`) is the person's own Send of
   `/model <id>` or `/effort <level>`: always `steer`, whatever the composer's mode, since a BTW is
   no user turn, with the id exactly as the session's `settings` frame listed it (the select clips a
@@ -292,7 +307,7 @@ dependency in its body. For the image-pin comparison and `/healthz` deployment e
   BTW only when its session takes it.
 - A message with no `/aside ` or `/btw ` command that answers no thread goes in `plainDelivery`
   (`features/conversation/delivery.ts`): Send when every live session it addresses that takes any
-  mode advertises Send, else Aside when every one advertises Aside (a Claude Code session), else
+  mode advertises Send, else Aside when every one advertises Aside, else
   Send, which the composer warns about; BTW is never picked for the reader. An agent card's reply
   (`exchangeDelivery` in `AgentsPage.tsx`) falls back the same way for a session that takes
   neither Send nor BTW. The composer computes it from the
@@ -303,7 +318,7 @@ dependency in its body. For the image-pin comparison and `/healthz` deployment e
 - A broadcast's mode is null in `useBroadcastComposition` until the sender picks one; the page
   then sends in `broadcastDelivery` (`features/conversation/delivery.ts`) of the selected live
   sessions: BTW, else Aside when every selected session that takes any mode takes Aside and one
-  refuses BTW (a Claude Code session), and the composer says "Sending as Aside: … does not
+  refuses BTW, and the composer says "Sending as Aside: … does not
   advertise BTW.". The server still never switches a mode it is sent.
 - The Agents broadcast page renders recipients in the order the server returns them: the send's
   tick order after exclusions.

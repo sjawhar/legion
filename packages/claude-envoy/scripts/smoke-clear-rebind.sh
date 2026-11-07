@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # smoke-clear-rebind.sh — real Claude Code `/clear` handoff smoke: after `/clear`, the
 # registry entry of the new session id must list its own direct subject and never the old one.
-# See README.md "Manual smoke" for prerequisites; like smoke-channel.sh, never a CI step.
+# See README.md "Manual smoke" for prerequisites; a manual smoke, never a CI step.
 set -euo pipefail
 
 readonly envoy_url="${ENVOY_URL:-http://127.0.0.1:9020}"

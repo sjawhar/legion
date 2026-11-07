@@ -43,9 +43,8 @@ const STATUS: Record<AgentStreamStatus, { dot: string; label: string }> = {
 };
 
 /** Where each mode stands in the composer. Send comes first wherever the session takes it, since
- *  that is Enter at its terminal, and Aside next, so a session that takes only asides (a Claude
- *  Code session, which refuses a steer) opens on Aside. A mode the contracts add must be placed
- *  here before it compiles. */
+ *  that is Enter at its terminal, and Aside next, so a session that advertises Aside and no Send
+ *  opens on Aside. A mode the contracts add must be placed here before it compiles. */
 const MODE_ORDER: Record<MessageDeliveryMode, number> = { aside: 1, btw: 2, steer: 0 };
 
 /** The modes a human can talk to a session in, narrowed to the ones it advertises, in
@@ -60,15 +59,17 @@ function deliveryModes(capabilities: readonly string[]): MessageDeliveryMode[] {
 /**
  * What an empty transcript means for this session, which only the session can say: it answers
  * the relay on its control subject, or nobody is there. Saying "the next turn appears here" to a
- * viewer of a session that answers nothing was a promise the page could not keep. Not every
- * silent plugin has a newer one to install - no claude-envoy release streams at all - so the
- * text names what is true of the plugin rather than telling its reader to upgrade. The relay
- * keeps asking, so a session restarted onto a plugin that streams turns this around without a
- * reload, and the wording stays neutral until the first answer arrives.
+ * viewer of a session that answers nothing was a promise the page could not keep. A silent
+ * session is not always one with a newer plugin to install - it may have been started without
+ * its plugin, or have ended - so the text names what is true of the session rather than telling
+ * its reader to upgrade. The relay keeps asking, so a session that starts answering turns this
+ * around without a reload, and the wording stays neutral until the first answer arrives. A
+ * resumed session answers with the conversation since its process started, so this text is also
+ * what a reader sees until such a session takes its next turn.
  */
 function emptyText(responding: boolean | undefined): string {
   if (responding === false) {
-    return "This session is not answering the live view: its Envoy plugin does not stream (Claude Code sessions don't, nor pi-legion-envoy before 5.8.0), or the session is no longer running. Nothing appears here until it answers.";
+    return "This session is not answering the live view: its plugin does not stream its conversation, or the session is no longer running. Nothing appears here until it answers.";
   }
   return "Nothing yet. This session's next turn appears here as it happens.";
 }
@@ -102,14 +103,14 @@ export function AgentConversationPage(): ReactNode {
     mode === "btw" || listed === undefined || listed.length === 0 ? undefined : listed;
 
   // The human's direct messages and the session's replies to them, as Dispatch stores them. A
-  // person's Send or Aside to an Oh My Pi session becomes the session's own user turn, which the
-  // stream carries tagged with this message's id, and the thread shows it once; one the stream
-  // carries untagged shows twice (`packages/pi-envoy/AGENTS.md`, the phase-worker section, says
-  // when). A BTW, an issue message, and any message to a session that takes no user turn from
-  // Envoy (a Claude Code session) arrive as notices the stream has no frame for, and the session
-  // answers them with a `dispatch message` command, which the stream shows only as a `bash` tool
-  // call whose arguments hold that command. Without these the thread would show replies to
-  // messages the human cannot see, and no replies at all.
+  // person's Send or Aside to a session that takes one becomes the session's own user turn, which
+  // the stream carries tagged with this message's id, and the thread shows it once; one the
+  // stream carries untagged shows twice (`packages/pi-envoy/AGENTS.md`, the phase-worker section,
+  // says when). A BTW, an issue message, and any message to a session that takes no user turn
+  // from Envoy arrive as notices the stream has no frame for, and the session answers them with a
+  // `dispatch message` command, which the stream shows only as a `bash` tool call whose arguments
+  // hold that command. Without these the thread would show replies to messages the human cannot
+  // see, and no replies at all.
   // Seeing them here is reading them.
   const stored = useQuery(agentMessagesQuery(sessionId));
   useMarkRepliesRead(sessionId, stored.data);
@@ -266,7 +267,7 @@ export function AgentConversationPage(): ReactNode {
       {current && agent !== undefined && agent.capabilities.length === 0 ? (
         <p className={`mt-2 text-sm ${dangerText}`} data-testid="agent-takes-no-messages">
           This session advertises no delivery mode, so a message sent here records a failed attempt.
-          A Claude Code session takes messages only when it was started with its Envoy channel.
+          A session advertises none while its plugin cannot reach its conversation.
         </p>
       ) : null}
       {switchRefusal === null ? null : (

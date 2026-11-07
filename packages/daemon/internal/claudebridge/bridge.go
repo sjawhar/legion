@@ -60,10 +60,13 @@ type event struct {
 
 // delivery is one Envoy delivery waiting to be a user turn. answer, buffered, is answered once:
 // with nil once Claude Code has taken it (re-emitted it, --replay-user-messages), else with why it
-// never will.
+// never will. blocks is the delivery as Claude Code's own content blocks where it carries more
+// than its text — a person's own message and the pictures it embeds — and nil where content is
+// the whole of it; the bridge reads none of it (writeUser).
 type delivery struct {
 	id      string
 	content string
+	blocks  []json.RawMessage
 	answer  chan<- error
 }
 
@@ -97,6 +100,19 @@ type bridge struct {
 	// (shimwire.PromptResult), right behind that turn's agent_end: with background work on it is
 	// the only thing that tells the daemon which of the turns it saw was its task's.
 	promptRun string
+	// command is the command_uuid of the slash command Claude Code is running for a mod of the
+	// plugin's ($.command.run), and "" when it runs none. A command writes a block of its own on
+	// the same stream — a `system` `init` of its own and a `result` of its own, between the
+	// `command_lifecycle` rows that open and close it — and neither is a turn's: between them
+	// systemInit starts no turn and result ends no step and no turn (commandLifecycle).
+	command string
+	// commandInit and commandResult are that block's own `init` and its own `result`, still
+	// owed: the `started` row owes one of each, since the recorded block holds exactly one of
+	// each between its two rows (testdata/command-block.jsonl), and the first such line after it
+	// spends it. The `completed` row spends both. This is the whole of what a block whose
+	// `completed` never came costs the bridge: one init and one result, not every one after
+	// them.
+	commandInit, commandResult bool
 	// queue is the Envoy deliveries waiting for the next step or turn; taking is those sent to
 	// Claude Code that it has yet to re-emit, each answered when it does.
 	queue, taking []delivery
@@ -200,7 +216,7 @@ func Run(ctx context.Context, cfg Config) (int, error) {
 
 	if cfg.Seed {
 		b.seeding = true
-		b.writeUser("/rename " + cfg.Title)
+		b.writeUser("/rename "+cfg.Title, nil)
 	}
 
 	// Claude Code is done once it has exited and its stdout has been read to its end, or
@@ -410,7 +426,7 @@ func (b *bridge) prompt(p shimwire.Prompt) {
 		b.respond(shimwire.Response{ID: p.ID, Command: shimwire.TypePrompt, Success: false, Error: Busy})
 		return
 	}
-	b.startRun(p.Message, p.ID)
+	b.startRun(p.Message, nil, p.ID)
 }
 
 // deliver queues an Envoy delivery: between turns it starts one at once; during a turn of the
@@ -434,10 +450,10 @@ func (b *bridge) sendQueued() {
 	b.queue = b.queue[1:]
 	b.taking = append(b.taking, d)
 	if b.inRun {
-		b.step(d.content)
+		b.step(d.content, d.blocks)
 		return
 	}
-	b.startRun(d.content, "")
+	b.startRun(d.content, d.blocks, "")
 }
 
 // beginRun marks a turn running and tells the daemon it began. prompt is the request id of the
@@ -452,27 +468,29 @@ func (b *bridge) beginRun(prompt string) {
 // startRun tells the daemon a turn of the bridge's own starts and sends its first message. prompt
 // is the request id of the daemon's prompt that started it, and "" for a turn nothing of the
 // daemon's did.
-func (b *bridge) startRun(message, prompt string) {
+func (b *bridge) startRun(message string, blocks []json.RawMessage, prompt string) {
 	b.beginRun(prompt)
-	b.step(message)
+	b.step(message, blocks)
 }
 
 // step sends one user message of the turn running.
-func (b *bridge) step(message string) {
+func (b *bridge) step(message string, blocks []json.RawMessage) {
 	b.stepping = true
-	b.writeUser(message)
+	b.writeUser(message, blocks)
 }
 
 // fromClaude acts on one stream-json line of Claude Code's.
 func (b *bridge) fromClaude(line []byte) {
 	var head struct {
-		Type      string          `json:"type"`
-		Subtype   string          `json:"subtype"`
-		Message   json.RawMessage `json:"message"`
-		IsReplay  bool            `json:"isReplay"`
-		RequestID string          `json:"request_id"`
-		IsError   bool            `json:"is_error"`
-		Errors    []string        `json:"errors"`
+		Type        string          `json:"type"`
+		Subtype     string          `json:"subtype"`
+		Message     json.RawMessage `json:"message"`
+		IsReplay    bool            `json:"isReplay"`
+		RequestID   string          `json:"request_id"`
+		IsError     bool            `json:"is_error"`
+		Errors      []string        `json:"errors"`
+		CommandUUID string          `json:"command_uuid"`
+		State       string          `json:"state"`
 	}
 	if err := json.Unmarshal(line, &head); err != nil {
 		b.log.Printf("ignoring a line from Claude Code that is not JSON (%d bytes)", len(line))
@@ -491,6 +509,8 @@ func (b *bridge) fromClaude(line []byte) {
 		if head.Subtype == "init" {
 			b.systemInit()
 		}
+	case "command_lifecycle":
+		b.commandLifecycle(head.CommandUUID, head.State)
 	case "control_request":
 		b.log.Printf("refusing Claude Code's control request %s: the bridge serves none", head.RequestID)
 		b.writeClaude(map[string]any{"type": "control_response", "response": map[string]string{
@@ -500,14 +520,42 @@ func (b *bridge) fromClaude(line []byte) {
 	}
 }
 
+// commandLifecycle opens and closes the slash command Claude Code is running for a mod of the
+// plugin's ($.command.run): its `started` row opens the block the command writes on this same
+// stream and owes that block's own `init` and `result`, and the `completed` row of that same
+// command_uuid closes it and spends whichever of the two is still owed. Nothing else of either
+// row is read: a row whose state is neither, and a `completed` of any other command_uuid, leaves
+// the open block as it stands. A `started` row while a block is open replaces it, owing the new
+// block's lines. Nothing else closes a block: the bridge's own user message does not
+// (writeUser), since the command runs on and writes its result whether or not Claude Code has
+// read that message first, and a block whose `completed` is lost costs the one init and the one
+// result its `started` owes and no line after them.
+func (b *bridge) commandLifecycle(command, state string) {
+	switch {
+	case state == "started":
+		b.command, b.commandInit, b.commandResult = command, true, true
+	case command == b.command && command != "":
+		b.command, b.commandInit, b.commandResult = "", false, false
+	}
+}
+
 // systemInit acts on the `init` line Claude Code writes at the start of every turn and at no other
 // time: of a turn the daemon's prompt, an Envoy delivery or the seed started, and of one Claude
 // Code started by itself when a background task it had left running finished. Between turns it is
 // that second kind, a turn no step of the bridge's is open in, and the daemon is told of it as it
 // is told of any other, so the background result is read inside a turn rather than after one the
 // daemon thinks has ended. During a turn or the seeding it is the turn already begun: the bridge
-// set that state when it wrote the user message, before this line came back.
+// set that state when it wrote the user message, before this line came back. The init a command's
+// `started` owes is that command's, which starts no turn: no prompt and no delivery asked for it,
+// and a turn reported for it would be one the daemon never sees end. Once that one init is spent,
+// the next is a turn's again, so a `started` whose `completed` was lost leaves every turn after
+// it reported.
 func (b *bridge) systemInit() {
+	if b.commandInit {
+		b.commandInit = false
+		b.log.Printf("ignoring the init of the command Claude Code is running")
+		return
+	}
 	if b.inRun || b.seeding {
 		return
 	}
@@ -578,7 +626,14 @@ func answerAll(deliveries []delivery, err error) {
 // step of a turn's is followed by the next Envoy delivery, else the turn's end; a self-started
 // turn's ends that turn, no step of the bridge's being open in it, and the next Envoy delivery
 // then starts a turn of the bridge's own. A delivery the step sent that Claude Code ended it
-// without taking never will be.
+// without taking never will be. The result a command's `started` owes is that command's
+// (commandLifecycle), and ends neither the step nor the turn: the command answered no user
+// message of the bridge's, and the turn it was run in, if any, runs on. A user message the
+// bridge writes while that command still runs is answered by a result of Claude Code's own, so
+// two results are owed, and this reads the first as the command's and the second as the step's:
+// whichever order they come in, one result is left to end the step. The seed's own result is
+// read before that: the seed goes out before Claude Code can run a command of anyone's, and
+// nothing but it releases the prompts the seeding holds.
 func (b *bridge) result(subtype string, isError bool, errs []string) {
 	if b.seeding {
 		b.seeding = false
@@ -595,6 +650,11 @@ func (b *bridge) result(subtype string, isError bool, errs []string) {
 		if !b.inRun && len(b.queue) > 0 {
 			b.sendQueued()
 		}
+		return
+	}
+	if b.commandResult {
+		b.commandResult = false
+		b.log.Printf("ignoring the %s result of the command Claude Code is running", subtype)
 		return
 	}
 	if !b.inRun {
@@ -631,10 +691,24 @@ func (b *bridge) result(subtype string, isError bool, errs []string) {
 	}
 }
 
-// writeUser sends text to Claude Code as one user message.
-func (b *bridge) writeUser(text string) {
-	b.writeClaude(map[string]any{"type": "user", "message": map[string]any{
-		"role": "user", "content": []map[string]string{{"type": "text", "text": text}}}})
+// writeUser sends text to Claude Code as one user message: blocks as its content where a delivery
+// carried them — Claude Code's own content blocks, written as they came and read by no one here —
+// and the one text block of text where it did not. Where blocks are given, text is still the
+// message's text and is what the echo is matched against (echoed), since the blocks carry it.
+//
+// A user message of the bridge's own closes no command's block: the command runs on, and writes
+// its own result whether or not Claude Code has read this message first. Closing it here would
+// leave that result ending this message's step — the delivery the step carried answered
+// errNotTaken and sent to the agent a second time, a prompt answered with its prompt_result
+// before its turn had run — and a person's `/compact` runs for 6 to 29 s (measured in this
+// issue), long enough for a delivery or the daemon's prompt to arrive inside the block. A block
+// is closed by its own `completed` row (commandLifecycle).
+func (b *bridge) writeUser(text string, blocks []json.RawMessage) {
+	content := any([]map[string]string{{"type": "text", "text": text}})
+	if len(blocks) > 0 {
+		content = blocks
+	}
+	b.writeClaude(map[string]any{"type": "user", "message": map[string]any{"role": "user", "content": content}})
 }
 
 // writeClaude queues v for Claude Code as one stream-json line.

@@ -796,8 +796,8 @@ function AgentRowDetails({
         className={`mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs ${textMutedOnCanvas}`}
       >
         {agent.capabilities.length === 0 ? (
-          // A session that advertises no mode refuses every message, the Claude Code session
-          // whose Envoy channel Claude Code did not load among them.
+          // A session that advertises no mode refuses every message: nothing can carry one into
+          // its conversation while its plugin cannot reach it.
           <span>Takes no messages</span>
         ) : (
           agent.capabilities.map((capability) => (
@@ -1217,7 +1217,7 @@ export function AgentsPage(): ReactNode {
   const composition = useBroadcastComposition();
   const { draft, selected, setSelected } = composition;
   // Until the sender picks a mode, the broadcast goes in the one its selection takes: BTW, or
-  // Aside when a selected session takes Aside and not BTW (a Claude Code session).
+  // Aside when a selected session takes Aside and not BTW.
   const defaultDelivery = broadcastDelivery(
     agents.flatMap((agent) => (selected.has(agent.session_id) ? [agent.capabilities] : []))
   );

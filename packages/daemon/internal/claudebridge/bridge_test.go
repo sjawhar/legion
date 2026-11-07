@@ -144,8 +144,10 @@ func fakeClaude() int {
 
 // replay writes a recorded Claude Code stream line for line, holding its last line back until the
 // gate opens. The recordings are of the pinned Claude Code (2.1.310, the version
-// docker/claude-code/package-lock.json pins) under claudelaunch.Argv's flags of the day, before
-// --replay-user-messages was one of them: a line is what that binary wrote, never written by hand.
+// docker/claude-code/package-lock.json pins) in print mode: a line is what that binary wrote,
+// never written by hand. A stream is one recording trimmed to the lines a case needs, and
+// commandBlockInTurn is the only one whose lines stand in another order than the recorded one,
+// which its own comment says.
 func replay(record *os.File, file string) {
 	raw, err := os.ReadFile(filepath.Join("testdata", file))
 	if err != nil {
@@ -363,7 +365,14 @@ func (r *rig) dialInbox() *inboxClient {
 
 func (c *inboxClient) deliver(id, content string) {
 	c.t.Helper()
-	if err := json.NewEncoder(c.conn).Encode(InboxDelivery{ID: id, Content: content}); err != nil {
+	c.deliverBlocks(id, content, nil)
+}
+
+// deliverBlocks is one delivery that carries Claude Code's own content blocks beside its text, as
+// claude-envoy writes a person's own message and the pictures it embeds (src/legion-inbox.ts).
+func (c *inboxClient) deliverBlocks(id, content string, blocks []json.RawMessage) {
+	c.t.Helper()
+	if err := json.NewEncoder(c.conn).Encode(InboxDelivery{ID: id, Content: content, Blocks: blocks}); err != nil {
 		c.t.Fatal(err)
 	}
 }
@@ -728,6 +737,175 @@ func TestAnEnvoyDeliveryDuringAClaudeStartedTurnFollowsIt(t *testing.T) {
 	r.expect("agent_end", nil)
 	if !strings.Contains(r.recorded(), `"text":"say the CI is green"`) {
 		t.Errorf("the delivery was no user message: %s", r.recorded())
+	}
+}
+
+// commandBlock and the three streams beside it are the four the command cases drive the bridge
+// with (replay), all four trimmed from one recorded run of the pinned Claude Code: a mod of the
+// plugin's called `$.command.run({command:"context"})` nine seconds into a print-mode turn that
+// was running `sleep 20`; the command waited for the turn, and its whole block — a
+// `command_lifecycle` `started` row, a `system` `init`, the command's own output and a `result`
+// of its own, then the `completed` row of the same command_uuid — landed after the turn's own
+// result. commandBlock is the recorded order, the block between turns. commandBlockInTurn is the
+// same recorded lines with the turn's own result moved last, so the block nests inside the turn
+// it was called from, which is the shape the measurement did not produce and the bridge must
+// read all the same. The two torn streams drop one lifecycle row each, as a real process's
+// output can: commandBlockUnstarted a `completed` whose command never started, and
+// commandBlockUnfinished a `started` whose `completed` never came.
+const (
+	commandBlock           = "replay command-block.jsonl"
+	commandBlockInTurn     = "replay command-block-in-turn.jsonl"
+	commandBlockUnstarted  = "replay command-block-unstarted.jsonl"
+	commandBlockUnfinished = "replay command-block-unfinished.jsonl"
+)
+
+// A command's block between turns is no turn of anyone's: the daemon is told of no agent_start,
+// no agent_end and no prompt_result for it. The command's `init` is not a turn Claude Code
+// started by itself, and its `result` ends nothing, so the prompt's turn is the one turn the
+// daemon sees.
+func TestACommandsBlockBetweenTurnsIsNoTurn(t *testing.T) {
+	r := newRig(t, "-p", "--resume", sessionID)
+	r.prompt("p1", commandBlock)
+	r.expect("agent_start", nil)
+	r.expect("agent_end", nil)
+	r.expect("prompt_result", map[string]any{"id": "p1", "agentInvoked": true})
+	// The block's `started`, its `init`, the command's output and its `result`; the `completed`
+	// row is the stream's last line, which the gate holds back.
+	r.quiet()
+	r.open()
+	r.quiet()
+	// The block did arrive: what the bridge passed over is what it read.
+	r.logged("ignoring the init of the command Claude Code is running")
+	r.logged("ignoring the success result of the command Claude Code is running")
+}
+
+// A command's block inside a turn ends no step of that turn: the delivery that waits for the next
+// step is neither sent during the block nor answered errNotTaken by the command's result, and the
+// turn's own result, which comes after the block, ends the step as it always did — the delivery
+// is sent then, taken, and the turn ends with its prompt_result behind it.
+func TestACommandsBlockInsideATurnEndsNoStep(t *testing.T) {
+	r := newRig(t, "-p", "--resume", sessionID)
+	r.prompt("p1", commandBlockInTurn)
+	r.expect("agent_start", nil)
+	inbox := r.dialInbox()
+	inbox.deliver("ev1", "say the CI is green")
+	r.logged("Envoy delivery ev1 waits for the next step")
+	inbox.noAnswer()
+	r.quiet()
+	// The turn's own result, the stream's last line.
+	r.open()
+	if answer := inbox.answer(); answer != (InboxAnswer{ID: "ev1", OK: true}) {
+		t.Fatalf("the inbox answered %+v, want the delivery taken by the step the turn's own result started", answer)
+	}
+	r.expect("agent_end", nil)
+	r.expect("prompt_result", map[string]any{"id": "p1", "agentInvoked": true})
+	r.quiet()
+	// The block did arrive: the result the bridge passed over is the command's own.
+	r.logged("ignoring the success result of the command Claude Code is running")
+}
+
+// A torn block — a `completed` row for a command that never started, a `started` row whose
+// `completed` never came — leaves the bridge working: the stream is a real process's output, and
+// a line that never arrives must not leave the bridge ignoring the result of every turn after it.
+// A `started` row owes one init and one result, and the lines after those two are read as any
+// other turn's, so the lost row costs the bridge that one block and nothing after it.
+func TestATornCommandBlockLeavesALaterTurnWorking(t *testing.T) {
+	for _, torn := range []struct{ name, stream string }{
+		{"a completed row for a command that never started", commandBlockUnstarted},
+		{"a started row whose completed never came", commandBlockUnfinished},
+	} {
+		t.Run(torn.name, func(t *testing.T) {
+			r := newRig(t, "-p", "--resume", sessionID)
+			r.prompt("p1", torn.stream)
+			r.expect("agent_start", nil)
+			r.expect("agent_end", nil)
+			r.expect("prompt_result", map[string]any{"id": "p1", "agentInvoked": true})
+			r.open()
+			r.quiet()
+			r.prompt("p2", "say the torn block cost nothing")
+			r.expect("agent_start", nil)
+			r.expect("agent_end", nil)
+			r.expect("prompt_result", map[string]any{"id": "p2", "agentInvoked": true})
+		})
+	}
+}
+
+// A command still running when the bridge writes its next user message — its `started` read, its
+// `completed` not — ends no step of the bridge's. A person sends `/compact` to an idle pane (6 to
+// 29 s, measured in this issue's earlier rounds), and while it runs an Envoy delivery or the
+// daemon's own prompt arrives, so the bridge starts a turn inside the open block. The command's
+// own result must not end that turn: a delivery answered errNotTaken is sent to the agent a
+// second time, and a prompt_result written before its turn has run leaves the real turn to be
+// read as one Claude Code started by itself.
+//
+// The fake writes the command's result before it reads the user message waiting on its stdin,
+// which is one of the two orders Claude Code can write them in; the bridge's rule — spend the one
+// result each `started` owes, close no block whose `completed` has not come — holds in either,
+// since no line of the stream says when Claude Code took its stdin.
+func TestACommandStillRunningEndsNoStepTheBridgeStarted(t *testing.T) {
+	t.Run("an Envoy delivery arrives inside the block", func(t *testing.T) {
+		r := newRig(t, "-p", "--resume", sessionID)
+		r.prompt("p1", commandBlockUnfinished)
+		r.expect("agent_start", nil)
+		r.expect("agent_end", nil)
+		r.expect("prompt_result", map[string]any{"id": "p1", "agentInvoked": true})
+		// The block is open: its `started` row and its own `init` are read, and its own `result`
+		// is the stream's last line, which the gate holds back.
+		r.logged("ignoring the init of the command Claude Code is running")
+		inbox := r.dialInbox()
+		inbox.deliver("ev1", "held h1")
+		r.expect("agent_start", nil)
+		inbox.noAnswer()
+		// The command's own result. Claude Code reads the delivery behind it, and answers it only
+		// once the test releases h1, so no frame of the delivery's turn stands in the way here.
+		r.open()
+		inbox.noAnswer()
+		r.quiet()
+		r.logged("ignoring the success result of the command Claude Code is running")
+		r.release("h1")
+		if answer := inbox.answer(); answer != (InboxAnswer{ID: "ev1", OK: true}) {
+			t.Fatalf("the inbox answered %+v, want the delivery taken by the turn begun inside the block", answer)
+		}
+		r.expect("agent_end", nil)
+		r.quiet()
+	})
+	t.Run("the daemon's prompt arrives inside the block", func(t *testing.T) {
+		r := newRig(t, "-p", "--resume", sessionID)
+		r.prompt("p1", commandBlockUnfinished)
+		r.expect("agent_start", nil)
+		r.expect("agent_end", nil)
+		r.expect("prompt_result", map[string]any{"id": "p1", "agentInvoked": true})
+		r.logged("ignoring the init of the command Claude Code is running")
+		r.prompt("p2", "held h2")
+		r.expect("agent_start", nil)
+		r.open()
+		// p2's turn has not run, so neither its agent_end nor its prompt_result may come yet.
+		r.quiet()
+		r.logged("ignoring the success result of the command Claude Code is running")
+		r.release("h2")
+		r.expect("agent_end", nil)
+		r.expect("prompt_result", map[string]any{"id": "p2", "agentInvoked": true})
+	})
+}
+
+// A delivery that carries a person's pictures reaches Claude Code as the blocks claude-envoy
+// wrote, picture and all, and is answered once Claude Code takes it: the echo's joined text
+// blocks are the delivery's content, which the blocks carry unchanged.
+func TestADeliveryWithPicturesIsSentAsItsBlocks(t *testing.T) {
+	r := newRig(t, "-p", "--resume", sessionID)
+	inbox := r.dialInbox()
+	inbox.deliverBlocks("ev1", "say what this is", []json.RawMessage{
+		json.RawMessage(`{"type":"text","text":"say what this is"}`),
+		json.RawMessage(`{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgo="}}`),
+	})
+	r.expect("agent_start", nil)
+	if answer := inbox.answer(); answer != (InboxAnswer{ID: "ev1", OK: true}) {
+		t.Fatalf("the inbox answered %+v, want the delivery taken", answer)
+	}
+	r.expect("agent_end", nil)
+	blocks := `"content":[{"type":"text","text":"say what this is"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgo="}}]`
+	if !strings.Contains(r.recorded(), blocks) {
+		t.Errorf("Claude Code read %s, want the delivery's own blocks %s", r.recorded(), blocks)
 	}
 }
 

@@ -1138,15 +1138,15 @@ test("a direct message to a session that advertises no mode warns that it takes 
   try {
     fireEvent.change(screen.getByLabelText("Comment"), { target: { value: "Ship it." } });
     const warning = screen.getByText(/Worker advertises no delivery mode, so sending it records/);
-    expect(warning.textContent).toContain("started with its Envoy channel");
+    expect(warning.textContent).toContain("while its plugin cannot reach its conversation");
     expect(warning.textContent).not.toContain("Prefix with");
   } finally {
     view.unmount();
   }
 });
 
-// A session that refuses Send but takes Aside - a Claude Code session - gets a plain message as
-// an Aside, and the composer says so instead of warning that the Send would fail.
+// A session that refuses Send but takes Aside gets a plain message as an Aside, and the composer
+// says so instead of warning that the Send would fail.
 for (const capabilities of [["aside"], ["aside", "btw"]]) {
   test(`a plain message to a session advertising ${capabilities.join(" and ")} goes as an Aside`, async () => {
     const createAgentMessage = spyOn(api, "createAgentMessage").mockResolvedValue(createdMessage);

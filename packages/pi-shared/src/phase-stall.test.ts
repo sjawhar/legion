@@ -11,7 +11,7 @@ import {
 
 const assistant = (...content: unknown[]) => ({ role: "assistant", content });
 
-// Oh My Pi's `message_end` hands `toolCall` (the shape packages/pi-envoy/src/agent-stream.ts
+// Oh My Pi's `message_end` hands `toolCall` (the shape packages/pi-shared/src/agent-stream.ts
 // reads); Claude Code names it `tool_use`. Matching one name only once had a working Oh My Pi
 // worker reported to its architect as stalled.
 test("a tool call under either host's block name is a tool call the turn ran", () => {

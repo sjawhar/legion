@@ -1,0 +1,5 @@
+kind: Changed
+body: A person's Send or Aside from Dispatch's Agents page now reaches a Claude Code session as that person's own message, a `/` message runs as the session's terminal runs it, the header's model and thinking pickers work, and a BTW is answered from the session's model without changing the conversation. Only a delivery Dispatch confirms as a person's becomes their own message; every other message keeps the card that names its sender.
+time: 2026-11-05T05:03:33.40062628Z
+custom:
+    Issue: pr2779
