@@ -114,8 +114,11 @@ func (r *repositories) set(accepted []mappedRepository, refused []refusedReposit
 	return added, removed
 }
 
-// Owners is every served repository's owner, lowercased, sorted and once each: the owners a role's
-// GitHub credential holds a directory for.
+// Owners is every served repository's owner, lowercased, sorted and once each: what the daemon's
+// state reports of the mapping (view, api.RepositoriesView.Owners). No gh credential reads it. A
+// role's bundle is built from the served repositories themselves (Accepted, which
+// appauth.GitHubCredential and appauth.GitHubDirs read), since a directory of that bundle names
+// either an owner or one repository of it, and the lease in it names the repositories it reaches.
 func (r *repositories) Owners() []string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()

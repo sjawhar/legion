@@ -1860,11 +1860,11 @@ func (r *outbox) provisionIn(ctx context.Context, key string, repo ghrepo.Reposi
 	// repository under either name — and the name it keeps is what this issue's workspace, its
 	// shared clone and, under the Sandbox runtime, its pod's feed and repository cache are keyed
 	// by, which a rename must not move.
-	owner := r.repositories.serving(repo).Owner()
+	served := r.repositories.serving(repo)
 	mint := func() (string, error) {
-		lease, err := r.tokens.Token(ctx, appauth.Implement, owner)
+		lease, err := r.tokens.Token(ctx, appauth.Implement, served)
 		if err != nil {
-			return "", fmt.Errorf("mint the implement App token for %s to provision %s: %w", owner, key, err)
+			return "", fmt.Errorf("mint the implement App token for %s to provision %s: %w", served, key, err)
 		}
 		return lease.Token, nil
 	}
@@ -2121,9 +2121,9 @@ func (r *outbox) createBranch(ctx context.Context, issue record.Issue) error {
 		return err
 	}
 	repo := r.repositories.serving(recorded)
-	lease, err := r.tokens.Token(ctx, appauth.Implement, repo.Owner())
+	lease, err := r.tokens.Token(ctx, appauth.Implement, repo)
 	if err != nil {
-		return fmt.Errorf("mint the implement App token for %s: %w", repo.Owner(), err)
+		return fmt.Errorf("mint the implement App token for %s: %w", repo, err)
 	}
 	github := githubrest.Client{Token: lease.Token, API: githubrest.RepositoryAPI(r.githubAPI, repo)}
 	return ghbranch.Create(ctx, github, repo, workspace.Bookmark(issue.Key), issue.DefaultBranch)
