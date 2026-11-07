@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 
 import { agentRow, openAgents, plannerSession, seedAgents } from "./agents";
 import { createComment, createIssue, createProject } from "./api";
+import { openFromSidebar } from "./editor";
 import { resetDatabase } from "./seed";
 import {
   answeredPost,
@@ -84,9 +85,8 @@ test("an Agents row send refused while the reader is on the Inbox is there on th
     await page.keyboard.press("Control+Enter");
     await expect(field).toBeDisabled();
 
-    await page.locator("body").focus();
-    await page.keyboard.press("g");
-    await page.keyboard.press("i");
+    // Away to the Inbox and back by the sidebar's own links, which openFromSidebar explains.
+    await openFromSidebar(page, "Inbox");
     await expect(row).toHaveCount(0);
     const refused = page.waitForResponse(
       (response) =>
@@ -96,8 +96,7 @@ test("an Agents row send refused while the reader is on the Inbox is there on th
     );
     refuse();
     await refused;
-    await page.keyboard.press("g");
-    await page.keyboard.press("a");
+    await openFromSidebar(page, "Agents");
     const planner = row.getByRole("button", { exact: true, name: "Planner" });
     if ((await planner.getAttribute("aria-expanded")) !== "true") await planner.click();
     await expect(row.getByText(`Couldn't send — ${MESSAGE_REFUSED.error}`)).toBeVisible();

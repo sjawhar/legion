@@ -440,9 +440,11 @@ func (p *fenceAfterFirstSend) Deadline() time.Time {
 	return time.Now().Add(time.Hour)
 }
 
-// A batch checks the publisher hold's deadline before every send and before its record: once the
-// deadline has passed it sends nothing more, counts no attempt, writes nothing, and reports the
-// hold lost.
+// A batch checks the publisher hold's deadline before every send: once a send has met it the
+// batch sends nothing more, counts no attempt, writes nothing, and reports the hold lost. The
+// record is not checked against the in-process clock a second time - a batch whose sends all
+// went out under the hold records what they came to - and whether its back-offs may still be
+// scheduled is the record's own check, on the database's clock (recordBatch).
 func TestABatchPastThePublisherHoldsDeadlineSendsAndRecordsNothingMore(t *testing.T) {
 	database := storetest.Open(t)
 	broker := events.NewBroker()

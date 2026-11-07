@@ -94,7 +94,7 @@ func startIdleRigListenerOn(t *testing.T, natsURL, machine string, port int) *id
 			t.Logf("the Envoy listener's own log:\n%s", l.log())
 		}
 	}()
-	idleRigEventually(t, 60*time.Second, "the Envoy listener answering /healthz healthy", func() bool {
+	idleRigEventually(t, idleRigListenerStartWait, "the Envoy listener answering /healthz healthy", func() bool {
 		response, err := l.client.Get(l.url + "/healthz")
 		if err != nil {
 			return false

@@ -168,6 +168,36 @@ if (process.env[laneCountVariable] === undefined && workerCount() > 1) {
 // timeout when that deadline is its observable contract (the keyboard chord-expiry test).
 const expectTimeout = 15_000;
 
+// The per-test budget, measured rather than inherited. Playwright's own default is 30 s, chosen
+// when this suite ran one row at a time; it now runs four lanes on a four-core runner, and the
+// slowest row this budget governs finished 144 ms under that default. Read from the report.json
+// artifact of 201 ci.yaml runs between 2026-11-05T08:51:42Z and 2026-11-05T20:27:47Z (78
+// merge_group, 119 pull_request, 4 push).
+//
+// The population is the one this number governs, and the filter is the point of it: the 300,539
+// results that passed on rows of the spec files this tree has whose tests set no timeout of
+// their own. Left out are 1,812 results of 15 spec files this tree does not have, which are
+// other branches' rows, and every row of the 20 files that call `test.setTimeout` or
+// `test.slow` (the refilling files among them, whose rows ask for 120 s to 300 s): this budget
+// is not theirs, and reading them into it would raise it for rows it never applies to. Both of
+// those counts move when the base moves, since they are of this tree's own file list rather
+// than of the window, and this reading is of the base this branch merged forward
+// (`main` at b7866f96): seven of the files that were another branch's when this was first
+// measured are the base's now.
+// Over that population: median
+// 2,509 ms, 95th percentile 6,788 ms, 99th 10,030 ms, 99.9th 15,605 ms, maximum 29,856 ms
+// (deep-links.e2e.ts's "emitted document item hrefs select and scroll their anchored quote" in
+// WebKit). Over the whole of what this tree has, rows with their own timeout included, the
+// maximum is 126,560 ms, and the 21 results above this budget are all in three rows of
+// agent-list-refilling.e2e.ts, whose rows ask for 150 s to 300 s themselves.
+//
+// The budget is twice the governed maximum, so a healthy row has as long again as the slowest
+// one ever took, and a row that hangs still fails inside a minute: 3.8 times that population's
+// 99.9th percentile and 24 times its median, and no governed result of the window reaches it.
+// It lengthens no row's work; a row that needs it has already lost whatever it was waiting for.
+// Raise it only from a measurement of the same shape, over the same population.
+const testTimeout = 60_000;
+
 // Two-process mode's one project: the multiprocess specs, in Chromium, the sign-in spec alone under
 // DISPATCH_E2E_SIGNIN=oidc and every other one without it.
 const multiprocessProjects = [
@@ -210,11 +240,16 @@ const parallelProjects = [
   // picker's and the live header pickers' keyboard-step rule rests on: the six rows of
   // `keyboard-agents-picker` that step a select from the keyboard or leave one without Enter,
   // and all five of `keyboard-session-pickers`.
+  // A send held open across two in-app navigations, with the row's draft, its picker and its
+  // Reply held until the server answers: `keyboard-agents-picker`'s row back after the reader
+  // left mid-send, which carries `@webkit` alone because each of its six measured failures was
+  // in WebKit.
   // The engine's cancellation of a chunk the navigation away from it left downloading, and the
-  // margin hold's frame and scroll order: six `deep-links` rows - the held chunk's, the press
+  // margin hold's frame and scroll order: seven `deep-links` rows - the held chunk's, the press
   // raced against the landing's own frames, the two hidden-editor rows that run with the page's
-  // animation frames held, the per-frame scroll of a past version's landing, and the placement
-  // the margin's own scroll must not move.
+  // animation frames held, the per-frame scroll of a past version's landing, the placement the
+  // margin's own scroll must not move, and the composer opened from the document after a comment
+  // link, whose selection bar the landing's frames can carry off screen.
   // IndexedDB-backed recovery of an edit the server has not taken: three `offline-edits` rows -
   // the edit restored across a reload, the acknowledged one cleared, and two tabs holding two
   // connections to one store.
@@ -226,7 +261,9 @@ const parallelProjects = [
   // The one-socket invariant: `live-socket`'s row that a tab holds one live socket for every live
   // view, since WebKit is the engine iOS Safari opens every subscription in.
   // The keyed write path's request failure, its abort, a tab's storage across a reload and the
-  // ask before a tab unloads: five `keyed-writes` rows and two `keyed-send` rows.
+  // ask before a tab unloads: six `keyed-writes` rows and two `keyed-send` rows. The sixth
+  // `keyed-writes` row, the ask answer whose answer is lost, carries `@webkit` alone: both of
+  // its measured failures were in WebKit.
   // Without a `testMatch` the project would see every spec in this directory, so it names the
   // same `testIgnore` as `chromium`: no tagged row may sit in a plain-HTTP, multiprocess or
   // clock-read spec, and `heavy-bodies.e2e.ts` belongs to `webkit-alone` alone.
@@ -264,10 +301,11 @@ const parallelProjects = [
   // `keyboard-agents-picker` that step a select from the keyboard or leave one without Enter,
   // and all five of `keyboard-session-pickers`.
   // The engine's cancellation of a chunk the navigation away from it left downloading, and the
-  // margin hold's frame and scroll order: six `deep-links` rows - the held chunk's, the press
+  // margin hold's frame and scroll order: seven `deep-links` rows - the held chunk's, the press
   // raced against the landing's own frames, the two hidden-editor rows that run with the page's
-  // animation frames held, the per-frame scroll of a past version's landing, and the placement
-  // the margin's own scroll must not move.
+  // animation frames held, the per-frame scroll of a past version's landing, the placement the
+  // margin's own scroll must not move, and the composer opened from the document after a comment
+  // link, whose selection bar the landing's frames can carry off screen.
   // IndexedDB-backed recovery of an edit the server has not taken: three `offline-edits` rows -
   // the edit restored across a reload, the acknowledged one cleared, and two tabs holding two
   // connections to one store.
@@ -401,6 +439,7 @@ export default defineConfig({
   reporter: measuring
     ? [["list"], [fileURLToPath(new URL("./measure-reporter.ts", import.meta.url))]]
     : "list",
+  timeout: testTimeout,
   expect: { timeout: expectTimeout },
   use: {
     ...devices["Desktop Chrome"],

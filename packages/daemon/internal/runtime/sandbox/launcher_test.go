@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -101,17 +102,36 @@ func TestABindingWriteRefusedAsAConflictIsRetriedOnceOverAFreshRead(t *testing.T
 }
 
 // A binding write that conflicts again on its retry fails the launch with the conflict, as any other
-// write failure does: the bind is retried once, not until it lands.
+// write failure does: the bind is retried once, not until it lands. What ends this launch is the
+// row's own observable — the conflict reactor serving the second conflict, after which the bind
+// has no retry left and fails — and the context below is cancelled on it rather than on a wall
+// clock: the bind lies past a suspend, the wait for the previous pod, provision, the secret write,
+// the Running patch and the wait for the new pod, which a loaded machine spends more than the
+// second failedLaunch gives its own callers (relaunch_test.go).
 func TestABindingWriteConflictedTwiceFailsTheLaunch(t *testing.T) {
 	g := newRig(t, nil)
 	spec := workerSpec(t)
 	secret := roleSecretName(SandboxName(spec.Claim), claim.RoleTester)
+	launching, cutShort := context.WithCancel(g.ctx)
+	defer cutShort()
+	// The callback counts for itself rather than reading the helper's own counter: that one is
+	// 2 inside this call only because conflictSecretUpdates adds before it calls back, and a
+	// row whose cancel turns on another function's order of two statements hangs to the test
+	// binary's deadline the day that order changes. The helper's count is still what the
+	// assertion below reads.
+	var conflicts atomic.Int32
 	served := conflictSecretUpdates(g, secret, 2, func(s *corev1.Secret) {
 		s.Data[GitHubHostsKey("sjawhar")] = []byte(ghconfig.Hosts("ghs_refreshed_lease"))
+		if conflicts.Add(1) == 2 {
+			// The second conflict is the last the bind may make, so nothing this row waits on is
+			// outstanding once it is served: the launch fails on the conflict the reactor is
+			// returning, and this cancel ends a launch that goes on waiting for anything else.
+			cutShort()
+		}
 	})
 	g.launcher(spec.Claim)
 
-	err := failedLaunch(t, g, spec)
+	err := failedLaunchOn(t, g, launching, spec)
 
 	if err == nil || !strings.Contains(err.Error(), "bind its role launchers to the new pod") || !apierrors.IsConflict(err) {
 		t.Fatalf("Spawn = %v, want the launch failed on the binding's conflict", err)

@@ -18,6 +18,7 @@ import {
 } from "./api";
 import {
   barAction,
+  documentEditor,
   documentTransport,
   holdFirstRequest,
   markSpan,
@@ -128,6 +129,10 @@ async function seedAsks(
  */
 const STILL_FRAMES = 10;
 
+/** How many pixels of travel left still read as arrived: sub-pixel layout and a fractional
+ *  scroll offset leave a landing a shade short of its mark. */
+const LANDED_WITHIN_PX = 2;
+
 /**
  * Waits until the landing has stopped moving and reports where it stopped. A link's scroll to
  * its quote is smooth, and the margin corrects its own scroll as it fills in, so the target is
@@ -169,6 +174,52 @@ async function landingSettled(
       }),
     STILL_FRAMES
   );
+}
+
+/**
+ * Waits until the mark a link names has arrived where the document's scroll to it promises to
+ * leave it: centred in every scrollport between it and the page, or at the end of a scroll that
+ * cannot centre it. `focusMark` (`packages/proof-editor/src/lib.ts`) scrolls to the mark with
+ * `scrollIntoView({ behavior: 'smooth', block: 'center' })`, and a smooth scroll the engine has
+ * not begun yet emits no scroll event and moves nothing: stillness reads the same before the
+ * landing starts and after it ends, and a mark already in the viewport reads the same mid-flight.
+ * This is the reading that is true only once the landing has arrived, which is what a row that
+ * acts on the document - a selection, a press on the action bar fixed beside it - needs before
+ * it acts, since a scroll still to come carries both away.
+ */
+async function markLanded(page: Page, markId: string): Promise<void> {
+  await expect
+    .poll(async () =>
+      markSpan(page, markId)
+        .first()
+        .evaluate((element) => {
+          /** How far a scrollport still has to travel to put `offset` at its middle. */
+          const toGo = (scroll: number, limit: number, offset: number) =>
+            Math.abs(Math.min(Math.max(scroll + offset, 0), Math.max(limit, 0)) - scroll);
+          const mark = element.getBoundingClientRect();
+          const middle = mark.top + mark.height / 2;
+          let offBy = toGo(
+            window.scrollY,
+            document.documentElement.scrollHeight - window.innerHeight,
+            middle - window.innerHeight / 2
+          );
+          for (let node = element.parentElement; node !== null; node = node.parentElement) {
+            const overflow = getComputedStyle(node).overflowY;
+            if (overflow !== "auto" && overflow !== "scroll" && overflow !== "overlay") continue;
+            const box = node.getBoundingClientRect();
+            offBy = Math.max(
+              offBy,
+              toGo(
+                node.scrollTop,
+                node.scrollHeight - node.clientHeight,
+                middle - (box.top + node.clientHeight / 2)
+              )
+            );
+          }
+          return offBy;
+        })
+    )
+    .toBeLessThanOrEqual(LANDED_WITHIN_PX);
 }
 
 /** Polls until `inner` has settled wholly inside `outer`'s box - the margin's own scrollport,
@@ -409,7 +460,13 @@ test("a desktop document item link shows its far-away card and its quote", async
 
 // SLOW(>=2s): a long seeded document, the landing scroll settled over it in WebKit and on a
 // phone, and the editor selection that opens the margin's composer.
-test("a composer opened from the document is in the margin's view after a comment link @phone", async ({
+// @webkit @firefox: the landing scroll's own frame order, which is the engine's. Every one of
+// this row's five measured CI failures was in Firefox, where the selection bar - fixed beside a
+// selection the landing had carried off screen - stood above the viewport and no scroll could
+// reach it. The tags are what keeps the row on those engines now that they select rows by tag
+// rather than by file (`firefoxTagged`, `webkitTagged`, `e2e/playwright.config.ts`); without
+// them it would run only where its defect was never seen.
+test("a composer opened from the document is in the margin's view after a comment link @phone @webkit @firefox", async ({
   browser,
 }, testInfo) => {
   const { comment, issue, markId } = await seedLongDocument();
@@ -430,12 +487,26 @@ test("a composer opened from the document is in the margin's view after a commen
     // and bring the form back. Both halves of the landing come first: the card, and the quote
     // the document scrolls to once the editor has projected its mark, which on a loaded machine
     // is later than the card. A selection made before that scroll is carried off screen by it,
-    // and so is the fixed action bar placed beside the selection.
+    // and so is the fixed action bar placed beside the selection - and the quote is in the
+    // viewport both while that scroll is still to come and once it has run, so the mark's
+    // arrival at the place `block: 'center'` promises is what says the document is done moving.
     await expect(card).toBeInViewport();
     await expect(markSpan(page, markId)).toBeInViewport();
+    await markLanded(page, markId);
     await landingSettled(sheet);
 
-    await selectEditorText(page, "Paragraph 2: surrounding context");
+    // The landing leaves this paragraph 921 px above the viewport, and the action bar is
+    // `position: fixed` beside the selection, so a selection made from there puts the bar above
+    // the viewport too - where Playwright's "scroll into view" moves nothing, a fixed element
+    // having nowhere to be scrolled from. What rescued it was never this row: it was
+    // prosemirror-view scrolling to its own selection when `selectEditorText` focuses the
+    // editor, measured here as a single `window.scrollBy(0, -1062)` from `scrollToSelection` on
+    // the DOMObserver's flush, which happens to leave the document's first paragraphs on screen.
+    // A reader drags over text they are looking at, so this row scrolls to the paragraph first
+    // and the bar is beside something on screen however that focus scroll falls.
+    const selected = "Paragraph 2: surrounding context";
+    await documentEditor(page).getByText(selected).scrollIntoViewIfNeeded();
+    await selectEditorText(page, selected);
     await barAction(page, "Comment");
 
     const composer = sheet.locator("[data-margin-composer]");

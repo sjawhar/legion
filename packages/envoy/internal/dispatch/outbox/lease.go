@@ -57,9 +57,10 @@ const (
 	// natsLost: NATS stayed down for natsLossGrace, or a batch's sends failed and the probe of
 	// their connection failed too; the hold is released.
 	natsLost holdEnd = "NATS lost"
-	// holdLost: the hold reported itself lost, its deadline passed during a batch, or a record
-	// found it another's; its release stops its renewal and deletes the row only while it still
-	// names this process, since the name may already be another's.
+	// holdLost: the hold reported itself lost, its deadline had passed when a scan was to start
+	// a batch or when a send of one was to be written, or a record found it another's; its
+	// release stops its renewal and deletes the row only while it still names this process,
+	// since the name may already be another's.
 	holdLost holdEnd = "lost"
 )
 
@@ -345,9 +346,9 @@ func (o *Outbox) publish(ctx context.Context, hold *duty.Hold) holdEnd {
 // client is connected. A scan runs its batches side by side and returns only once every one of
 // them has, so serve answers a lost hold, a disconnection or ctx's end between scans and never
 // while a batch is still sending. It returns why it stopped: ctx ended, the hold was lost or its
-// deadline passed mid-batch, or NATS was lost - down for natsLossGrace without a break and still
-// down when the grace ends, or a batch's sends failed for the connection and a probe of that
-// connection failed too.
+// deadline had passed when a scan was to start a batch or write a send of one, or NATS was lost
+// - down for natsLossGrace without a break and still down when the grace ends, or a batch's
+// sends failed for the connection and a probe of that connection failed too.
 func (o *Outbox) serve(ctx context.Context, hold *duty.Hold) holdEnd {
 	var disconnected, retryTimer *time.Timer
 	var disconnectedFor, retryDue <-chan time.Time
@@ -412,9 +413,9 @@ func (o *Outbox) serve(ctx context.Context, hold *duty.Hold) holdEnd {
 	}
 }
 
-// scanEnd is how a scan ended: fenced, the hold's deadline passed or a record found the hold
-// another's; natsLost, a batch's sends failed for the connection and the probe of it failed;
-// failed, a statement failed.
+// scanEnd is how a scan ended: fenced, the hold's deadline had passed before a batch, a send of
+// one met it, or a record found the hold another's; natsLost, a batch's sends failed for the
+// connection and the probe of it failed; failed, a statement failed.
 type scanEnd struct {
 	fenced, natsLost, failed bool
 }

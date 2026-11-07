@@ -2,6 +2,7 @@ import { expect, type Locator, type Page, test } from "@playwright/test";
 
 import { agentRow, openAgents, plannerSession, seedAgents, shownAgentRows } from "./agents";
 import { createAgentMessage, createMessage, patchIssue } from "./api";
+import { openFromSidebar } from "./editor";
 import { keyedWrite } from "./keyed-writes";
 import { resetDatabase } from "./seed";
 import { holdPosts, MESSAGE_REFUSED, refusePosts } from "./sends";
@@ -14,10 +15,11 @@ import { asUser } from "./users";
 // select from the keyboard, or step one and leave it without Enter, carry `@webkit @firefox`, the
 // tags those two projects select by (`playwright.config.ts`), and they drive keys through
 // `page.keyboard`, which every engine has. Each of the three ways of leaving a select is a row of
-// its own, since each engine takes focus out of a select its own way. Every other row of this
-// file is untagged: what the picker and Reply do with a message on its way to the server, and
-// what a pick dispatched from a script does, are the same in every engine, and Chromium asserts
-// them.
+// its own, since each engine takes focus out of a select its own way. One row more carries
+// `@webkit` alone, for a reason of its own the comment above it gives: the send held across two
+// in-app navigations, whose every measured failure was in WebKit. Every other row of this file
+// is untagged: what the picker and Reply do with a message on its way to the server, and what a
+// pick dispatched from a script does, are the same in every engine, and Chromium asserts them.
 
 test.beforeEach(async () => {
   await resetDatabase();
@@ -903,7 +905,15 @@ test.describe("agents page", () => {
   // A message on its way holds the picker and Reply of the row that sent it, and its draft, until
   // the server answers. A reader who leaves the page mid-send and comes back finds the row holding
   // the same send - the draft, the picker and Reply held - and its answer lands there.
-  test("a row back after the reader left mid-send holds the send it left, which then lands there", async ({
+  // @webkit: a send held open across two in-app navigations, which each engine drives from the
+  // keyboard and through its own router at its own pace. Every one of this row's six measured
+  // failures - one run on each of six branches - was in WebKit, where the `g i` chord's second
+  // key landed after the keymap had dropped the chord and the reader never left the page; the
+  // sidebar's links carry no such deadline (`openFromSidebar`, `e2e/editor.ts`). The tag is what
+  // keeps the row on that engine now that the projects select rows by tag rather than by file
+  // (`webkitTagged`, `e2e/playwright.config.ts`); without it the row would run only where its
+  // defect was never seen.
+  test("a row back after the reader left mid-send holds the send it left, which then lands there @webkit", async ({
     browser,
   }) => {
     const issueKey = await seedAgents();
@@ -931,13 +941,11 @@ test.describe("agents page", () => {
       await expect(toggle).toBeDisabled();
       await expect(reply).toBeDisabled();
 
-      // Away to the Inbox and back, by the global keys, so the app - and the send - stay loaded.
-      await page.locator("body").focus();
-      await page.keyboard.press("g");
-      await page.keyboard.press("i");
+      // Away to the Inbox and back without a reload, so the app - and the send - stay loaded,
+      // by the sidebar's own links, which openFromSidebar explains.
+      await openFromSidebar(page, "Inbox");
       await expect(row).toHaveCount(0);
-      await page.keyboard.press("g");
-      await page.keyboard.press("a");
+      await openFromSidebar(page, "Agents");
       await row.getByRole("button", { exact: true, name: "Planner" }).click();
 
       await expect(field).toBeDisabled();

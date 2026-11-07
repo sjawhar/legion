@@ -20,25 +20,29 @@ const FIXTURE_WINDOW = "from=2024-06-01T00%3A00%3A00Z&to=2024-06-02T00%3A00%3A00
 const DEPLOY_500 = { series: "Deploys", x: 0.15, at: "2024-06-01T01:40:00Z" };
 const FAILURE_501 = { series: "Pipeline failures", x: 0.85, at: "2024-06-01T12:20:00Z" };
 
-/** The page position of a chart point, from ECharts' own coordinate conversion: the chart draws
- *  on a canvas, so a deploy dot or a failure triangle has no element to click. The page loads the
- *  echarts chunk once; importing the same URL here hands back that module, whose
- *  `getInstanceByDom` finds the chart the page made. `x` and `at` name the point; without them it
- *  is the series' first data point (a merge dot's x carries a per-PR jitter). Null until the
- *  chart has painted the series, the moments it holds an instance that has drawn nothing
- *  included: `Timeline.tsx` registers the chart with `echarts.init` in its mount effect and
- *  pushes the first `setOption` from a second effect React runs in a later task, and in between
- *  `getOption()` answers undefined (`this._model && this._model.getOption()`, echarts' own
- *  `core/echarts.js`). A caller polls this function, and a poll fails on a throw rather than
- *  asking again, so that moment has to read as "nothing painted yet". */
-async function shapePosition(
+/** One reading of the chart the page made: where a point of a series stands on the page, and
+ *  whether the chart has taken the size of its host. Both answers come from ECharts' own
+ *  instance, because the chart draws on a canvas and a deploy dot or a failure triangle has no
+ *  element to click: the page loads the echarts chunk once, so importing the same URL here hands
+ *  back that module, whose `getInstanceByDom` finds the chart. `x` and `at` name the point;
+ *  without them it is the series' first data point (a merge dot's x carries a per-PR jitter).
+ *  Null until the chart exists, and `position` is null on its own until the chart has painted
+ *  the series, the moments it holds an instance that has drawn nothing included: `Timeline.tsx`
+ *  registers the chart with `echarts.init` in its mount effect and pushes the first `setOption`
+ *  from a second effect React runs in a later task, and in between `getOption()` answers
+ *  undefined (`this._model && this._model.getOption()`, echarts' own `core/echarts.js`). A
+ *  caller polls this function, and a poll fails on a throw rather than asking again, so those
+ *  moments have to read as "nothing painted yet". */
+async function chartReading(
   page: Page,
   shape: { series: string; x?: number; at?: string }
-): Promise<{ x: number; y: number } | null> {
+): Promise<{ position: { x: number; y: number } | null; tookItsHost: boolean } | null> {
   return page.evaluate(async ({ series, x, at }) => {
     interface Chart {
       convertToPixel: (finder: { seriesName: string }, value: number[]) => number[];
+      getHeight: () => number;
       getOption: () => { series?: { name?: string; data?: { value?: number[] }[] }[] } | undefined;
+      getWidth: () => number;
     }
     const host = document.querySelector<HTMLElement>("[data-testid=delivery-chart]");
     if (host === null) return null;
@@ -56,24 +60,50 @@ async function shapePosition(
       if (chart !== undefined) break;
     }
     if (chart === undefined) return null;
+    const tookItsHost =
+      chart.getWidth() === host.clientWidth && chart.getHeight() === host.clientHeight;
     const painted = chart.getOption()?.series?.find((candidate) => candidate.name === series);
     const first = painted?.data?.[0]?.value;
-    if (first === undefined) return null;
+    if (first === undefined) return { position: null, tookItsHost };
     const value = x !== undefined && at !== undefined ? [x, Date.parse(at)] : first;
     const [px, py] = chart.convertToPixel({ seriesName: series }, value);
-    if (px === undefined || py === undefined) return null;
+    if (px === undefined || py === undefined) return { position: null, tookItsHost };
     const rect = host.getBoundingClientRect();
-    return { x: rect.left + px, y: rect.top + py };
+    return { position: { x: rect.left + px, y: rect.top + py }, tookItsHost };
   }, shape);
 }
 
-/** Opens the seeded timeline and waits for its chart to paint run 500's deploy. On a phone the
- *  facets sit above the chart, so the chart is scrolled into view before anything points at it. */
+/** The page position of a chart point, from ECharts' own coordinate conversion. Null until the
+ *  chart has painted the series the shape names. */
+async function shapePosition(
+  page: Page,
+  shape: { series: string; x?: number; at?: string }
+): Promise<{ x: number; y: number } | null> {
+  return (await chartReading(page, shape))?.position ?? null;
+}
+
+/** Opens the seeded timeline and waits for its chart to paint run 500's deploy and to have taken
+ *  the size of its host, so a position or a page measurement read next is the settled one rather
+ *  than one of a layout still running. On a phone the facets sit above the chart, so the chart is
+ *  scrolled into view before anything points at it.
+ *
+ *  Both are read out of one `chartReading`, the one in-page call that answers them: ECharts
+ *  measures the host once at `echarts.init` and again on every notice its `ResizeObserver` gets,
+ *  and the lane header above it is relaid out from the same `containerWidth` (`Timeline.tsx`), so
+ *  until a pass it owes has run its canvas is drawn to a size the host no longer has, every shape
+ *  on it stands somewhere other than where it will stand, and the page is still being laid out
+ *  around it. The poll's answer names both so a failure says which of the two the chart never
+ *  reached. */
 async function openTimeline(page: Page, query = ""): Promise<void> {
   await page.goto(`/delivery?${FIXTURE_WINDOW}${query}`);
   await expect(page.getByRole("heading", { name: "Delivery timeline" })).toBeVisible();
   await page.getByTestId("delivery-chart").scrollIntoViewIfNeeded();
-  await expect.poll(() => shapePosition(page, DEPLOY_500)).not.toBeNull();
+  await expect
+    .poll(async () => {
+      const reading = await chartReading(page, DEPLOY_500);
+      return { painted: reading?.position != null, tookItsHost: reading?.tookItsHost === true };
+    })
+    .toEqual({ painted: true, tookItsHost: true });
 }
 
 /** Clicks a run's shape, placed again at the moment of the click: a phone's browser can scroll
@@ -254,9 +284,28 @@ test("on a phone a finger dragged along the chart sets a brush window and moves 
 }, testInfo) => {
   test.skip(testInfo.project.name !== "iphone", "a finger drag exercises the phone project");
   await seedDeliveryFixture();
+  // The reconcile pass the server runs on its own five-minute tick (`ReconcileInterval`,
+  // `delivery/reconcile.go`) can land anywhere inside this row: the fake GitHub holds no
+  // installation for acme/widgets, so the pass fails its permission check and
+  // RecordReconcileError writes that failure, which the page's live socket carries to the
+  // freshness rows. Measured with the timeline open and no finger on the page: the `prs` row
+  // grows from `PRs never checked` to that sentence, the Source freshness block rewraps
+  // 56 px -> 96 px, and the page, scrolled to the chart, follows it from 2186 to 2226. Written
+  // here, word for word what that pass writes, so the page the finger meets is already the one
+  // the pass leaves and a pass landing mid-row moves nothing (INFRA-1260).
+  await sql(
+    `UPDATE delivery_settings
+       SET last_error = 'the GitHub App is not installed on acme/widgets'
+     WHERE singleton`
+  );
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
   await openTimeline(page);
+  // The settle `before` is read after: the page's first body already carries that failure, and
+  // this is what says so, rather than the drag being measured against rows still rewrapping.
+  await expect(page.locator('[data-source="prs"]')).toHaveText(
+    /the GitHub App is not installed on acme\/widgets/
+  );
 
   // A real touch through Chromium's Input.dispatchTouchEvent (touch.ts), not page.mouse, which
   // the other rows use on this project too. The finger lands on #1's merge dot, so its first
@@ -273,19 +322,70 @@ test("on a phone a finger dragged along the chart sets a brush window and moves 
   const before = await layout();
   const finger = await pressFinger(page, dot);
   await expect(page.getByText("acme/widgets#1: feat: a shipped widget")).toBeVisible();
-  // The tooltip stays inside the chart: ECharts paints it inside the chart's host, and before the
-  // host's wrapper clipped it, its first frame stood past the viewport's right edge, widening the
-  // page to 462 px and jumping it upward under the finger.
+  // Nothing the touch brings up stands past the viewport's right edge: ECharts paints the
+  // tooltip inside the chart's host, whose wrapper clips it (`Timeline.tsx`), and the rows above
+  // the chart hold their column (`SourceFreshness.tsx`). A phone lays its page out to the widest
+  // thing on it, so one element past that edge widens the whole page and moves it under the
+  // finger. Read once, not polled: a widening of a single frame is the defect, and a poll that
+  // asks again until one sample fits cannot fail for it.
   expect(await layout()).toEqual(before);
   // Up the time axis (later times) from the dot, which sits near the chart's foot.
   await finger.moveTo({ x: dot.x, y: Math.max(box.y + 20, dot.y - box.height * 0.4) }, 8);
   await expect(page.getByTestId("delivery-brush-band")).toBeVisible();
-  // The chart claims the finger (touch-action: none): the page does not scroll under it.
+  // The chart claims the finger: the page neither scrolls nor widens under it. Measured on this
+  // project, the chart's own handlers are what hold it - with `touch-none` taken off
+  // `Timeline.tsx` and the bundle rebuilt, a finger dragged down the chart with 2,226 px of room
+  // above still moved the page 2,226 -> 2,226, while the same drag on the heading moved it
+  // 0 -> 285 - so the class declares the intent and this reading catches a page moving under a
+  // finger that is down, which is what it last failed on (INFRA-1260).
   expect(await layout()).toEqual(before);
   await finger.lift();
 
   await expect(page).toHaveURL(/[?&]ws=.*[?&]we=/);
   await expect(page.getByRole("button", { name: "clear brush window" })).toBeVisible();
+  await context.close();
+});
+
+// Guards `min-w-0` on the freshness row (`SourceFreshness.tsx`): the row's text is one
+// `truncate` line, so a flex item's automatic minimum size is the whole sentence, and without
+// that class a row naming a reconcile error stands past the column and a phone, which lays its
+// page out to its widest content, widens and scrolls the whole page under the reader. The row
+// above carries that failure too, but written before its page opens, so what it reads is a page
+// laid out once around the longest text the rows can carry; here the failure is written while
+// the finger is down, so the rewrap itself happens under the finger and the width is read
+// across it.
+test("on a phone a reconcile error arriving under the finger widens nothing @phone", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "iphone", "a finger on the chart is the phone project's");
+  await seedDeliveryFixture();
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  await openTimeline(page);
+
+  const dot = await shapePosition(page, { series: "PR merges" });
+  if (dot === null) throw new Error("no merge dot painted");
+  // The width alone, not the row above's whole layout: a row that turns red carries a longer
+  // sentence and the freshness rows rewrap, which moves what is under them down and takes the
+  // page's scroll offset with it. Standing past the viewport's right edge is the defect.
+  const width = () => page.evaluate(() => document.documentElement.scrollWidth);
+  const before = await width();
+  const finger = await pressFinger(page, dot);
+  await expect(page.getByText("acme/widgets#1: feat: a shipped widget")).toBeVisible();
+  // The failed pass the desktop freshness row below seeds, written here over the page's live
+  // socket instead: reconcile.go's RecordReconcileError leaves last_reconcile_at set and
+  // last_error naming the failure, and the PRs row carries that name.
+  await sql(
+    `UPDATE delivery_settings
+       SET last_reconcile_at = '2024-06-01T01:00:00Z',
+           last_error = 'the installation lacks Actions: read on acme/widgets'
+     WHERE singleton`
+  );
+  await expect(page.locator('[data-source="prs"]')).toHaveText(
+    /the installation lacks Actions: read on acme\/widgets/
+  );
+  expect(await width()).toBe(before);
+  await finger.lift();
   await context.close();
 });
 
