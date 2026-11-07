@@ -28,6 +28,7 @@ import (
 	"github.com/sjawhar/envoy/internal/cmdtest"
 	"github.com/sjawhar/envoy/internal/dispatch/api/apitest"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/duty"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -113,6 +114,9 @@ type memoryServer struct {
 	output  *lockedBuffer
 	exited  chan struct{}
 	idle    int64
+	// database is the harness's own handle on the database this server serves, which a measured
+	// window takes the block-index lease on (holdBlockIndexLease).
+	database *store.Store
 }
 
 // start starts a Dispatch server on a loopback port the kernel chose and the test holds from that
@@ -148,7 +152,7 @@ func (h *memoryHarness) start(t *testing.T) *memoryServer {
 	}
 	command.Env = append(command.Env, h.env...)
 	held.Pass(command, "DISPATCH_LISTEN_FD")
-	server := &memoryServer{command: command, base: "http://127.0.0.1:" + port, output: &lockedBuffer{}, exited: make(chan struct{})}
+	server := &memoryServer{command: command, base: "http://127.0.0.1:" + port, output: &lockedBuffer{}, exited: make(chan struct{}), database: h.database}
 	command.Stdout, command.Stderr = server.output, server.output
 	err := command.Start()
 	// The server holds its own copy of the socket from here on, so it releases the port when it
@@ -456,6 +460,12 @@ func (p *memoryServer) resident(t *testing.T, field string) int64 {
 // held idle, freshly started, while it ran.
 func (p *memoryServer) peakAboveIdle(t *testing.T, during func()) int64 {
 	t.Helper()
+	// Every measured window goes through here, so the lease is taken here: from before the window
+	// begins to after the peak has been read, which is the whole of what the guard below watches.
+	// The release is deferred, so a window whose own failure ends the test gives the lease back on
+	// the way out and the rows after it measure their windows too.
+	release := p.holdBlockIndexLease(t)
+	defer release()
 	// Writing 5 to clear_refs resets the peak (VmHWM) to the memory resident now.
 	if err := os.WriteFile(fmt.Sprintf("/proc/%d/clear_refs", p.command.Process.Pid), []byte("5"), 0); err != nil {
 		t.Fatalf("reset the server's peak memory: %v", err)
@@ -464,10 +474,12 @@ func (p *memoryServer) peakAboveIdle(t *testing.T, during func()) int64 {
 	during()
 	// A block-index pass reads whole documents of its own, so one inside the window would make the
 	// peak that pass's memory rather than the request's. start leaves nothing owed, and a pass
-	// that finds nothing owed logs nothing, so a clean window holds no such line. One case stays:
-	// a window that itself stores a document of more than 2,000 blocks leaves its index to the
-	// server's next pass, 30 s after start, which is past the end of every window here. The
-	// handler is the slog.NewTextHandler main installs with slog.SetDefault in
+	// that finds nothing owed logs nothing, so a clean window holds no such line. What a drain
+	// taken before the server started cannot cover is a window that fills an owed queue itself -
+	// any window that stores a document - since that row is owed while the measurement runs and
+	// the server's next tick would index it there; the pass is held off for the window's length by
+	// its own lease (holdBlockIndexLease) instead, and this guard stays as the proof that it was.
+	// The handler is the slog.NewTextHandler main installs with slog.SetDefault in
 	// cmd/dispatch/main.go, which writes the message mid-line as msg="dispatch: block index", so
 	// the substring is the match and not a line's prefix.
 	for _, line := range strings.Split(p.output.from(written), "\n") {
@@ -476,6 +488,62 @@ func (p *memoryServer) peakAboveIdle(t *testing.T, during func()) int64 {
 		}
 	}
 	return p.resident(t, "VmHWM") - p.idle
+}
+
+// blockIndexLeaseNamespace is the first key every loop lease is taken under - duty's
+// leaseNamespace, which stays unexported - the four bytes of "LOOP". The second key is the
+// lease's own name, which Postgres hashes with hashtext.
+const blockIndexLeaseNamespace int32 = 0x4C4F4F50
+
+// blockIndexLeaseWait bounds the wait for the lease. A pass reads one batch of each queue it
+// serves and gives the lease back, seconds at most, so this is a hang guard on a wait nothing
+// healthy reaches and not a time the wait is meant to spend: a wait that reaches it means the
+// pass never gave its lease back, and the window cannot be measured with the pass held off.
+const blockIndexLeaseWait = 2 * time.Minute
+
+// holdBlockIndexLease takes the block-index pass's own lease (docs.BlockIndexLease) and answers
+// the call that gives it back. duty.Exclusive takes that lease before every pass and skips the
+// pass where another session holds it, so no block-index pass runs while this test holds it:
+// a window that owes the index of what it just wrote leaves that work to a tick after the lease
+// is given back. It does not replace drainBeforeStart, which clears what was owed before the
+// server started, work the lease only postpones; the two together leave the window clean.
+//
+// The lock belongs to the session that took it, so one connection of the harness's pool takes it,
+// holds it for the window and gives it back (duty.FreeSessionLock, which destroys rather than
+// returns a connection whose unlock failed, since what such a session holds is unknown).
+func (p *memoryServer) holdBlockIndexLease(t *testing.T) func() {
+	t.Helper()
+	ctx := context.Background()
+	conn, err := p.database.Pool.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("take a connection for the block-index lease: %v", err)
+	}
+	deadline := time.Now().Add(blockIndexLeaseWait)
+	for {
+		var held bool
+		if err := conn.QueryRow(ctx, `select pg_try_advisory_lock($1, hashtext($2))`,
+			blockIndexLeaseNamespace, docs.BlockIndexLease).Scan(&held); err != nil {
+			conn.Release()
+			t.Fatalf("take the block-index lease: %v", err)
+		}
+		if held {
+			break
+		}
+		if time.Now().After(deadline) {
+			conn.Release()
+			t.Fatalf("the block-index pass held the %q lease for more than %s, so this window could not be measured with the pass held off:\n%s",
+				docs.BlockIndexLease, blockIndexLeaseWait, p.output.tail())
+		}
+		// pg_try_advisory_lock answers false rather than queueing behind the holder, so a pass
+		// running at this moment is waited out here: it gives the lease back when it ends.
+		time.Sleep(50 * time.Millisecond)
+	}
+	return func() {
+		if err := duty.FreeSessionLock(conn, `select pg_advisory_unlock($1, hashtext($2))`,
+			blockIndexLeaseNamespace, docs.BlockIndexLease); err != nil {
+			t.Errorf("give the block-index lease back: %v", err)
+		}
+	}
 }
 
 type response struct {

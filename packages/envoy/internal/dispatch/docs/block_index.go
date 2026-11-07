@@ -33,10 +33,13 @@ const (
 	BlockIndexReconcileInterval = 30 * time.Second
 )
 
-// blockIndexLease names the lease one block-index tick runs under. The index it writes is the
+// BlockIndexLease names the lease one block-index tick runs under. The index it writes is the
 // same whichever process writes it, so two processes indexing the same batch is work done twice
-// for one result.
-const blockIndexLease = "block-index"
+// for one result. It is exported for the memory harness, which takes this lease itself for the
+// length of each measured window (cmd/dispatch's memoryServer.peakAboveIdle): a pass that ran
+// inside such a window would read whole documents of its own, and the peak measured there would
+// be that pass's memory and not the request's.
+const BlockIndexLease = "block-index"
 
 // BlockIndexCursors is where a tick's keyset reads start, as the tick before it left them
 // (BlockIndexTick.Cursor): the owed documents, and, for each owner kind the window arm walks
@@ -107,7 +110,7 @@ func (s *Service) RunBlockIndexReconciliation(ctx context.Context, leases duty.L
 	// counts (an open issue's document whose live text stays ahead, skipped every tick) logs nothing.
 	var logged BlockIndexTick
 	liveAhead := liveAheadDocuments{}
-	duty.RunLeasedAfterEachPass(ctx, leases, blockIndexLease, BlockIndexReconcileInterval, func(ctx context.Context) time.Duration {
+	duty.RunLeasedAfterEachPass(ctx, leases, BlockIndexLease, BlockIndexReconcileInterval, func(ctx context.Context) time.Duration {
 		var wait time.Duration
 		wait, cursors = s.blockIndexTick(ctx, cursors, liveAhead, &logged)
 		return wait
