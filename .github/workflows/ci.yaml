@@ -2231,11 +2231,26 @@ jobs:
         # repository's own, so a failed pull is a fault of this repository. Show it, do not retry
         # it.
         run: docker pull ghcr.io/cybermonklabs/legion/ci@sha256:5498ba57b9471840be3d15b033a4eec554d1c02fa6c2cc0ca2d888637f6c6e2f
+      # TMPDIR is a directory of this step's own, read by the step below: a test file that leaves
+      # its temporary directory behind is how 7,063 of them gathered on a shared machine
+      # (`packages/envoy-client/test/temp-dir.ts`). It is exported on the command line rather than
+      # set in `env:` so the reading step can name the same path.
       - name: Test Envoy client
-        run: bun run test
+        run: |
+          mkdir -p "$RUNNER_TEMP/envoy-client-tmp"
+          TMPDIR="$RUNNER_TEMP/envoy-client-tmp" bun run test
         working-directory: packages/envoy-client
         env:
           LEGION_E2E: "1"
+      - name: Check the Envoy client suite left no temporary directory behind
+        run: |
+          left=$(ls -A "$RUNNER_TEMP/envoy-client-tmp")
+          if [ -n "$left" ]; then
+            echo "the suite left these in its temporary directory:" >&2
+            printf '%s\n' "$left" >&2
+            exit 1
+          fi
+          echo "the suite left nothing in its temporary directory"
       - name: Build Envoy client
         run: bun run build
         working-directory: packages/envoy-client
