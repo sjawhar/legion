@@ -51,8 +51,9 @@ interface Entry {
   unreadAtOpen: number;
 }
 
-/** One view in the window snapshot below: a word and two numbers, nothing of what was written. */
-interface LiveViewSnapshot {
+/** One view in the window snapshot below: a word and two numbers, nothing of what was written.
+ *  Exported for the browser check's own reader (`e2e/live-views.ts`). */
+export interface LiveViewSnapshot {
   readonly draftChars: number;
   readonly state: LiveViewState;
   readonly unreadAtOpen: number;
@@ -65,6 +66,9 @@ interface LiveViewSnapshot {
  */
 export interface DispatchLiveViews {
   views?: Record<string, LiveViewSnapshot>;
+  /** How many agent subscriptions the page's one live socket holds now
+   *  (`api/live-socket.ts`), which is the live socket's key here, not the registry's. */
+  agentSubscriptions?: number;
   [key: string]: unknown;
 }
 

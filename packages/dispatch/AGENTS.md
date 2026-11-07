@@ -329,6 +329,12 @@ dependency in its body. For the image-pin comparison and `/healthz` deployment e
   a subscription waiting out a backoff included (only the events feed has one, after a refusal or
   an `ended`): Dispatch holds that subscription against `LIVE_SOCKET_MAX_SUBSCRIPTIONS` until an
   unsubscribe arrives, and an unsubscribe for a subscription it does not hold is no error there.
+  Each time an agent subscription is added or dropped the socket writes how many it holds to
+  `window.__dispatchLiveViews.agentSubscriptions` (INFRA-812, D15), the handle whose `views` the
+  live-view registry writes: two owners, one key each, neither touching the other's. It is what a
+  browser check reads to see what an open live view costs, and that a view which sleeps holds
+  none - no subscription is also nothing re-arming the relay's watch for that session, which then
+  lapses (`AGENT_STREAM_WATCH_TTL_MS`). `e2e/live-views.ts` reads it.
   `api/event-feed.ts`'s `useEventFeed` subscribes the `events` view, starts its cursor from
   `whoami.event_head`, which every answer carries (`AuthenticatedUser.event_head` is required: a
   page of this release is served by a server that answers it, since that server also serves the
@@ -1702,6 +1708,16 @@ is skipped. A script that calls `resetDatabase()` beside a broker of its own exp
 itself as well as to `run-server.sh`, since the reset reads it from its own process.
 `e2e/clipboard.ts`'s `recordClipboard(page)` swaps the page's async clipboard for a recorder before
 navigation, so a copy-button test asserts the written value rather than only the `Copied` label.
+`e2e/live-views.ts` reads what the page reports about its live views (INFRA-812, D15):
+`readLiveViews(page)` answers each opened session's state, draft length and unread-at-open count
+together with the live socket's open agent-subscription count, `openAgentSubscriptions(page)` the
+count alone, `drawnLiveViews(page)` locates the mounted views, `heapBytes(page)` the page's heap
+where the browser gives it (Chromium needs `--enable-precise-memory-info` to report a number that
+moves), `watchViewRestore(page, sessionId)` times a sleeping view coming back in the page's own
+clock, and `keepEveryViewAwake(page)` sets `window.__dispatchNoViewSleep` before load, the
+negative control. `e2e/api.ts`'s `seedAgentStreamConversations(ids)` puts a conversation at the
+stream's limit (`AGENT_STREAM_LIMITS.historyMessages` turns filling `historyBytes`) behind each
+session, through the publish test hook.
 `e2e/touch.ts` drives real touch gestures through Chromium's `Input.dispatchTouchEvent`
 (`pressFinger` returns a finger to move and lift; `touchDrag`, `touchHold` and `centerOf` are the
 common shapes): `page.mouse` on a touch context still emits mouse events, which never reach

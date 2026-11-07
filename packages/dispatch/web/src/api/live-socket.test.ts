@@ -1155,6 +1155,33 @@ test("one socket carries a delivery view, the event feed and two agent views", a
   }
 });
 
+// The browser check of what an open live view costs reads this count (D15, INFRA-812): at most
+// two views are mounted, so at most two agent subscriptions are open, and a view that sleeps
+// holds none - which is also what lets the relay's watch for that session lapse.
+test("the socket reports its open agent subscriptions on the handle the registry shares", () => {
+  // The live-view registry's own reading on the same handle is left where it is.
+  window.__dispatchLiveViews = { views: {} };
+  const stopFeed = live.subscribeEvents(eventFeed().handlers);
+  const stopFirst = live.subscribeAgent(SESSION_A, agentView().handlers);
+
+  // The event feed is no agent view: only the agent subscriptions are counted.
+  expect(window.__dispatchLiveViews).toEqual({ agentSubscriptions: 1, views: {} });
+
+  const stopSecond = live.subscribeAgent(SESSION_B, agentView().handlers);
+  expect(window.__dispatchLiveViews?.agentSubscriptions).toBe(2);
+
+  // A view that sleeps unsubscribes, and the count falls with it.
+  stopFirst();
+  expect(window.__dispatchLiveViews?.agentSubscriptions).toBe(1);
+  stopSecond();
+  stopFirst();
+  expect(window.__dispatchLiveViews?.agentSubscriptions).toBe(0);
+
+  stopFeed();
+  live.close();
+  expect(window.__dispatchLiveViews).toEqual({ agentSubscriptions: 0, views: {} });
+});
+
 test("an agent error frame reaches onUnavailable and is not retried", () => {
   jest.useFakeTimers();
   const agent = agentView();
